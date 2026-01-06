@@ -1,6 +1,6 @@
 [package]
 name = "claw-hooks"
-version = "0.1.0"
+version = "26.1.100"
 edition = "2021"
 rust-version = "1.75"
 authors = ["claw-hooks contributors"]
@@ -25,11 +25,11 @@ thiserror = "2.0.17"
 anyhow = "1.0.100"
 
 [dependencies.tree-sitter]
-version = "0.26.3"
+version = "26.1.100"
 optional = true
 
 [dependencies.tree-sitter-bash]
-version = "0.25.1"
+version = "26.1.100"
 optional = true
 
 [features]

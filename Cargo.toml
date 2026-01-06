@@ -17,7 +17,7 @@ serde_json = "1.0.148"
 toml = "0.9.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "local-time"] }
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+time = { version = "0.3.44", features = ["formatting", "local-offset", "macros"] }
 tracing-appender = "0.2.4"
 dirs = "6.0.0"
 regex = "1.12.2"

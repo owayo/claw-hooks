@@ -25,11 +25,11 @@ thiserror = "2.0.17"
 anyhow = "1.0.100"
 
 [dependencies.tree-sitter]
-version = "26.1.100"
+version = "0.26.3"
 optional = true
 
 [dependencies.tree-sitter-bash]
-version = "26.1.100"
+version = "0.25.1"
 optional = true
 
 [features]

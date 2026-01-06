@@ -60,7 +60,8 @@ jobs:
           NEW_VERSION="${YEAR}.${MONTH}.${NEW_COUNTER}"
           echo "New version: ${NEW_VERSION}"
 
-          sed -i "s/^version = \"[^\"]*\"/version = \"${NEW_VERSION}\"/" Cargo.toml
+          # Only replace the first occurrence (package version, not dependency versions)
+          sed -i "0,/^version = \"[^\"]*\"/s//version = \"${NEW_VERSION}\"/" Cargo.toml
 
           if [ -f "Cargo.lock" ]; then
             cargo generate-lockfile 2>/dev/null || true

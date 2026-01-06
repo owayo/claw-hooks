@@ -1,4 +1,8 @@
-<h1 align="center">🦀 claw-hooks</h1>
+<p align="center">
+  <img src="docs/images/app.png" width="128" alt="claw-hooks">
+</p>
+
+<h1 align="center">claw-hooks</h1>
 
 <p align="center">
   Simple TOML hooks for Claude Code, Cursor, Windsurf - Command blocking, auto-formatting, notifications

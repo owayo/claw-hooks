@@ -1,4 +1,8 @@
-<h1 align="center">🦀 claw-hooks</h1>
+<p align="center">
+  <img src="docs/images/app.png" width="128" alt="claw-hooks">
+</p>
+
+<h1 align="center">claw-hooks</h1>
 
 <p align="center">
   シンプルなTOML設定でClaude Code・Cursor・Windsurfに対応 - コマンドブロック、自動フォーマット、通知

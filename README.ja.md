@@ -29,13 +29,14 @@
 
 ## 機能
 
+- 🦀 **Rust製** - 低オーバーヘッド、軽量シングルバイナリ、超高速（起動<10ms）
 - ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、bash -c、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行
-- 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知音、クリーンアップ等）
+- 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurfに対応
 
 ## なぜ claw-hooks？
@@ -337,10 +338,10 @@ claw-hooks hook --config /path/to/config.toml
       { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ],
     "post_write_code": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": false }
+      { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ],
     "post_cascade_response": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": false }
+      { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ]
   }
 }

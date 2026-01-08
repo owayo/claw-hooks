@@ -29,13 +29,14 @@
 
 ## Features
 
+- 🦀 **Built with Rust** - Low overhead, lightweight single binary, blazing fast (<10ms startup)
 - ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications
-- 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, sounds, cleanup)
+- 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, and Windsurf
 
 ## Why claw-hooks?
@@ -337,10 +338,10 @@ Add to `~/.codeium/windsurf/hooks.json` (user) or `.windsurf/hooks.json` (projec
       { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ],
     "post_write_code": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": false }
+      { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ],
     "post_cascade_response": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": false }
+      { "command": "claw-hooks hook --format windsurf", "show_output": true }
     ]
   }
 }

@@ -97,8 +97,8 @@ impl ExtensionHookFilter {
         let (program, args_before, args_after) = Self::parse_command_template(command_template)?;
 
         debug!(
-            "Executing extension hook: {} {:?} [file] {:?}",
-            program, args_before, args_after
+            "Executing extension hook: {} {:?} {} {:?}",
+            program, args_before, file_path, args_after
         );
 
         // Build command with file path as a separate, properly escaped argument

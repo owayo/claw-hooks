@@ -5,7 +5,7 @@ use crate::domain::parser::ShellParser;
 use crate::domain::{Decision, HookInput, ToolInput};
 
 /// Default message for kill blocking (generic, can be customized via config).
-const DEFAULT_KILL_MESSAGE: &str = "🚫 kill/pkill/killall command blocked for safety. Configure kill_block_message in config.toml to customize this message.";
+const DEFAULT_KILL_MESSAGE: &str = "🚫 kill/pkill/killall command blocked for safety. Use safe-kill: safe-kill <PID>, safe-kill -N <name>, or safe-kill -p <port>.";
 
 /// Filter for blocking kill-related commands.
 pub struct KillFilter {

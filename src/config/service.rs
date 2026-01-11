@@ -93,7 +93,7 @@ rm_block_message = "🚫 Use safe-rm instead: safe-rm <file> (validates Git stat
 kill_block = true
 # Custom message for kill blocking (recommended: use with safe-kill)
 # safe-kill: https://github.com/owayo/safe-kill
-kill_block_message = "🚫 Use safe-kill instead: safe-kill <PID> or safe-kill -n <name> (like pkill). Use -s <signal> for signal."
+kill_block_message = "🚫 Use safe-kill instead: safe-kill <PID>, safe-kill -N <name> (pkill-style), or safe-kill -p <port>. Use -s <signal> for signal."
 
 # Enable blocking of dd command (default: true)
 dd_block = true

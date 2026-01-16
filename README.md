@@ -565,9 +565,7 @@ graph LR
 
 | Metric | Value |
 |--------|-------|
-| Binary size | ~2.5MB (stripped, LTO) |
 | Startup time | <10ms |
-| Memory | <5MB |
 
 ## Development
 

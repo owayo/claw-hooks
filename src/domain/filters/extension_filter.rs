@@ -8,6 +8,18 @@ use tracing::{debug, warn};
 use super::Filter;
 use crate::domain::{Decision, HookInput, ToolInput};
 
+/// Parsed command template result.
+struct ParsedCommand {
+    /// The command/program to execute
+    program: String,
+    /// Arguments before the file placeholder
+    args_before: Vec<String>,
+    /// Arguments after the file placeholder
+    args_after: Vec<String>,
+    /// If {file} appears inline (e.g., --file={file}), the template token
+    inline_template: Option<String>,
+}
+
 /// Filter for extension-based hooks.
 pub struct ExtensionHookFilter {
     /// Map of extension -> commands (e.g., ".go" -> ["gofmt -w {file}", "golangci-lint run {file}"])
@@ -55,28 +67,32 @@ impl ExtensionHookFilter {
         Ok(())
     }
 
-    /// Parse command template and return (program, args_before_file, args_after_file).
-    /// Handles {file} placeholder safely.
-    fn parse_command_template(
-        template: &str,
-    ) -> Result<(String, Vec<String>, Vec<String>), String> {
-        let parts: Vec<&str> = template.split_whitespace().collect();
+    /// Parse command template and return structured result.
+    /// Handles {file} placeholder safely, including inline patterns like --file={file}.
+    fn parse_command_template(template: &str) -> Result<ParsedCommand, String> {
+        let parts = crate::domain::parse_shell_tokens(template);
         if parts.is_empty() {
             return Err("Empty command template".to_string());
         }
 
-        let program = parts[0].to_string();
+        let program = parts[0].clone();
         let mut args_before = Vec::new();
         let mut args_after = Vec::new();
         let mut found_placeholder = false;
+        let mut inline_template: Option<String> = None;
 
         for part in parts.iter().skip(1) {
             if *part == "{file}" {
+                // Standalone {file} placeholder
                 found_placeholder = true;
+            } else if part.contains("{file}") {
+                // Inline placeholder like --file={file}
+                found_placeholder = true;
+                inline_template = Some(part.clone());
             } else if found_placeholder {
-                args_after.push(part.to_string());
+                args_after.push(part.clone());
             } else {
-                args_before.push(part.to_string());
+                args_before.push(part.clone());
             }
         }
 
@@ -84,7 +100,12 @@ impl ExtensionHookFilter {
             return Err("Command template must contain {file} placeholder".to_string());
         }
 
-        Ok((program, args_before, args_after))
+        Ok(ParsedCommand {
+            program,
+            args_before,
+            args_after,
+            inline_template,
+        })
     }
 
     /// Execute a single command safely.
@@ -94,16 +115,7 @@ impl ExtensionHookFilter {
         Self::validate_file_path(file_path)?;
 
         // Parse command template
-        let (program, args_before, args_after) = Self::parse_command_template(command_template)?;
-
-        debug!(
-            "Executing extension hook: {} {:?} {} {:?}",
-            program, args_before, file_path, args_after
-        );
-
-        // Build command with file path as a separate, properly escaped argument
-        let mut cmd = Command::new(&program);
-        cmd.args(&args_before);
+        let parsed = Self::parse_command_template(command_template)?;
 
         // For tools that might interpret - as flag, use -- to signal end of options
         // or prefix with ./ for relative paths starting with special chars
@@ -113,8 +125,30 @@ impl ExtensionHookFilter {
         } else {
             file_path.to_string()
         };
-        cmd.arg(&safe_path);
-        cmd.args(&args_after);
+
+        debug!(
+            "Executing extension hook: {} {:?} {} {:?} inline={:?}",
+            parsed.program,
+            parsed.args_before,
+            safe_path,
+            parsed.args_after,
+            parsed.inline_template
+        );
+
+        // Build command with file path as a separate, properly escaped argument
+        let mut cmd = Command::new(&parsed.program);
+        cmd.args(&parsed.args_before);
+
+        if let Some(ref template) = parsed.inline_template {
+            // Handle inline template like --file={file}
+            let arg = template.replace("{file}", &safe_path);
+            cmd.arg(&arg);
+        } else {
+            // Standalone {file} placeholder
+            cmd.arg(&safe_path);
+        }
+
+        cmd.args(&parsed.args_after);
 
         let output = cmd
             .output()

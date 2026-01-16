@@ -50,6 +50,7 @@ impl HookService {
             // SECURITY: Use fail-closed - block when no input received
             let output_json = self.adapter.format_error("No input received from stdin");
             writeln!(stdout, "{}", output_json)?;
+            stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
             process::exit(self.adapter.error_exit_code());
         }
 
@@ -65,6 +66,7 @@ impl HookService {
                 // SECURITY: Use fail-closed exit code (2 = block)
                 let output_json = self.adapter.format_error(&error_msg);
                 writeln!(stdout, "{}", output_json)?;
+                stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
                 process::exit(self.adapter.error_exit_code());
             }
         };
@@ -77,6 +79,7 @@ impl HookService {
         let output_json = self.adapter.format_output(&decision)?;
         info!("Output: {}", output_json);
         writeln!(stdout, "{}", output_json)?;
+        stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
 
         process::exit(exit_code);
     }

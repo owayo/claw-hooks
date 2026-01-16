@@ -21,3 +21,5 @@ pub use error::ClawError;
 
 #[allow(unused)]
 pub use types::{BashInput, FileOperationInput, HookOutput, StopInput};
+
+pub use parser::parse_shell_tokens;

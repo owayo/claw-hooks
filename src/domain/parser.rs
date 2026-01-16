@@ -55,10 +55,9 @@ impl ShellParser {
 
         let root = tree.root_node();
         let mut commands = Vec::new();
+        // Now handles wrappers and subshells directly within extract_commands_from_node
+        // using AST-based argument extraction instead of string search
         self.extract_commands_from_node(root, command, &mut commands);
-
-        // Handle wrappers and subshells for extracted commands
-        self.process_wrappers_and_subshells(command, &mut commands);
 
         commands
     }
@@ -70,13 +69,42 @@ impl ShellParser {
 
     /// Extract commands from AST node recursively
     #[cfg(feature = "ast-parser")]
-    fn extract_commands_from_node(&self, node: Node, source: &str, commands: &mut Vec<String>) {
+    fn extract_commands_from_node(&mut self, node: Node, source: &str, commands: &mut Vec<String>) {
         match node.kind() {
             "command" | "simple_command" => {
                 // Find the command_name child
                 if let Some(cmd_name) = self.get_command_name(node, source) {
                     if !cmd_name.is_empty() {
-                        commands.push(cmd_name);
+                        commands.push(cmd_name.clone());
+                    }
+
+                    // Get arguments for further processing
+                    let args = self.get_command_arguments(node, source);
+
+                    // Handle command wrappers at AST level (sudo, env, etc.)
+                    if COMMAND_WRAPPERS.contains(&cmd_name.as_str()) {
+                        self.process_wrapper_args(&args, commands);
+                    }
+
+                    // Handle shell -c "command" at AST level
+                    if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+                        if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
+                            let nested = self.extract_commands(&shell_cmd);
+                            for nested_cmd in nested {
+                                if !commands.contains(&nested_cmd) {
+                                    commands.push(nested_cmd);
+                                }
+                            }
+                        }
+                    }
+
+                    // Handle xargs at AST level
+                    if cmd_name == "xargs" {
+                        if let Some(xargs_cmd) = Self::extract_xargs_from_args(&args) {
+                            if !commands.contains(&xargs_cmd) {
+                                commands.push(xargs_cmd);
+                            }
+                        }
                     }
                 }
                 // Also recurse into children to find command substitutions in arguments
@@ -98,6 +126,50 @@ impl ShellParser {
                 }
             }
         }
+    }
+
+    /// Get command arguments from AST node (excludes the command name itself)
+    #[cfg(feature = "ast-parser")]
+    fn get_command_arguments(&self, node: Node, source: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut found_command_name = false;
+
+        for child in node.children(&mut node.walk()) {
+            match child.kind() {
+                "command_name" => {
+                    found_command_name = true;
+                }
+                "word" | "string" | "raw_string" | "simple_expansion" | "expansion"
+                | "concatenation" => {
+                    if found_command_name {
+                        let text = source[child.byte_range()]
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string();
+                        args.push(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        args
+    }
+
+    /// Extract command from shell -c arguments
+    #[cfg(feature = "ast-parser")]
+    fn extract_shell_c_from_args(args: &[String]) -> Option<String> {
+        for (i, arg) in args.iter().enumerate() {
+            if arg == "-c" && i + 1 < args.len() {
+                return Some(args[i + 1].clone());
+            }
+        }
+        None
+    }
+
+    /// Extract command from xargs arguments
+    #[cfg(feature = "ast-parser")]
+    fn extract_xargs_from_args(args: &[String]) -> Option<String> {
+        args.iter().find(|arg| !arg.starts_with('-')).cloned()
     }
 
     /// Get command name from a command node
@@ -138,88 +210,12 @@ impl ShellParser {
         None
     }
 
-    /// Process wrappers (sudo, env, etc.) and subshells (bash -c, etc.)
-    /// Uses iterative approach to handle nested wrappers (e.g., sudo bash -c 'rm')
-    #[cfg(feature = "ast-parser")]
-    fn process_wrappers_and_subshells(&mut self, command: &str, commands: &mut Vec<String>) {
-        let mut processed = std::collections::HashSet::new();
-
-        // Iterate until no new commands are added
-        loop {
-            let current_commands = commands.clone();
-            let initial_len = commands.len();
-
-            for cmd in &current_commands {
-                // Skip already processed commands
-                if processed.contains(cmd) {
-                    continue;
-                }
-                processed.insert(cmd.clone());
-
-                // Handle command wrappers
-                if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
-                    let args = self.extract_args_after_command(command, cmd);
-                    self.process_wrapper_args(&args, commands);
-                }
-
-                // Handle shell -c "command"
-                if SHELL_COMMANDS.contains(&cmd.as_str()) {
-                    if let Some(shell_cmd) = self.extract_shell_c_command(command, cmd) {
-                        let nested = self.extract_commands(&shell_cmd);
-                        for nested_cmd in nested {
-                            if !commands.contains(&nested_cmd) {
-                                commands.push(nested_cmd);
-                            }
-                        }
-                    }
-                }
-
-                // Handle xargs
-                if cmd == "xargs" {
-                    if let Some(xargs_cmd) = self.extract_xargs_command(command) {
-                        if !commands.contains(&xargs_cmd) {
-                            commands.push(xargs_cmd);
-                        }
-                    }
-                }
-            }
-
-            // Stop if no new commands were added
-            if commands.len() == initial_len {
-                break;
-            }
-        }
-    }
-
-    /// Extract arguments after a specific command in the source
-    /// Returns the wrapped command as the first element, followed by its args
-    #[cfg(feature = "ast-parser")]
-    fn extract_args_after_command(&self, source: &str, cmd: &str) -> Vec<String> {
-        // Find position of the target command
-        if let Some(pos) = source.find(cmd) {
-            let after_cmd = &source[pos + cmd.len()..];
-            let trimmed = after_cmd.trim_start();
-
-            // Use fallback parser for argument extraction
-            // This returns (first_word, remaining_args)
-            let (wrapped_cmd, args) = self.extract_command_with_args_fallback(trimmed);
-
-            // Return wrapped command as first element, followed by its args
-            let mut result = Vec::new();
-            if !wrapped_cmd.is_empty() {
-                result.push(wrapped_cmd);
-            }
-            result.extend(args);
-            return result;
-        }
-        Vec::new()
-    }
-
     /// Process wrapper arguments to find the actual command
+    /// Recursively handles nested wrappers (e.g., sudo bash -c 'rm')
     #[cfg(feature = "ast-parser")]
-    fn process_wrapper_args(&self, args: &[String], commands: &mut Vec<String>) {
+    fn process_wrapper_args(&mut self, args: &[String], commands: &mut Vec<String>) {
         let mut skip_next = false;
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             if skip_next {
                 skip_next = false;
                 continue;
@@ -237,27 +233,29 @@ impl ShellParser {
             if !commands.contains(arg) {
                 commands.push(arg.clone());
             }
+
+            // Get remaining arguments after this command
+            let remaining_args: Vec<String> = args[i + 1..].to_vec();
+
+            // If the found command is a shell, check for -c argument
+            if SHELL_COMMANDS.contains(&arg.as_str()) {
+                if let Some(shell_cmd) = Self::extract_shell_c_from_args(&remaining_args) {
+                    let nested = self.extract_commands(&shell_cmd);
+                    for nested_cmd in nested {
+                        if !commands.contains(&nested_cmd) {
+                            commands.push(nested_cmd);
+                        }
+                    }
+                }
+            }
+
+            // If the found command is also a wrapper, process its remaining args
+            if COMMAND_WRAPPERS.contains(&arg.as_str()) {
+                self.process_wrapper_args(&remaining_args, commands);
+            }
+
             break;
         }
-    }
-
-    /// Extract command from shell -c "command" pattern
-    #[cfg(feature = "ast-parser")]
-    fn extract_shell_c_command(&self, source: &str, shell: &str) -> Option<String> {
-        let args = self.extract_args_after_command(source, shell);
-        for (i, arg) in args.iter().enumerate() {
-            if arg == "-c" && i + 1 < args.len() {
-                return Some(args[i + 1].clone());
-            }
-        }
-        None
-    }
-
-    /// Extract command from xargs
-    #[cfg(feature = "ast-parser")]
-    fn extract_xargs_command(&self, source: &str) -> Option<String> {
-        let args = self.extract_args_after_command(source, "xargs");
-        args.into_iter().find(|arg| !arg.starts_with('-'))
     }
 
     /// Flags that take an argument (value) for common wrappers
@@ -450,6 +448,57 @@ impl Default for ShellParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Parse a command string into tokens, respecting shell quoting rules.
+/// This is a standalone function that can be used without creating a ShellParser.
+///
+/// # Examples
+/// ```
+/// let tokens = parse_shell_tokens("echo 'hello world'");
+/// assert_eq!(tokens, vec!["echo", "hello world"]);
+/// ```
+pub fn parse_shell_tokens(command: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape_next = false;
+
+    for c in command.trim().chars() {
+        if escape_next {
+            current.push(c);
+            escape_next = false;
+            continue;
+        }
+
+        match c {
+            '\\' if !in_single_quote => {
+                escape_next = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    parts
 }
 
 #[cfg(test)]

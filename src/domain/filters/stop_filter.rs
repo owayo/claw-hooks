@@ -19,13 +19,14 @@ impl StopHookFilter {
     }
 
     /// Execute a stop hook command safely.
+    /// Uses shell-aware tokenizer to properly handle quoted arguments.
     fn execute_hook(&self, hook: &StopHook) -> Result<(), String> {
-        let parts: Vec<&str> = hook.command.split_whitespace().collect();
+        let parts = crate::domain::parse_shell_tokens(&hook.command);
         if parts.is_empty() {
             return Err("Empty command".to_string());
         }
 
-        let program = parts[0];
+        let program = &parts[0];
         let args = &parts[1..];
 
         debug!("Executing stop hook: {} {:?}", program, args);

@@ -269,7 +269,7 @@ jobs:
         with:
           app_id: ${{ secrets.APP_ID }}
           private_key: ${{ secrets.PRIVATE_KEY }}
-          repositories: homebrew-claw-hooks
+          repositories: '["homebrew-claw-hooks"]'
 
       - name: Download and Calculate SHA256
         id: sha256

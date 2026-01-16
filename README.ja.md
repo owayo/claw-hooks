@@ -519,7 +519,7 @@ graph LR
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
     end
-    CH2[🔧 フォーマッター・リンター実行]
+    CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2

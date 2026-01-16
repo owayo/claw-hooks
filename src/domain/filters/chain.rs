@@ -35,9 +35,26 @@ impl FilterChain {
 
         // Add custom filters
         for custom in &config.custom_filters {
-            if let Ok(filter) = CustomCommandFilter::new(&custom.command, custom.message.clone()) {
-                filters.push(Box::new(filter));
-            }
+            let filter: Box<dyn Filter> = if custom.args.is_empty() {
+                // Regex mode: command is treated as regex pattern
+                if let Ok(f) = CustomCommandFilter::new(&custom.command, custom.message.clone()) {
+                    Box::new(f)
+                } else {
+                    continue;
+                }
+            } else {
+                // Args mode: regex command name + args matching
+                if let Ok(f) = CustomCommandFilter::with_args(
+                    &custom.command,
+                    custom.args.clone(),
+                    custom.message.clone(),
+                ) {
+                    Box::new(f)
+                } else {
+                    continue;
+                }
+            };
+            filters.push(filter);
         }
 
         // Add extension hook filter

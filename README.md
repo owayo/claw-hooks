@@ -370,21 +370,29 @@ debug = false
 
 # Custom command filters (regex supported)
 [[custom_filters]]
-command = "python"
-message = "Use `uv` instead of `python`"
-
-[[custom_filters]]
 command = "yarn"
 message = "Use `pnpm` instead of `yarn`"
 
-# Regex examples
+# Args mode: command (regex) + args matching
 [[custom_filters]]
-command = "^pip3?$"                    # Match pip or pip3
+command = "npm"
+args = ["install", "i", "add"]         # Blocks: npm install, npm i, npm add
+message = "Use `pnpm` instead of `npm`"
+
+[[custom_filters]]
+command = "pip3?"                       # Regex: matches pip or pip3
+args = ["install", "uninstall"]
+message = "Use `uv pip` instead"
+
+# Regex-only mode (when args is not specified)
+[[custom_filters]]
+command = "python[23]? -m pip"         # More complex patterns
 message = "Use `uv pip` instead"
 
 [[custom_filters]]
-command = "npm (install|i|add)"        # Match npm install/i/add
-message = "Use `pnpm` instead of `npm`"
+command = "docker"
+args = ["rm", "rmi", "system prune"]   # Blocks: docker rm, docker rmi
+message = "Ask the user to run this command manually"
 
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
@@ -406,7 +414,31 @@ command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS notification sound
 
 ### Custom Filter Behavior
 
-Custom filters detect commands even when chained with `;`, `&&`, `||`, or `|`:
+Custom filters support two modes:
+
+**Regex mode** (default): When only `command` is specified, it's treated as a regex pattern.
+
+```toml
+[[custom_filters]]
+command = "python[23]? -m pip"    # Complex regex pattern
+message = "Use uv pip instead"
+```
+
+**Args mode**: When `args` is specified, `command` is treated as a regex pattern (matched against the command name) and any of the args triggers the filter.
+
+```toml
+[[custom_filters]]
+command = "npm"                    # Regex pattern for command name
+args = ["install", "i", "add"]     # First argument must match one of these
+message = "Use pnpm instead"
+
+[[custom_filters]]
+command = "pip3?"                  # Matches both pip and pip3
+args = ["install", "uninstall"]    # First argument must match one of these
+message = "Use uv pip instead"
+```
+
+Both modes detect commands even when chained with `;`, `&&`, `||`, or `|`:
 
 ```bash
 # Blocked: yarn is detected after semicolon

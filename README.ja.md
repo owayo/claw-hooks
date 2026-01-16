@@ -370,21 +370,29 @@ debug = false
 
 # カスタムコマンドフィルター（正規表現対応）
 [[custom_filters]]
-command = "python"
-message = "`python`の代わりに`uv`を使用してください"
-
-[[custom_filters]]
 command = "yarn"
 message = "`yarn`の代わりに`pnpm`を使用してください"
 
-# 正規表現の例
+# argsモード: コマンド（正規表現） + 引数マッチング
 [[custom_filters]]
-command = "^pip3?$"                    # pip または pip3 にマッチ
+command = "npm"
+args = ["install", "i", "add"]         # ブロック対象: npm install, npm i, npm add
+message = "`npm`の代わりに`pnpm`を使用してください"
+
+[[custom_filters]]
+command = "pip3?"                       # 正規表現: pip または pip3 にマッチ
+args = ["install", "uninstall"]
+message = "`uv pip`を使用してください"
+
+# 正規表現のみモード（argsを指定しない場合）
+[[custom_filters]]
+command = "python[23]? -m pip"         # より複雑なパターン
 message = "`uv pip`を使用してください"
 
 [[custom_filters]]
-command = "npm (install|i|add)"        # npm install/i/add にマッチ
-message = "`npm`の代わりに`pnpm`を使用してください"
+command = "docker"
+args = ["rm", "rmi", "system prune"]   # ブロック対象: docker rm, docker rmi
+message = "ユーザーに直接実行を依頼してください"
 
 # 拡張子フック（ファイル書き込み/編集時にトリガー）
 # マップ形式: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
@@ -406,7 +414,31 @@ command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS通知音
 
 ### カスタムフィルターの動作
 
-カスタムフィルターは `;`、`&&`、`||`、`|` でチェーンされたコマンドも検出します:
+カスタムフィルターは2つのモードをサポートしています:
+
+**正規表現モード**（デフォルト）: `command`のみ指定した場合、正規表現パターンとして扱われます。
+
+```toml
+[[custom_filters]]
+command = "python[23]? -m pip"    # 複雑な正規表現パターン
+message = "uv pipを使用してください"
+```
+
+**argsモード**: `args`を指定した場合、`command`は正規表現パターンとしてコマンド名に対してマッチされ、argsのいずれかにマッチするとフィルターが発動します。
+
+```toml
+[[custom_filters]]
+command = "npm"                    # 正規表現パターン（コマンド名）
+args = ["install", "i", "add"]     # 第1引数がこれらのいずれかにマッチ
+message = "pnpmを使用してください"
+
+[[custom_filters]]
+command = "pip3?"                  # pip と pip3 両方にマッチ
+args = ["install", "uninstall"]    # 第1引数がこれらのいずれかにマッチ
+message = "uv pipを使用してください"
+```
+
+両モードとも `;`、`&&`、`||`、`|` でチェーンされたコマンドも検出します:
 
 ```bash
 # ブロック: セミコロンの後の yarn を検出

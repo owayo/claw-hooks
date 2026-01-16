@@ -110,12 +110,18 @@ debug = false
 # Custom command filters
 # Block specific commands and suggest alternatives
 # [[custom_filters]]
-# command = "npm (install|i|add)"
-# message = "Use `pnpm` instead of `npm`"
+# command = "npm"
+# args = ["install", "i", "add"]         # Blocks: npm install, npm i, npm add
+# message = "⚠️ Use `pnpm` instead of `npm`"
 
 # [[custom_filters]]
 # command = "yarn"
 # message = "⚠️ Use `pnpm` instead of `yarn`"
+
+# [[custom_filters]]
+# command = "pip3?"                       # Regex: matches pip or pip3
+# args = ["install", "uninstall"]
+# message = "Use `uv pip` instead"
 
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified

@@ -75,10 +75,36 @@ impl Config {
 }
 
 /// Custom command filter configuration.
+///
+/// Two modes are supported:
+/// 1. Regex mode: Only `command` field is set (regex pattern)
+/// 2. Args mode: Both `command` and `args` fields are set (exact command + args matching)
+///
+/// # Examples
+///
+/// Regex mode:
+/// ```toml
+/// [[custom_filters]]
+/// command = "npm (install|i|add)"
+/// message = "Use pnpm instead"
+/// ```
+///
+/// Args mode:
+/// ```toml
+/// [[custom_filters]]
+/// command = "npm"
+/// args = ["install", "i", "add"]
+/// message = "Use pnpm instead"
+/// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomFilter {
-    /// Command pattern to match (regex supported)
+    /// Command name (exact match when `args` is specified) or regex pattern
     pub command: String,
+
+    /// Optional list of arguments to match (any match triggers the filter)
+    /// When specified, `command` is treated as exact match, not regex
+    #[serde(default)]
+    pub args: Vec<String>,
 
     /// Message to display when command is blocked
     pub message: String,

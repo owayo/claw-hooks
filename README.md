@@ -211,6 +211,12 @@ Configure once:
 
 ## Installation
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install owayo/claw-hooks/claw-hooks
+```
+
 ### From Source
 
 ```bash

@@ -211,6 +211,12 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ## インストール
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install owayo/claw-hooks/claw-hooks
+```
+
 ### ソースから
 
 ```bash

@@ -113,6 +113,12 @@ jobs:
 
             ### Installation
 
+            #### Homebrew (macOS/Linux)
+            ```bash
+            brew install owayo/claw-hooks/claw-hooks
+            ```
+
+            #### Manual Download
             Download the appropriate binary for your platform and add it to your PATH.
 
             #### macOS (Apple Silicon)
@@ -250,3 +256,116 @@ jobs:
           echo "  - claw-hooks-x86_64-apple-darwin.tar.gz"
           echo "  - claw-hooks-aarch64-apple-darwin.tar.gz"
           echo "  - claw-hooks-x86_64-pc-windows-msvc.zip"
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: [prepare-release, build-and-upload]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.PRIVATE_KEY }}
+          repositories: homebrew-claw-hooks
+
+      - name: Download and Calculate SHA256
+        id: sha256
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          TAG="${{ needs.prepare-release.outputs.tag }}"
+
+          # Download tarballs and calculate SHA256
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz" -o arm64.tar.gz
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz" -o x86_64.tar.gz
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-unknown-linux-gnu.tar.gz" -o linux_x86_64.tar.gz
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-unknown-linux-gnu.tar.gz" -o linux_arm64.tar.gz
+
+          SHA256_ARM64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)
+          SHA256_X86_64=$(sha256sum x86_64.tar.gz | cut -d' ' -f1)
+          SHA256_LINUX_X86_64=$(sha256sum linux_x86_64.tar.gz | cut -d' ' -f1)
+          SHA256_LINUX_ARM64=$(sha256sum linux_arm64.tar.gz | cut -d' ' -f1)
+
+          echo "sha256_arm64=${SHA256_ARM64}" >> $GITHUB_OUTPUT
+          echo "sha256_x86_64=${SHA256_X86_64}" >> $GITHUB_OUTPUT
+          echo "sha256_linux_x86_64=${SHA256_LINUX_X86_64}" >> $GITHUB_OUTPUT
+          echo "sha256_linux_arm64=${SHA256_LINUX_ARM64}" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew Formula
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          TAG="${{ needs.prepare-release.outputs.tag }}"
+          SHA256_ARM64="${{ steps.sha256.outputs.sha256_arm64 }}"
+          SHA256_X86_64="${{ steps.sha256.outputs.sha256_x86_64 }}"
+          SHA256_LINUX_X86_64="${{ steps.sha256.outputs.sha256_linux_x86_64 }}"
+          SHA256_LINUX_ARM64="${{ steps.sha256.outputs.sha256_linux_arm64 }}"
+
+          # Clone homebrew tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/owayo/homebrew-claw-hooks.git"
+          cd homebrew-claw-hooks
+
+          # Create Formula directory if not exists
+          mkdir -p Formula
+
+          # Create/update formula
+          cat > Formula/claw-hooks.rb << 'FORMULA'
+          class ClawHooks < Formula
+            desc "Hooks CLI for AI coding agents (Claude Code, Cursor, Windsurf)"
+            homepage "https://github.com/owayo/claw-hooks"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "URL_ARM64_PLACEHOLDER"
+                sha256 "SHA256_ARM64_PLACEHOLDER"
+              else
+                url "URL_X86_64_PLACEHOLDER"
+                sha256 "SHA256_X86_64_PLACEHOLDER"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "URL_LINUX_ARM64_PLACEHOLDER"
+                sha256 "SHA256_LINUX_ARM64_PLACEHOLDER"
+              else
+                url "URL_LINUX_X86_64_PLACEHOLDER"
+                sha256 "SHA256_LINUX_X86_64_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "claw-hooks"
+            end
+
+            test do
+              system "#{bin}/claw-hooks", "--version"
+            end
+          end
+          FORMULA
+
+          # Replace placeholders with actual values
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" Formula/claw-hooks.rb
+          sed -i "s|URL_ARM64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_ARM64_PLACEHOLDER|${SHA256_ARM64}|g" Formula/claw-hooks.rb
+          sed -i "s|URL_X86_64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_X86_64_PLACEHOLDER|${SHA256_X86_64}|g" Formula/claw-hooks.rb
+          sed -i "s|URL_LINUX_ARM64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-aarch64-unknown-linux-gnu.tar.gz|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_LINUX_ARM64_PLACEHOLDER|${SHA256_LINUX_ARM64}|g" Formula/claw-hooks.rb
+          sed -i "s|URL_LINUX_X86_64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-x86_64-unknown-linux-gnu.tar.gz|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_LINUX_X86_64_PLACEHOLDER|${SHA256_LINUX_X86_64}|g" Formula/claw-hooks.rb
+
+          # Remove leading spaces from heredoc
+          sed -i 's/^          //' Formula/claw-hooks.rb
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/claw-hooks.rb
+          git commit -m "Update claw-hooks to ${TAG}"
+          git push

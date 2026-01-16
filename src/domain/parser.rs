@@ -67,6 +67,121 @@ impl ShellParser {
         self.extract_commands_fallback(command)
     }
 
+    /// Extract full command strings (command name + arguments) from a shell command string.
+    /// Used by custom filters to match patterns like "npm install".
+    #[cfg(feature = "ast-parser")]
+    pub fn extract_command_strings(&mut self, command: &str) -> Vec<String> {
+        let tree = match self.parser.parse(command, None) {
+            Some(tree) => tree,
+            None => return self.extract_command_strings_fallback(command),
+        };
+
+        let root = tree.root_node();
+        let mut command_strings = Vec::new();
+        self.extract_command_strings_from_node(root, command, &mut command_strings);
+
+        command_strings
+    }
+
+    #[cfg(not(feature = "ast-parser"))]
+    pub fn extract_command_strings(&self, command: &str) -> Vec<String> {
+        self.extract_command_strings_fallback(command)
+    }
+
+    /// Extract full command strings from AST node recursively
+    /// Uses raw arguments with quotes preserved for accurate pattern matching.
+    #[cfg(feature = "ast-parser")]
+    fn extract_command_strings_from_node(
+        &mut self,
+        node: Node,
+        source: &str,
+        command_strings: &mut Vec<String>,
+    ) {
+        match node.kind() {
+            "command" | "simple_command" => {
+                if let Some(cmd_name) = self.get_command_name(node, source) {
+                    if !cmd_name.is_empty() {
+                        // Build full command string: command + arguments (with quotes preserved)
+                        let args_raw = self.get_command_arguments_raw(node, source);
+                        let full_cmd = if args_raw.is_empty() {
+                            cmd_name.clone()
+                        } else {
+                            format!("{} {}", cmd_name, args_raw.join(" "))
+                        };
+                        command_strings.push(full_cmd);
+
+                        // Handle shell -c "command" - extract nested command strings
+                        // Use stripped args for shell command extraction
+                        if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+                            let args = self.get_command_arguments(node, source);
+                            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
+                                let nested = self.extract_command_strings(&shell_cmd);
+                                command_strings.extend(nested);
+                            }
+                        }
+
+                        // Handle xargs - extract the command being run
+                        if cmd_name == "xargs" {
+                            let args = self.get_command_arguments(node, source);
+                            // Build xargs target command string
+                            let xargs_args: Vec<_> =
+                                args.iter().filter(|a| !a.starts_with('-')).collect();
+                            if !xargs_args.is_empty() {
+                                let xargs_cmd = xargs_args
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                command_strings.push(xargs_cmd);
+                            }
+                        }
+                    }
+                }
+                // Recurse into children for command substitutions
+                for child in node.children(&mut node.walk()) {
+                    self.extract_command_strings_from_node(child, source, command_strings);
+                }
+            }
+            "subshell" | "command_substitution" => {
+                for child in node.children(&mut node.walk()) {
+                    self.extract_command_strings_from_node(child, source, command_strings);
+                }
+            }
+            _ => {
+                for child in node.children(&mut node.walk()) {
+                    self.extract_command_strings_from_node(child, source, command_strings);
+                }
+            }
+        }
+    }
+
+    /// Fallback parser for extract_command_strings
+    fn extract_command_strings_fallback(&self, command: &str) -> Vec<String> {
+        let mut command_strings = Vec::new();
+
+        for segment in command.split(';') {
+            for part in Self::split_by_logical_ops(segment.trim()) {
+                for pipe_part in part.split('|') {
+                    let cmd = pipe_part.trim();
+                    if !cmd.is_empty() {
+                        // Extract full command string (not just command name)
+                        let (cmd_name, args) = self.extract_command_with_args_fallback(cmd);
+                        if !cmd_name.is_empty() {
+                            let full_cmd = if args.is_empty() {
+                                cmd_name
+                            } else {
+                                format!("{} {}", cmd_name, args.join(" "))
+                            };
+                            command_strings.push(full_cmd);
+                        }
+                    }
+                }
+            }
+        }
+
+        command_strings
+    }
+
     /// Extract commands from AST node recursively
     #[cfg(feature = "ast-parser")]
     fn extract_commands_from_node(&mut self, node: Node, source: &str, commands: &mut Vec<String>) {
@@ -129,8 +244,26 @@ impl ShellParser {
     }
 
     /// Get command arguments from AST node (excludes the command name itself)
+    /// Strips quotes from arguments for internal processing.
     #[cfg(feature = "ast-parser")]
     fn get_command_arguments(&self, node: Node, source: &str) -> Vec<String> {
+        self.get_command_arguments_impl(node, source, true)
+    }
+
+    /// Get command arguments with quotes preserved for pattern matching.
+    #[cfg(feature = "ast-parser")]
+    fn get_command_arguments_raw(&self, node: Node, source: &str) -> Vec<String> {
+        self.get_command_arguments_impl(node, source, false)
+    }
+
+    /// Implementation: Get command arguments with optional quote stripping.
+    #[cfg(feature = "ast-parser")]
+    fn get_command_arguments_impl(
+        &self,
+        node: Node,
+        source: &str,
+        strip_quotes: bool,
+    ) -> Vec<String> {
         let mut args = Vec::new();
         let mut found_command_name = false;
 
@@ -142,9 +275,13 @@ impl ShellParser {
                 "word" | "string" | "raw_string" | "simple_expansion" | "expansion"
                 | "concatenation" => {
                     if found_command_name {
-                        let text = source[child.byte_range()]
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string();
+                        let text = if strip_quotes {
+                            source[child.byte_range()]
+                                .trim_matches(|c| c == '"' || c == '\'')
+                                .to_string()
+                        } else {
+                            source[child.byte_range()].to_string()
+                        };
                         args.push(text);
                     }
                 }

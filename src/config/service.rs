@@ -110,8 +110,8 @@ debug = false
 # Custom command filters
 # Block specific commands and suggest alternatives
 # [[custom_filters]]
-# command = "python"
-# message = "⚠️ Use `uv` instead of `python`"
+# command = "npm (install|i|add)"
+# message = "Use `pnpm` instead of `npm`"
 
 # [[custom_filters]]
 # command = "yarn"

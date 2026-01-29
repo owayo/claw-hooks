@@ -62,7 +62,7 @@ impl Filter for StopHookFilter {
         }
 
         // Always allow - stop hooks are side effects, not filters
-        Decision::Allow
+        Decision::allow()
     }
 
     fn priority(&self) -> u32 {
@@ -127,6 +127,6 @@ mod tests {
         };
 
         let decision = filter.execute(&stop_input);
-        assert!(matches!(decision, Decision::Allow));
+        assert!(matches!(decision, Decision::Allow { .. }));
     }
 }

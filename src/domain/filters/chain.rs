@@ -76,16 +76,30 @@ impl FilterChain {
     }
 
     /// Execute all applicable filters and return the first blocking decision.
+    /// For Allow decisions, additional_context from all filters is merged.
     pub fn execute(&self, input: &HookInput) -> Decision {
+        let mut merged_context: Option<String> = None;
+
         for filter in &self.filters {
             if filter.applies_to(input) {
                 let decision = filter.execute(input);
-                if matches!(decision, Decision::Block { .. }) {
-                    return decision;
+                match decision {
+                    Decision::Block { .. } => return decision,
+                    Decision::Allow { additional_context } => {
+                        // Merge additional context from all Allow decisions
+                        if let Some(ctx) = additional_context {
+                            merged_context = match merged_context {
+                                Some(existing) => Some(format!("{}\n{}", existing, ctx)),
+                                None => Some(ctx),
+                            };
+                        }
+                    }
                 }
             }
         }
 
-        Decision::Allow
+        Decision::Allow {
+            additional_context: merged_context,
+        }
     }
 }

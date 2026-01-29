@@ -76,7 +76,7 @@ impl HookService {
         let exit_code = self.adapter.exit_code(&decision);
 
         // Write output using format adapter
-        let output_json = self.adapter.format_output(&decision)?;
+        let output_json = self.adapter.format_output(&decision, &hook_input.event)?;
         info!("Output: {}", output_json);
         writeln!(stdout, "{}", output_json)?;
         stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
@@ -97,7 +97,7 @@ impl HookService {
             "Stop" => self.handle_stop(input),
             _ => {
                 debug!("Unknown event type: {}", input.event);
-                Decision::Allow
+                Decision::allow()
             }
         }
     }
@@ -129,7 +129,7 @@ impl HookService {
         }
 
         // Other PostToolUse events always allow
-        Decision::Allow
+        Decision::allow()
     }
 
     /// Handle Stop event.

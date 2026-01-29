@@ -79,34 +79,88 @@ pub struct StopInput {
 /// Hook output sent back to AI agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct HookOutput {
-    /// Decision: "allow" or "block"
+    /// Decision: "approve" or "block"
     pub decision: String,
 
     /// Optional message (usually present when blocking)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+
+    /// Hook-specific output for Claude Code (PostToolUse additionalContext)
+    #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
+    pub hook_specific_output: Option<HookSpecificOutput>,
+}
+
+/// Hook-specific output for Claude Code PostToolUse.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookSpecificOutput {
+    /// Hook event name
+    #[serde(rename = "hookEventName")]
+    pub hook_event_name: String,
+
+    /// Additional context for the agent (e.g., lint warnings)
+    #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
 }
 
 /// Processing decision with optional block message.
 #[derive(Debug, Clone)]
 pub enum Decision {
-    /// Allow the operation
-    Allow,
+    /// Allow the operation with optional context for the agent
+    Allow {
+        /// Additional context to pass to the agent (e.g., lint warnings)
+        additional_context: Option<String>,
+    },
     /// Block the operation with a message
     Block { message: String },
 }
 
+impl Default for Decision {
+    fn default() -> Self {
+        Decision::Allow {
+            additional_context: None,
+        }
+    }
+}
+
 impl Decision {
-    /// Convert decision to HookOutput.
-    pub fn into_output(self) -> HookOutput {
+    /// Create an Allow decision with no additional context.
+    pub fn allow() -> Self {
+        Decision::Allow {
+            additional_context: None,
+        }
+    }
+
+    /// Create an Allow decision with additional context for the agent.
+    pub fn allow_with_context(context: String) -> Self {
+        Decision::Allow {
+            additional_context: Some(context),
+        }
+    }
+
+    /// Convert decision to HookOutput for PostToolUse event.
+    pub fn into_output(self, event: &str) -> HookOutput {
         match self {
-            Decision::Allow => HookOutput {
-                decision: "approve".to_string(),
-                message: None,
-            },
+            Decision::Allow { additional_context } => {
+                let hook_specific_output = if event == "PostToolUse" {
+                    additional_context.map(|ctx| HookSpecificOutput {
+                        hook_event_name: "PostToolUse".to_string(),
+                        additional_context: Some(ctx),
+                    })
+                } else {
+                    None
+                };
+
+                HookOutput {
+                    decision: "approve".to_string(),
+                    message: None,
+                    hook_specific_output,
+                }
+            }
             Decision::Block { message } => HookOutput {
                 decision: "block".to_string(),
                 message: Some(message),
+                hook_specific_output: None,
             },
         }
     }
@@ -117,8 +171,28 @@ impl Decision {
     /// - Block: 2
     pub fn exit_code(&self) -> i32 {
         match self {
-            Decision::Allow => 0,
+            Decision::Allow { .. } => 0,
             Decision::Block { .. } => 2,
+        }
+    }
+
+    /// Merge additional context from another decision.
+    /// If both have context, they are joined with newlines.
+    #[allow(dead_code)]
+    pub fn merge_context(self, other_context: Option<String>) -> Self {
+        match self {
+            Decision::Allow { additional_context } => {
+                let merged = match (additional_context, other_context) {
+                    (Some(a), Some(b)) => Some(format!("{}\n{}", a, b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                Decision::Allow {
+                    additional_context: merged,
+                }
+            }
+            Decision::Block { message } => Decision::Block { message },
         }
     }
 }

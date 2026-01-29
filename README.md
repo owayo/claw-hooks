@@ -35,7 +35,7 @@
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, and Windsurf
 
@@ -201,8 +201,11 @@ Configure once:
 | Block dangerous commands | 25+ lines Python per command | 1 line TOML |
 | Custom filters | New script per filter | Add to `[[custom_filters]]` |
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
+| Lint output to agent | Manual JSON construction | Automatic (Claude Code only)* |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
 | Stop notifications | Custom notification script | `[[stop_hooks]]` config |
+
+\* Lint/formatter output is automatically passed to Claude Code via `additionalContext`, enabling the agent to fix warnings.
 
 ## Requirements
 
@@ -402,6 +405,7 @@ message = "Ask the user to run this command manually"
 
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
+# Output (stdout/stderr) is passed to AI agent as additionalContext (Claude Code only)
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
 ".go" = ["gofmt -w {file}", "golangci-lint run {file}"]
@@ -557,6 +561,19 @@ graph LR
 ### Output (stdout)
 
 **Approve**: `{"decision":"approve"}`
+
+**Approve with lint output (Claude Code PostToolUse only)**:
+```json
+{
+  "decision": "approve",
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "[rustfmt {file}] warning: unused variable..."
+  }
+}
+```
+
+The `additionalContext` field passes lint warnings/errors to Claude Code, allowing it to fix issues automatically. This feature is only available for Claude Code's PostToolUse hooks.
 
 **Block**: `{"decision":"block","message":"Use safe-rm instead..."}`
 

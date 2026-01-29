@@ -20,6 +20,16 @@ struct ParsedCommand {
     inline_template: Option<String>,
 }
 
+/// Result of executing a single command.
+struct CommandResult {
+    /// Command that was executed
+    command: String,
+    /// Whether the command succeeded
+    success: bool,
+    /// Combined stdout and stderr output
+    output: String,
+}
+
 /// Filter for extension-based hooks.
 pub struct ExtensionHookFilter {
     /// Map of extension -> commands (e.g., ".go" -> ["gofmt -w {file}", "golangci-lint run {file}"])
@@ -108,9 +118,13 @@ impl ExtensionHookFilter {
         })
     }
 
-    /// Execute a single command safely.
+    /// Execute a single command safely and return the result.
     /// SECURITY: File path is passed as a separate argument to prevent injection.
-    fn execute_command(&self, command_template: &str, file_path: &str) -> Result<(), String> {
+    fn execute_command(
+        &self,
+        command_template: &str,
+        file_path: &str,
+    ) -> Result<CommandResult, String> {
         // Validate file path first
         Self::validate_file_path(file_path)?;
 
@@ -154,20 +168,60 @@ impl ExtensionHookFilter {
             .output()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Combine stdout and stderr, filtering empty lines
+        let combined_output = [stdout.trim(), stderr.trim()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             warn!("Hook command failed: {}", stderr);
         }
 
-        Ok(())
+        Ok(CommandResult {
+            command: command_template.to_string(),
+            success: output.status.success(),
+            output: combined_output,
+        })
     }
 
-    /// Execute all commands for an extension.
-    fn execute_commands(&self, commands: &[String], file_path: &str) -> Result<(), String> {
-        for cmd in commands {
-            self.execute_command(cmd, file_path)?;
+    /// Execute all commands for an extension and collect output.
+    /// Returns combined output from all commands that produced warnings/errors.
+    fn execute_commands(&self, commands: &[String], file_path: &str) -> (bool, Option<String>) {
+        let mut all_success = true;
+        let mut outputs: Vec<String> = Vec::new();
+
+        for cmd_template in commands {
+            match self.execute_command(cmd_template, file_path) {
+                Ok(result) => {
+                    if !result.success {
+                        all_success = false;
+                    }
+                    // Collect non-empty output (warnings, errors, lint messages)
+                    if !result.output.is_empty() {
+                        outputs.push(format!("[{}] {}", result.command, result.output));
+                    }
+                }
+                Err(e) => {
+                    all_success = false;
+                    warn!("Extension hook failed: {}", e);
+                    outputs.push(format!("[ERROR] {}", e));
+                }
+            }
         }
-        Ok(())
+
+        let combined = if outputs.is_empty() {
+            None
+        } else {
+            Some(outputs.join("\n"))
+        };
+
+        (all_success, combined)
     }
 }
 
@@ -201,15 +255,19 @@ impl Filter for ExtensionHookFilter {
         // Extract file path and execute commands
         if let ToolInput::File(file_input) = &input.tool_input {
             if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
-                // Execute commands but don't block on failure
-                if let Err(e) = self.execute_commands(commands, &file_input.file_path) {
-                    warn!("Extension hook failed: {}", e);
+                // Execute commands and collect output
+                let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
+
+                // Return Allow with additional context if there's any output
+                // This passes lint warnings/errors to the agent (Claude Code only)
+                if let Some(ctx) = output {
+                    return Decision::allow_with_context(ctx);
                 }
             }
         }
 
         // Always allow - extension hooks are side effects, not filters
-        Decision::Allow
+        Decision::allow()
     }
 
     fn priority(&self) -> u32 {

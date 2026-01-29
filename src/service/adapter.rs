@@ -33,11 +33,12 @@ impl FormatAdapter {
     }
 
     /// Format output based on the agent format.
-    pub fn format_output(&self, decision: &Decision) -> Result<String> {
+    /// The event parameter is used to include hookSpecificOutput for Claude Code PostToolUse.
+    pub fn format_output(&self, decision: &Decision, event: &str) -> Result<String> {
         match self.format {
-            Format::Claude => self.format_claude_output(decision),
+            Format::Claude => self.format_claude_output(decision, event),
             Format::Cursor => self.format_cursor_output(decision),
-            Format::Windsurf => self.format_windsurf_output(decision),
+            Format::Windsurf => self.format_windsurf_output(decision, event),
         }
     }
 
@@ -125,8 +126,8 @@ impl FormatAdapter {
         })
     }
 
-    fn format_claude_output(&self, decision: &Decision) -> Result<String> {
-        let output = decision.clone().into_output();
+    fn format_claude_output(&self, decision: &Decision, event: &str) -> Result<String> {
+        let output = decision.clone().into_output(event);
         serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
 
@@ -210,7 +211,7 @@ impl FormatAdapter {
 
     fn format_cursor_output(&self, decision: &Decision) -> Result<String> {
         let output = match decision {
-            Decision::Allow => CursorOutput {
+            Decision::Allow { .. } => CursorOutput {
                 permission: "allow".to_string(),
                 user_message: None,
                 agent_message: None,
@@ -307,9 +308,22 @@ impl FormatAdapter {
         })
     }
 
-    fn format_windsurf_output(&self, decision: &Decision) -> Result<String> {
-        // Windsurf uses the same output format as Claude Code
-        self.format_claude_output(decision)
+    fn format_windsurf_output(&self, decision: &Decision, _event: &str) -> Result<String> {
+        // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
+        // Since Windsurf doesn't support additionalContext, we use a simplified output
+        let output = match decision {
+            Decision::Allow { .. } => crate::domain::HookOutput {
+                decision: "approve".to_string(),
+                message: None,
+                hook_specific_output: None,
+            },
+            Decision::Block { message } => crate::domain::HookOutput {
+                decision: "block".to_string(),
+                message: Some(message.clone()),
+                hook_specific_output: None,
+            },
+        };
+        serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
 }
 
@@ -496,7 +510,9 @@ mod tests {
     #[test]
     fn test_cursor_output_allow() {
         let adapter = FormatAdapter::new(Format::Cursor);
-        let output = adapter.format_output(&Decision::Allow).unwrap();
+        let output = adapter
+            .format_output(&Decision::allow(), "PreToolUse")
+            .unwrap();
         assert!(output.contains(r#""permission":"allow""#));
     }
 
@@ -504,9 +520,12 @@ mod tests {
     fn test_cursor_output_deny() {
         let adapter = FormatAdapter::new(Format::Cursor);
         let output = adapter
-            .format_output(&Decision::Block {
-                message: "Command blocked for safety".to_string(),
-            })
+            .format_output(
+                &Decision::Block {
+                    message: "Command blocked for safety".to_string(),
+                },
+                "PreToolUse",
+            )
             .unwrap();
         assert!(output.contains(r#""permission":"deny""#));
         assert!(output.contains("Command blocked for safety"));
@@ -515,17 +534,36 @@ mod tests {
     #[test]
     fn test_claude_output_allow() {
         let adapter = FormatAdapter::new(Format::Claude);
-        let output = adapter.format_output(&Decision::Allow).unwrap();
+        let output = adapter
+            .format_output(&Decision::allow(), "PreToolUse")
+            .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
+        // No hookSpecificOutput for PreToolUse
+        assert!(!output.contains("hookSpecificOutput"));
+    }
+
+    #[test]
+    fn test_claude_output_allow_with_context() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let decision = Decision::allow_with_context("Lint warning: unused variable".to_string());
+        let output = adapter.format_output(&decision, "PostToolUse").unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
+        // hookSpecificOutput should be present for PostToolUse with context
+        assert!(output.contains("hookSpecificOutput"));
+        assert!(output.contains("additionalContext"));
+        assert!(output.contains("Lint warning: unused variable"));
     }
 
     #[test]
     fn test_claude_output_block() {
         let adapter = FormatAdapter::new(Format::Claude);
         let output = adapter
-            .format_output(&Decision::Block {
-                message: "Command blocked for safety".to_string(),
-            })
+            .format_output(
+                &Decision::Block {
+                    message: "Command blocked for safety".to_string(),
+                },
+                "PreToolUse",
+            )
             .unwrap();
         assert!(output.contains(r#""decision":"block""#));
         assert!(output.contains("Command blocked for safety"));

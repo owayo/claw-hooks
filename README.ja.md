@@ -35,7 +35,7 @@
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、bash -c、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行
+- 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
 - 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurfに対応
 
@@ -201,8 +201,11 @@ rm_block_message = "🚫 Use safe-rm instead"
 | 危険なコマンドをブロック | コマンドごとに25行以上のPython | TOML 1行 |
 | カスタムフィルター | フィルターごとに新しいスクリプト | `[[custom_filters]]`に追加 |
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
+| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Codeのみ）* |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
 | 停止通知 | カスタム通知スクリプト | `[[stop_hooks]]`設定 |
+
+\* lint/フォーマッターの出力は`additionalContext`経由でClaude Codeに自動送信され、エージェントが警告を修正できます。
 
 ## 動作要件
 
@@ -402,6 +405,7 @@ message = "ユーザーに直接実行を依頼してください"
 
 # 拡張子フック（ファイル書き込み/編集時にトリガー）
 # マップ形式: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
+# 出力（stdout/stderr）はadditionalContextとしてAIエージェントに送信（Claude Codeのみ）
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
 ".go" = ["gofmt -w {file}", "golangci-lint run {file}"]
@@ -557,6 +561,19 @@ graph LR
 ### 出力 (stdout)
 
 **許可**: `{"decision":"approve"}`
+
+**許可（lint出力付き、Claude Code PostToolUseのみ）**:
+```json
+{
+  "decision": "approve",
+  "hookSpecificOutput": {
+    "hookEventName": "PostToolUse",
+    "additionalContext": "[rustfmt {file}] warning: unused variable..."
+  }
+}
+```
+
+`additionalContext`フィールドはlint警告/エラーをClaude Codeに送信し、エージェントが自動的に問題を修正できます。この機能はClaude CodeのPostToolUseフックでのみ利用可能です。
 
 **ブロック**: `{"decision":"block","message":"Use safe-rm instead..."}`
 

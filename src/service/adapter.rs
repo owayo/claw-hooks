@@ -772,6 +772,56 @@ mod tests {
         assert!(error_output.contains("reason"));
         assert!(error_output.contains("fail-closed"));
     }
+
+    // === Windsurf Output Tests ===
+
+    #[test]
+    fn test_windsurf_output_allow() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
+            .unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
+        // Windsurf doesn't support hookSpecificOutput
+        assert!(!output.contains("hookSpecificOutput"));
+    }
+
+    #[test]
+    fn test_windsurf_output_block() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "Command blocked for safety".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        assert!(output.contains(r#""decision":"block""#));
+        assert!(output.contains("Command blocked for safety"));
+    }
+
+    #[test]
+    fn test_windsurf_output_allow_after_file_edit() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        // Windsurf doesn't support additionalContext, so context is ignored
+        let decision = Decision::allow_with_context("Some lint warning".to_string());
+        let output = adapter
+            .format_output(&decision, HookEvent::AfterFileEdit)
+            .unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
+        // Context should NOT appear in output (Windsurf doesn't support it)
+        assert!(!output.contains("hookSpecificOutput"));
+        assert!(!output.contains("additionalContext"));
+    }
+
+    #[test]
+    fn test_windsurf_error_format() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let error_output = adapter.format_error("Invalid JSON input");
+        assert!(error_output.contains(r#""decision":"block""#));
+        assert!(error_output.contains("fail-closed"));
+    }
 }
 
 // === Gemini CLI Format Types ===

@@ -284,4 +284,103 @@ mod tests {
         assert_eq!(format!("{:?}", HookEvent::Stop), "Stop");
         assert_eq!(format!("{:?}", HookEvent::BeforePrompt), "BeforePrompt");
     }
+
+    // Decision::into_output() tests
+
+    #[test]
+    fn test_decision_into_output_allow_before_command() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::BeforeCommand);
+
+        assert_eq!(output.decision, "approve");
+        assert!(output.message.is_none());
+        // No hookSpecificOutput for BeforeCommand
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_after_file_edit_no_context() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::AfterFileEdit);
+
+        assert_eq!(output.decision, "approve");
+        assert!(output.message.is_none());
+        // No hookSpecificOutput when no additional context
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_after_file_edit_with_context() {
+        let decision = Decision::allow_with_context("Lint warning: unused variable".to_string());
+        let output = decision.into_output(HookEvent::AfterFileEdit);
+
+        assert_eq!(output.decision, "approve");
+        assert!(output.message.is_none());
+        // hookSpecificOutput should be present for AfterFileEdit with context
+        let hook_output = output
+            .hook_specific_output
+            .expect("Should have hookSpecificOutput");
+        assert_eq!(hook_output.hook_event_name, "PostToolUse");
+        assert_eq!(
+            hook_output.additional_context,
+            Some("Lint warning: unused variable".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_with_context_before_command() {
+        // Context is ignored for BeforeCommand (only AfterFileEdit supports it)
+        let decision = Decision::allow_with_context("Some context".to_string());
+        let output = decision.into_output(HookEvent::BeforeCommand);
+
+        assert_eq!(output.decision, "approve");
+        // hookSpecificOutput should NOT be present for BeforeCommand
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_block() {
+        let decision = Decision::Block {
+            message: "Command blocked for safety".to_string(),
+        };
+        let output = decision.into_output(HookEvent::BeforeCommand);
+
+        assert_eq!(output.decision, "block");
+        assert_eq!(
+            output.message,
+            Some("Command blocked for safety".to_string())
+        );
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_stop_event() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::Stop);
+
+        assert_eq!(output.decision, "approve");
+        // No hookSpecificOutput for Stop event
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_before_prompt_event() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::BeforePrompt);
+
+        assert_eq!(output.decision, "approve");
+        // No hookSpecificOutput for BeforePrompt event
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_exit_code() {
+        let allow = Decision::allow();
+        assert_eq!(allow.exit_code(), 0);
+
+        let block = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(block.exit_code(), 2);
+    }
 }

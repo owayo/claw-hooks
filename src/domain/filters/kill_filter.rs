@@ -129,4 +129,78 @@ mod tests {
         assert!(KillFilter::contains_kill_command("cd /tmp && kill 1234"));
         assert!(KillFilter::contains_kill_command("echo test; pkill node"));
     }
+
+    #[test]
+    fn test_applies_to_before_command_bash_kill() {
+        let filter = KillFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "kill -9 1234".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_when_disabled() {
+        let filter = KillFilter::new(false, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "kill -9 1234".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_after_file_edit() {
+        let filter = KillFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "kill -9 1234".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_execute_returns_block() {
+        let filter = KillFilter::new(true, Some("Custom kill block message".to_string()));
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "kill -9 1234".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert_eq!(message, "Custom kill block message");
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
 }

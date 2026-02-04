@@ -277,3 +277,212 @@ impl Filter for ExtensionHookFilter {
         100 // Low priority - runs after other filters
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn create_filter_with_go_hooks() -> ExtensionHookFilter {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".go".to_string(), vec!["gofmt -w {file}".to_string()]);
+        ExtensionHookFilter::new(hooks)
+    }
+
+    fn create_empty_filter() -> ExtensionHookFilter {
+        ExtensionHookFilter::new(BTreeMap::new())
+    }
+
+    // applies_to tests
+
+    #[test]
+    fn test_applies_to_before_command_with_write() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_applies_to_after_file_edit_with_write() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_applies_to_edit_tool() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Edit".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_applies_to_multi_edit_tool() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_stop_event() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_before_prompt_event() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::BeforePrompt,
+            tool_name: "UserPrompt".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_read_tool() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Read".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_bash_tool() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "ls".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_non_matching_extension() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.rs".to_string(), // .rs not in hooks
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_when_no_hooks_configured() {
+        let filter = create_empty_filter();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    // execute tests
+
+    #[test]
+    fn test_execute_returns_allow() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/path/to/file.go".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        // Extension hooks always allow (they're side effects, not filters)
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_priority() {
+        let filter = create_filter_with_go_hooks();
+        assert_eq!(filter.priority(), 100);
+    }
+}

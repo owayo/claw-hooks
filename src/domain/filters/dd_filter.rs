@@ -90,4 +90,78 @@ mod tests {
             "sync && dd if=/dev/sda of=backup.img"
         ));
     }
+
+    #[test]
+    fn test_applies_to_before_command_bash_dd() {
+        let filter = DdFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "dd if=/dev/zero of=/dev/sda".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_when_disabled() {
+        let filter = DdFilter::new(false, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "dd if=/dev/zero of=/dev/sda".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_after_file_edit() {
+        let filter = DdFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "dd if=/dev/zero of=/dev/sda".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_execute_returns_block() {
+        let filter = DdFilter::new(true, Some("Custom dd block message".to_string()));
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "dd if=/dev/zero of=/dev/sda".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert_eq!(message, "Custom dd block message");
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
 }

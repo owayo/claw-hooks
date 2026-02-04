@@ -94,4 +94,95 @@ mod tests {
         assert!(RmFilter::contains_rm_command("echo done; rmdir old"));
         assert!(RmFilter::contains_rm_command("dir && del *.tmp"));
     }
+
+    #[test]
+    fn test_applies_to_before_command_bash_rm() {
+        let filter = RmFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm -rf /tmp/test".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_when_disabled() {
+        let filter = RmFilter::new(false, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm -rf /tmp/test".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_after_file_edit() {
+        let filter = RmFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm -rf /tmp/test".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_does_not_apply_to_non_bash_tool() {
+        let filter = RmFilter::new(true, None);
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_execute_returns_block() {
+        let filter = RmFilter::new(true, Some("Custom rm block message".to_string()));
+
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm -rf /tmp/test".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert_eq!(message, "Custom rm block message");
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
 }

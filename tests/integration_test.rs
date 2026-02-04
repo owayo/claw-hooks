@@ -776,3 +776,103 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
     // Cleanup
     std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
+
+// === Gemini CLI Format Tests ===
+
+#[test]
+fn test_gemini_format_allow_safe_command() {
+    // Use official Gemini CLI tool name: run_shell_command
+    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    assert_eq!(exit_code, 0, "Safe command should be allowed");
+    assert!(
+        stdout.contains(r#""decision":"allow""#),
+        "Gemini output should indicate allow: {}",
+        stdout
+    );
+    // Gemini should not have reason field for allow
+    assert!(
+        !stdout.contains("reason"),
+        "Allow output should not have reason: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_block_rm_command() {
+    // Use official Gemini CLI tool name: run_shell_command
+    // Gemini CLI expects exit code 0 for all decisions (deny is communicated via JSON)
+    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    assert_eq!(exit_code, 0, "Gemini uses exit 0 for all decisions");
+    assert!(
+        stdout.contains(r#""decision":"deny""#),
+        "Gemini output should indicate deny: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("reason"),
+        "Deny output should have reason: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_block_kill_command() {
+    // Use official Gemini CLI tool name: run_shell_command
+    // Gemini CLI expects exit code 0 for all decisions (deny is communicated via JSON)
+    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"pkill node"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    assert_eq!(exit_code, 0, "Gemini uses exit 0 for all decisions");
+    assert!(
+        stdout.contains(r#""decision":"deny""#),
+        "Gemini output should indicate deny: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_after_tool() {
+    // Use official Gemini CLI tool name: write_file
+    let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    // PostToolUse events should be allowed (monitoring only)
+    assert_eq!(exit_code, 0, "AfterTool should be allowed");
+    assert!(
+        stdout.contains(r#""decision":"allow""#),
+        "Gemini output should indicate allow: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_after_agent() {
+    let input = r#"{"hook_event_name":"AfterAgent"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    // Stop events should be allowed (monitoring only)
+    assert_eq!(exit_code, 0, "AfterAgent should be allowed");
+    assert!(
+        stdout.contains(r#""decision":"allow""#),
+        "Gemini output should indicate allow: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_with_event_alias() {
+    // Use official Gemini CLI tool name: run_shell_command
+    let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"echo hello"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    assert_eq!(exit_code, 0, "Safe command should be allowed");
+    assert!(
+        stdout.contains(r#""decision":"allow""#),
+        "Gemini output should indicate allow: {}",
+        stdout
+    );
+}

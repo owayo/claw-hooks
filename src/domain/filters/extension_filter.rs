@@ -141,7 +141,7 @@ impl ExtensionHookFilter {
         };
 
         debug!(
-            "Executing extension hook: {} {:?} {} {:?} inline={:?}",
+            "🪛 Executing extension hook: {} {:?} {} {:?} inline={:?}",
             parsed.program,
             parsed.args_before,
             safe_path,
@@ -180,7 +180,7 @@ impl ExtensionHookFilter {
             .join("\n");
 
         if !output.status.success() {
-            warn!("Hook command failed: {}", stderr);
+            warn!("🪛 Extension hook command failed: {}", stderr);
         }
 
         Ok(CommandResult {
@@ -209,7 +209,7 @@ impl ExtensionHookFilter {
                 }
                 Err(e) => {
                     all_success = false;
-                    warn!("Extension hook failed: {}", e);
+                    warn!("🪛 Extension hook failed: {}", e);
                     outputs.push(format!("[ERROR] {}", e));
                 }
             }

@@ -28,8 +28,8 @@ fn main() -> Result<()> {
 
     // Execute command
     match cli.command {
-        Commands::Hook { format } => {
-            let service = HookService::new(config, format);
+        Commands::Hook { format, trace } => {
+            let service = HookService::new(config, format, trace);
             service.run()?;
         }
         Commands::Init { path } => {

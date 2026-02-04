@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  シンプルなTOML設定でClaude Code・Cursor・Windsurfに対応 - コマンドブロック、自動フォーマット、通知
+  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Gemini CLIに対応 - コマンドブロック、自動フォーマット、通知
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
 - 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
-- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurfに対応
+- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
 ## なぜ claw-hooks？
 
@@ -264,7 +264,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | オプション | 短縮形 | 説明 |
 |-----------|--------|------|
-| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf` |
+| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `gemini` |
 | `--config` | `-c` | 設定ファイルのパス |
 | `--help` | `-h` | ヘルプを表示 |
 
@@ -279,6 +279,9 @@ claw-hooks hook --format cursor
 
 # Windsurfフックを処理
 claw-hooks hook --format windsurf
+
+# Gemini CLIフックを処理
+claw-hooks hook --format gemini
 
 # カスタム設定を使用
 claw-hooks hook --config /path/to/config.toml
@@ -351,6 +354,35 @@ claw-hooks hook --config /path/to/config.toml
     ],
     "post_cascade_response": [
       { "command": "claw-hooks hook --format windsurf", "show_output": true }
+    ]
+  }
+}
+```
+
+### Gemini CLI
+
+`~/.gemini/settings.json`（ユーザー）または`.gemini/settings.json`（プロジェクト）に追加:
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "write_file|replace",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
     ]
   }
 }
@@ -510,6 +542,42 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 | `post_write_code` | PostToolUse + Write |
 | `post_cascade_response` | Stop |
 
+### Gemini CLI (`--format gemini`)
+
+`hook_event_name`と`tool_name`フィールドを使用:
+
+```jsonc
+// BeforeToolイベント（シェルコマンド）
+{
+  "hook_event_name": "BeforeTool",
+  "tool_name": "run_shell_command",
+  "tool_input": { "command": "..." },
+  "session_id": "..."
+}
+
+// AfterToolイベント（ファイル書き込み）
+{
+  "hook_event_name": "AfterTool",
+  "tool_name": "write_file",
+  "tool_input": { "file_path": "..." }
+}
+
+// AfterAgentイベント（エージェントループ終了）
+{
+  "hook_event_name": "AfterAgent"
+}
+```
+
+| hook_event_name | tool_name | 内部マッピング |
+|-----------------|-----------|----------------|
+| `BeforeTool` | `run_shell_command` | PreToolUse + Bash |
+| `AfterTool` | `write_file` | PostToolUse + Write |
+| `AfterAgent` | - | Stop |
+
+出力形式は`approve`/`block`の代わりに`allow`/`deny`を使用:
+- 許可: `{"decision":"allow"}`
+- 拒否: `{"decision":"deny","reason":"..."}`
+
 ### イベントマッピング
 
 ```mermaid
@@ -518,31 +586,37 @@ graph LR
         CC1[Claude: PreToolUse + Bash]
         CU1[Cursor: beforeShellExecution]
         WS1[Windsurf: pre_run_command]
+        GE1[Gemini: BeforeTool + run_shell_command]
     end
     CH1[🛡️ 検証・代替ツール提案]
     CC1 --> CH1
     CU1 --> CH1
     WS1 --> CH1
+    GE1 --> CH1
 
     subgraph ファイル保存後
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
+        GE2[Gemini: AfterTool + write_file]
     end
     CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
+    GE2 --> CH2
 
     subgraph エージェント終了
         CC3[Claude: Stop]
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
+        GE3[Gemini: AfterAgent]
     end
     CH3[🔔 通知を送信]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3
+    GE3 --> CH3
 ```
 
 ## 入出力リファレンス
@@ -579,10 +653,19 @@ graph LR
 
 ### 終了コード
 
+**Claude Code / Cursor / Windsurf**:
 | コード | 意味 |
 |--------|------|
 | `0` | 許可 |
 | `2` | ブロック |
+
+**Gemini CLI**（異なるセマンティクス）:
+| コード | 意味 |
+|--------|------|
+| `0` | 成功（JSONで決定: `allow` または `deny`） |
+| `2` | システムエラー（stderrが理由として使用） |
+
+Gemini CLIはブロックを含むすべての決定に対してexit code `0`を期待します。アクションの許可/拒否はJSONレスポンスの`decision`フィールドで決定されます。
 
 ## パフォーマンス
 

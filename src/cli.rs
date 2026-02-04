@@ -3,12 +3,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// AI coding agent hook system for Claude Code, Cursor, and Windsurf
+/// AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
     version,
-    about = "AI coding agent hook system for Claude Code, Cursor, and Windsurf",
+    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI",
     long_about = "A CLI tool that filters dangerous commands, suggests safer alternatives, \
                   and executes extension-based hooks for AI coding agents."
 )]
@@ -39,6 +39,8 @@ pub enum Format {
     Cursor,
     /// Windsurf (Cascade) format
     Windsurf,
+    /// Gemini CLI format
+    Gemini,
 }
 
 /// Available subcommands
@@ -50,6 +52,10 @@ pub enum Commands {
         /// Input/output format for different AI coding agents
         #[arg(long, short = 'f', default_value = "claude")]
         format: Format,
+
+        /// Trace mode: output raw input to stderr for debugging
+        #[arg(long, short = 't')]
+        trace: bool,
     },
     /// Generate default configuration file
     Init {

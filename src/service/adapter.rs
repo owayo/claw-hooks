@@ -29,6 +29,7 @@ impl FormatAdapter {
             Format::Claude => self.parse_claude_input(input),
             Format::Cursor => self.parse_cursor_input(input),
             Format::Windsurf => self.parse_windsurf_input(input),
+            Format::Gemini => self.parse_gemini_input(input),
         }
     }
 
@@ -39,13 +40,24 @@ impl FormatAdapter {
             Format::Claude => self.format_claude_output(decision, event),
             Format::Cursor => self.format_cursor_output(decision),
             Format::Windsurf => self.format_windsurf_output(decision, event),
+            Format::Gemini => self.format_gemini_output(decision),
         }
     }
 
     /// Get the exit code for the decision.
-    /// Note: Cursor uses different semantics but still uses exit codes.
+    /// Note: Different agents use different exit code semantics.
+    /// - Claude/Cursor/Windsurf: 0 = allow, 2 = block
+    /// - Gemini CLI: 0 = success (decision in JSON), 2 = system error only
     pub fn exit_code(&self, decision: &Decision) -> i32 {
-        decision.exit_code()
+        match self.format {
+            Format::Gemini => {
+                // Gemini CLI: Always return 0 for successful JSON output.
+                // The decision (allow/deny) is communicated via the JSON response.
+                // Exit code 2 is reserved for system errors (stderr used as reason).
+                0
+            }
+            _ => decision.exit_code(),
+        }
     }
 
     /// Format an error message for output.
@@ -73,6 +85,15 @@ impl FormatAdapter {
                 })
                 .to_string()
             }
+            Format::Gemini => {
+                // Gemini uses decision and reason
+                // SECURITY: Deny on parse errors (fail-closed design)
+                serde_json::json!({
+                    "decision": "deny",
+                    "reason": error_message
+                })
+                .to_string()
+            }
         }
     }
 
@@ -84,7 +105,7 @@ impl FormatAdapter {
     // === Claude Code Format ===
 
     fn parse_claude_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "Claude raw input");
+        debug!(raw_input = %input, "🤖 Claude Code raw input");
 
         let claude_input: ClaudeInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
@@ -115,7 +136,7 @@ impl FormatAdapter {
             format = "claude",
             event = %event,
             tool_name = %tool_name,
-            "Parsed Claude Code input"
+            "🤖 Claude Code parsed input"
         );
 
         Ok(HookInput {
@@ -134,7 +155,7 @@ impl FormatAdapter {
     // === Cursor Format ===
 
     fn parse_cursor_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "Cursor raw input");
+        debug!(raw_input = %input, "🖱️ Cursor raw input");
 
         let cursor_input: CursorInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Cursor input: {}", e))?;
@@ -148,7 +169,7 @@ impl FormatAdapter {
                     status = %status,
                     loop_count = ?loop_count,
                     mapped_event = "Stop",
-                    "Parsed Cursor input"
+                    "🖱️ Cursor parsed input"
                 );
 
                 // Cursor's stop hook is equivalent to Stop event
@@ -171,7 +192,7 @@ impl FormatAdapter {
                     cwd = ?cwd,
                     mapped_event = "PreToolUse",
                     mapped_tool = "Bash",
-                    "Parsed Cursor input"
+                    "🖱️ Cursor parsed input"
                 );
 
                 // Cursor's beforeShellExecution is equivalent to PreToolUse for Bash
@@ -192,7 +213,7 @@ impl FormatAdapter {
                     file_path = %file_path,
                     mapped_event = "PostToolUse",
                     mapped_tool = "Write",
-                    "Parsed Cursor input"
+                    "🖱️ Cursor parsed input"
                 );
 
                 // Cursor's afterFileEdit is equivalent to PostToolUse for Write
@@ -229,7 +250,7 @@ impl FormatAdapter {
     // === Windsurf Format ===
 
     fn parse_windsurf_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "Windsurf raw input");
+        debug!(raw_input = %input, "🏄 Windsurf raw input");
 
         let windsurf_input: WindsurfInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
@@ -297,7 +318,7 @@ impl FormatAdapter {
             mapped_event = %event,
             mapped_tool = %tool_name,
             cwd = ?windsurf_input.tool_info.as_ref().and_then(|ti| ti.cwd.as_ref()),
-            "Parsed Windsurf input"
+            "🏄 Windsurf parsed input"
         );
 
         Ok(HookInput {
@@ -627,5 +648,302 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, "Stop");
         assert_eq!(result.tool_name, "Stop");
+    }
+
+    // === Gemini CLI Format Tests ===
+
+    #[test]
+    fn test_gemini_input_parsing_before_tool() {
+        // Use official Gemini CLI tool name: run_shell_command
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.tool_name, "Bash");
+        if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
+            assert_eq!(bash.command, "rm -rf /tmp/test");
+        } else {
+            panic!("Expected Bash tool input");
+        }
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_run_shell_command() {
+        // run_shell_command is the official Gemini CLI built-in tool name
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_after_tool() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.tool_name, "Write");
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_replace_tool() {
+        // Gemini CLI uses "replace" tool for editing existing files
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.tool_name, "Write"); // replace maps to Write
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_after_agent() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"AfterAgent"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "Stop");
+        assert_eq!(result.tool_name, "Stop");
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_before_agent() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeAgent"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "UserPromptSubmit");
+        assert_eq!(result.tool_name, "UserPrompt");
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_with_event_alias() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        // Gemini might use "event" instead of "hook_event_name"
+        let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_gemini_input_parsing_unknown_tool() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"custom_tool","tool_input":{}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.tool_name, "custom_tool"); // Unknown tools kept as-is
+    }
+
+    #[test]
+    fn test_gemini_output_allow() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let output = adapter
+            .format_output(&Decision::allow(), "BeforeTool")
+            .unwrap();
+        assert!(output.contains(r#""decision":"allow""#));
+        assert!(!output.contains("reason"));
+    }
+
+    #[test]
+    fn test_gemini_output_deny() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "🚫 rm command blocked. Use safe-rm instead.".to_string(),
+                },
+                "BeforeTool",
+            )
+            .unwrap();
+        assert!(output.contains(r#""decision":"deny""#));
+        assert!(output.contains("reason"));
+        assert!(output.contains("rm command blocked"));
+    }
+
+    #[test]
+    fn test_gemini_error_format() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let error_output = adapter.format_error("Invalid JSON input");
+        assert!(error_output.contains(r#""decision":"deny""#));
+        assert!(error_output.contains("reason"));
+        assert!(error_output.contains("fail-closed"));
+    }
+}
+
+// === Gemini CLI Format Types ===
+
+/// Gemini CLI input format.
+/// See: https://github.com/google-gemini/gemini-cli#hooks
+/// Base input schema includes: session_id, transcript_path, cwd, hook_event_name, timestamp
+/// Tool events add: tool_name, tool_input, mcp_context
+#[derive(Debug, Deserialize)]
+struct GeminiInput {
+    /// Hook event name: BeforeTool, AfterTool, AfterAgent, etc.
+    #[serde(alias = "event")]
+    hook_event_name: String,
+
+    /// Tool name (optional for non-tool events)
+    #[serde(default)]
+    tool_name: Option<String>,
+
+    /// Tool input (optional for non-tool events)
+    #[serde(default)]
+    tool_input: Option<crate::domain::ToolInput>,
+
+    /// Session identifier
+    #[serde(default)]
+    session_id: Option<String>,
+
+    /// Current working directory (base input field)
+    #[serde(default)]
+    #[allow(dead_code)]
+    cwd: Option<String>,
+
+    /// Absolute path to session transcript JSON (base input field)
+    #[serde(default)]
+    #[allow(dead_code)]
+    transcript_path: Option<String>,
+
+    /// ISO 8601 execution time (base input field)
+    #[serde(default)]
+    #[allow(dead_code)]
+    timestamp: Option<String>,
+
+    /// MCP context for MCP-based tools (optional)
+    #[serde(default)]
+    #[allow(dead_code)]
+    mcp_context: Option<serde_json::Value>,
+
+    /// Tool response for AfterTool events
+    #[serde(default)]
+    #[allow(dead_code)]
+    tool_response: Option<serde_json::Value>,
+
+    /// User prompt for BeforeAgent/AfterAgent events
+    #[serde(default)]
+    #[allow(dead_code)]
+    prompt: Option<String>,
+
+    /// Agent response for AfterAgent events
+    #[serde(default)]
+    #[allow(dead_code)]
+    prompt_response: Option<String>,
+
+    /// Stop hook active flag for AfterAgent events
+    #[serde(default)]
+    #[allow(dead_code)]
+    stop_hook_active: Option<bool>,
+}
+
+/// Gemini CLI output format.
+#[derive(Debug, Serialize)]
+struct GeminiOutput {
+    /// Decision: "allow" or "deny"
+    decision: String,
+
+    /// Reason for denial (when decision is "deny")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl FormatAdapter {
+    // === Gemini CLI Format ===
+
+    fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
+        debug!(raw_input = %input, "♊ Gemini CLI raw input");
+
+        let gemini_input: GeminiInput = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
+
+        let event = gemini_input.hook_event_name.clone();
+
+        // Map Gemini events to internal events
+        let mapped_event = match event.as_str() {
+            "BeforeTool" => "PreToolUse".to_string(),
+            "AfterTool" => "PostToolUse".to_string(),
+            "AfterAgent" => "Stop".to_string(),
+            "BeforeAgent" => "UserPromptSubmit".to_string(),
+            other => other.to_string(), // Pass through unknown events
+        };
+
+        // Handle non-tool events
+        if mapped_event == "Stop" || mapped_event == "UserPromptSubmit" {
+            let tool_name = if mapped_event == "Stop" {
+                "Stop".to_string()
+            } else {
+                "UserPrompt".to_string()
+            };
+
+            debug!(
+                format = "gemini",
+                event = %event,
+                mapped_event = %mapped_event,
+                "♊ Gemini CLI parsed input (non-tool event)"
+            );
+
+            return Ok(HookInput {
+                event: mapped_event,
+                tool_name,
+                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                    status: None,
+                    loop_count: None,
+                    response: None,
+                }),
+                session_id: gemini_input.session_id,
+            });
+        }
+
+        // Tool events require tool_name and tool_input
+        let raw_tool_name = gemini_input
+            .tool_name
+            .ok_or_else(|| anyhow!("Missing tool_name field"))?;
+        let tool_input = gemini_input
+            .tool_input
+            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+
+        // Map Gemini tool names to internal tool names
+        // See: https://ai.google.dev/gemini-api/docs/tools (built-in tools reference)
+        let tool_name = match raw_tool_name.as_str() {
+            // Shell execution
+            "shell" | "run_shell_command" | "execute_command" => "Bash".to_string(),
+            // File writing/editing (replace is used for editing existing files)
+            "write_file" | "create_file" | "update_file" | "replace" | "edit_file" => {
+                "Write".to_string()
+            }
+            // File reading
+            "read_file" | "view_file" | "read_many_files" => "Read".to_string(),
+            // Keep unknown tools as-is
+            other => other.to_string(),
+        };
+
+        debug!(
+            format = "gemini",
+            event = %event,
+            mapped_event = %mapped_event,
+            raw_tool_name = %raw_tool_name,
+            mapped_tool = %tool_name,
+            "♊ Gemini CLI parsed input"
+        );
+
+        Ok(HookInput {
+            event: mapped_event,
+            tool_name,
+            tool_input,
+            session_id: gemini_input.session_id,
+        })
+    }
+
+    fn format_gemini_output(&self, decision: &Decision) -> Result<String> {
+        let output = match decision {
+            Decision::Allow { .. } => GeminiOutput {
+                decision: "allow".to_string(),
+                reason: None,
+            },
+            Decision::Block { message } => GeminiOutput {
+                decision: "deny".to_string(),
+                reason: Some(message.clone()),
+            },
+        };
+        serde_json::to_string(&output)
+            .map_err(|e| anyhow!("Failed to serialize Gemini output: {}", e))
     }
 }

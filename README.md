@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  Simple TOML hooks for Claude Code, Cursor, Windsurf - Command blocking, auto-formatting, notifications
+  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI - Command blocking, auto-formatting, notifications
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
-- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, and Windsurf
+- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
 ## Why claw-hooks?
 
@@ -264,7 +264,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf` |
+| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `gemini` |
 | `--config` | `-c` | Path to configuration file |
 | `--help` | `-h` | Show help |
 
@@ -279,6 +279,9 @@ claw-hooks hook --format cursor
 
 # Process Windsurf hooks
 claw-hooks hook --format windsurf
+
+# Process Gemini CLI hooks
+claw-hooks hook --format gemini
 
 # Use custom config
 claw-hooks hook --config /path/to/config.toml
@@ -351,6 +354,35 @@ Add to `~/.codeium/windsurf/hooks.json` (user) or `.windsurf/hooks.json` (projec
     ],
     "post_cascade_response": [
       { "command": "claw-hooks hook --format windsurf", "show_output": true }
+    ]
+  }
+}
+```
+
+### Gemini CLI
+
+Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "write_file|replace",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
+      }
     ]
   }
 }
@@ -510,6 +542,42 @@ Uses `agent_action_name` field:
 | `post_write_code` | PostToolUse + Write |
 | `post_cascade_response` | Stop |
 
+### Gemini CLI (`--format gemini`)
+
+Uses `hook_event_name` and `tool_name` fields:
+
+```jsonc
+// BeforeTool event (shell command)
+{
+  "hook_event_name": "BeforeTool",
+  "tool_name": "run_shell_command",
+  "tool_input": { "command": "..." },
+  "session_id": "..."
+}
+
+// AfterTool event (file write)
+{
+  "hook_event_name": "AfterTool",
+  "tool_name": "write_file",
+  "tool_input": { "file_path": "..." }
+}
+
+// AfterAgent event (agent loop ends)
+{
+  "hook_event_name": "AfterAgent"
+}
+```
+
+| hook_event_name | tool_name | Internal Mapping |
+|-----------------|-----------|------------------|
+| `BeforeTool` | `run_shell_command` | PreToolUse + Bash |
+| `AfterTool` | `write_file` | PostToolUse + Write |
+| `AfterAgent` | - | Stop |
+
+Output format uses `allow`/`deny` instead of `approve`/`block`:
+- Allow: `{"decision":"allow"}`
+- Deny: `{"decision":"deny","reason":"..."}`
+
 ### Event Mapping Summary
 
 ```mermaid
@@ -518,31 +586,37 @@ graph LR
         CC1[Claude: PreToolUse + Bash]
         CU1[Cursor: beforeShellExecution]
         WS1[Windsurf: pre_run_command]
+        GE1[Gemini: BeforeTool + run_shell_command]
     end
     CH1[🛡️ Validate & suggest alternatives]
     CC1 --> CH1
     CU1 --> CH1
     WS1 --> CH1
+    GE1 --> CH1
 
     subgraph After File Save
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
+        GE2[Gemini: AfterTool + write_file]
     end
     CH2[🔧 Run commands by extension]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
+    GE2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
+        GE3[Gemini: AfterAgent]
     end
     CH3[🔔 Send notifications]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3
+    GE3 --> CH3
 ```
 
 ## Input/Output Reference
@@ -579,10 +653,19 @@ The `additionalContext` field passes lint warnings/errors to Claude Code, allowi
 
 ### Exit Codes
 
+**Claude Code / Cursor / Windsurf**:
 | Code | Meaning |
 |------|---------|
 | `0` | Allow |
 | `2` | Block |
+
+**Gemini CLI** (different semantics):
+| Code | Meaning |
+|------|---------|
+| `0` | Success (decision in JSON: `allow` or `deny`) |
+| `2` | System error (stderr used as reason) |
+
+Gemini CLI expects exit code `0` for all decisions, including blocks. The `decision` field in the JSON response determines whether the action is allowed or denied.
 
 ## Performance
 

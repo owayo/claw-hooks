@@ -29,7 +29,7 @@ impl StopHookFilter {
         let program = &parts[0];
         let args = &parts[1..];
 
-        debug!("Executing stop hook: {} {:?}", program, args);
+        debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -40,7 +40,7 @@ impl StopHookFilter {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Stop hook command failed: {}", stderr);
+            warn!("🛑 Stop hook command failed: {}", stderr);
         }
 
         Ok(())
@@ -57,7 +57,7 @@ impl Filter for StopHookFilter {
         // Execute all stop hooks
         for hook in &self.hooks {
             if let Err(e) = self.execute_hook(hook) {
-                warn!("Stop hook failed: {}", e);
+                warn!("🛑 Stop hook failed: {}", e);
             }
         }
 

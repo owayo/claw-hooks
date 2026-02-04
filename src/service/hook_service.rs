@@ -16,17 +16,20 @@ pub struct HookService {
     config: Config,
     filter_chain: FilterChain,
     adapter: FormatAdapter,
+    /// Trace mode: output raw input to stderr for debugging
+    trace: bool,
 }
 
 impl HookService {
     /// Create a new HookService with the specified format.
-    pub fn new(config: Config, format: Format) -> Self {
+    pub fn new(config: Config, format: Format, trace: bool) -> Self {
         let filter_chain = FilterChain::new(&config);
         let adapter = FormatAdapter::new(format);
         Self {
             config,
             filter_chain,
             adapter,
+            trace,
         }
     }
 
@@ -45,7 +48,17 @@ impl HookService {
             input.push_str(&line?);
         }
 
+        // Trace mode: output raw input to stderr immediately
+        if self.trace {
+            eprintln!("🔍 [TRACE] Raw input received:");
+            eprintln!("{}", input);
+            eprintln!("🔍 [TRACE] End of input");
+        }
+
         if input.is_empty() {
+            if self.trace {
+                eprintln!("🔍 [TRACE] ERROR: No input received from stdin");
+            }
             error!("No input received from stdin");
             // SECURITY: Use fail-closed - block when no input received
             let output_json = self.adapter.format_error("No input received from stdin");
@@ -58,9 +71,21 @@ impl HookService {
 
         // Parse input using format adapter
         let hook_input: HookInput = match self.adapter.parse_input(&input) {
-            Ok(input) => input,
+            Ok(parsed) => {
+                if self.trace {
+                    eprintln!("🔍 [TRACE] Parsed input:");
+                    eprintln!("  event: {}", parsed.event);
+                    eprintln!("  tool_name: {}", parsed.tool_name);
+                    eprintln!("  tool_input: {:?}", parsed.tool_input);
+                    eprintln!("  session_id: {:?}", parsed.session_id);
+                }
+                parsed
+            }
             Err(e) => {
                 let error_msg = format!("Failed to parse input: {}", e);
+                if self.trace {
+                    eprintln!("🔍 [TRACE] Parse error: {}", error_msg);
+                }
                 error!("{}", error_msg);
                 // Output error in the appropriate format with message
                 // SECURITY: Use fail-closed exit code (2 = block)
@@ -75,8 +100,19 @@ impl HookService {
         let decision = self.process(&hook_input);
         let exit_code = self.adapter.exit_code(&decision);
 
+        if self.trace {
+            eprintln!("🔍 [TRACE] Decision: {:?}", decision);
+            eprintln!("🔍 [TRACE] Exit code: {}", exit_code);
+        }
+
         // Write output using format adapter
         let output_json = self.adapter.format_output(&decision, &hook_input.event)?;
+
+        if self.trace {
+            eprintln!("🔍 [TRACE] Output JSON:");
+            eprintln!("{}", output_json);
+        }
+
         info!("Output: {}", output_json);
         writeln!(stdout, "{}", output_json)?;
         stdout.flush()?; // Ensure output is flushed before exit (important for pipes)

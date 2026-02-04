@@ -6,7 +6,7 @@ use std::process::Command;
 use tracing::{debug, warn};
 
 use super::Filter;
-use crate::domain::{Decision, HookInput, ToolInput};
+use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Parsed command template result.
 struct ParsedCommand {
@@ -227,15 +227,18 @@ impl ExtensionHookFilter {
 
 impl Filter for ExtensionHookFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // Applies to Write, Edit, MultiEdit in both PreToolUse and PostToolUse events
+        // Applies to Write, Edit, MultiEdit in both BeforeCommand and AfterFileEdit events
         // NOT for Read operations
         //
-        // PreToolUse: Run hook before file write (e.g., validation)
-        // PostToolUse: Run hook after file write (e.g., formatting, linting)
+        // BeforeCommand: Run hook before file write (e.g., validation)
+        // AfterFileEdit: Run hook after file write (e.g., formatting, linting)
         //   - Claude Code: PostToolUse event
         //   - Cursor: afterFileEdit hook
         //   - Windsurf: post_write_code action
-        if !matches!(input.event.as_str(), "PreToolUse" | "PostToolUse") {
+        if !matches!(
+            input.event,
+            HookEvent::BeforeCommand | HookEvent::AfterFileEdit
+        ) {
             return false;
         }
 

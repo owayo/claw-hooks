@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::{Decision, HookInput};
+use crate::domain::{Decision, HookEvent, HookInput};
 
 /// Filter for Stop event hooks.
 pub struct StopHookFilter {
@@ -50,7 +50,7 @@ impl StopHookFilter {
 impl Filter for StopHookFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
         // Applies only to Stop events
-        input.event == "Stop"
+        input.event == HookEvent::Stop
     }
 
     fn execute(&self, _input: &HookInput) -> Decision {
@@ -83,7 +83,7 @@ mod tests {
         let filter = StopHookFilter::new(hooks);
 
         let stop_input = HookInput {
-            event: "Stop".to_string(),
+            event: HookEvent::Stop,
             tool_name: "Stop".to_string(),
             tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
             session_id: None,
@@ -100,7 +100,7 @@ mod tests {
         let filter = StopHookFilter::new(hooks);
 
         let bash_input = HookInput {
-            event: "PreToolUse".to_string(),
+            event: HookEvent::BeforeCommand,
             tool_name: "Bash".to_string(),
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "ls".to_string(),
@@ -120,7 +120,7 @@ mod tests {
         let filter = StopHookFilter::new(hooks);
 
         let stop_input = HookInput {
-            event: "Stop".to_string(),
+            event: HookEvent::Stop,
             tool_name: "Stop".to_string(),
             tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
             session_id: None,

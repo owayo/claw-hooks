@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::Format;
-use crate::domain::{Decision, HookInput};
+use crate::domain::{Decision, HookEvent, HookInput};
 
 /// Adapter for converting between format-specific I/O and internal types.
 pub struct FormatAdapter {
@@ -34,8 +34,8 @@ impl FormatAdapter {
     }
 
     /// Format output based on the agent format.
-    /// The event parameter is used to include hookSpecificOutput for Claude Code PostToolUse.
-    pub fn format_output(&self, decision: &Decision, event: &str) -> Result<String> {
+    /// The event parameter is used to include hookSpecificOutput for Claude Code AfterFileEdit.
+    pub fn format_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         match self.format {
             Format::Claude => self.format_claude_output(decision, event),
             Format::Cursor => self.format_cursor_output(decision),
@@ -110,10 +110,18 @@ impl FormatAdapter {
         let claude_input: ClaudeInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
 
-        let event = claude_input.hook_event_name.clone();
+        let raw_event = claude_input.hook_event_name.clone();
+
+        // Map Claude Code event names to HookEvent
+        let event = match raw_event.as_str() {
+            "PreToolUse" => HookEvent::BeforeCommand,
+            "PostToolUse" => HookEvent::AfterFileEdit,
+            "Stop" => HookEvent::Stop,
+            other => return Err(anyhow!("Unknown Claude event: {}", other)),
+        };
 
         // Handle Stop event specially (no tool_name or tool_input)
-        let (tool_name, tool_input) = if event == "Stop" {
+        let (tool_name, tool_input) = if event == HookEvent::Stop {
             (
                 "Stop".to_string(),
                 crate::domain::ToolInput::Stop(crate::domain::StopInput {
@@ -134,7 +142,7 @@ impl FormatAdapter {
 
         debug!(
             format = "claude",
-            event = %event,
+            event = ?event,
             tool_name = %tool_name,
             "🤖 Claude Code parsed input"
         );
@@ -147,7 +155,7 @@ impl FormatAdapter {
         })
     }
 
-    fn format_claude_output(&self, decision: &Decision, event: &str) -> Result<String> {
+    fn format_claude_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         let output = decision.clone().into_output(event);
         serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
@@ -168,13 +176,13 @@ impl FormatAdapter {
                     hook_type = "stop",
                     status = %status,
                     loop_count = ?loop_count,
-                    mapped_event = "Stop",
+                    mapped_event = ?HookEvent::Stop,
                     "🖱️ Cursor parsed input"
                 );
 
                 // Cursor's stop hook is equivalent to Stop event
                 Ok(HookInput {
-                    event: "Stop".to_string(),
+                    event: HookEvent::Stop,
                     tool_name: "Stop".to_string(),
                     tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
                         status: Some(status),
@@ -190,14 +198,14 @@ impl FormatAdapter {
                     hook_type = "beforeShellExecution",
                     command = %command,
                     cwd = ?cwd,
-                    mapped_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforeCommand,
                     mapped_tool = "Bash",
                     "🖱️ Cursor parsed input"
                 );
 
-                // Cursor's beforeShellExecution is equivalent to PreToolUse for Bash
+                // Cursor's beforeShellExecution is equivalent to BeforeCommand for Bash
                 Ok(HookInput {
-                    event: "PreToolUse".to_string(),
+                    event: HookEvent::BeforeCommand,
                     tool_name: "Bash".to_string(),
                     tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                         command,
@@ -211,14 +219,14 @@ impl FormatAdapter {
                     format = "cursor",
                     hook_type = "afterFileEdit",
                     file_path = %file_path,
-                    mapped_event = "PostToolUse",
+                    mapped_event = ?HookEvent::AfterFileEdit,
                     mapped_tool = "Write",
                     "🖱️ Cursor parsed input"
                 );
 
-                // Cursor's afterFileEdit is equivalent to PostToolUse for Write
+                // Cursor's afterFileEdit is equivalent to AfterFileEdit for Write
                 Ok(HookInput {
-                    event: "PostToolUse".to_string(),
+                    event: HookEvent::AfterFileEdit,
                     tool_name: "Write".to_string(),
                     tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
                         file_path,
@@ -264,7 +272,7 @@ impl FormatAdapter {
                     .and_then(|ti| ti.command_line.clone())
                     .unwrap_or_default();
                 (
-                    "PreToolUse".to_string(),
+                    HookEvent::BeforeCommand,
                     "Bash".to_string(),
                     crate::domain::ToolInput::Bash(crate::domain::BashInput {
                         command,
@@ -279,7 +287,7 @@ impl FormatAdapter {
                     .and_then(|ti| ti.file_path.clone())
                     .unwrap_or_default();
                 (
-                    "PostToolUse".to_string(),
+                    HookEvent::AfterFileEdit,
                     "Write".to_string(),
                     crate::domain::ToolInput::File(crate::domain::FileOperationInput {
                         file_path,
@@ -293,7 +301,7 @@ impl FormatAdapter {
                     .as_ref()
                     .and_then(|ti| ti.response.clone());
                 (
-                    "Stop".to_string(),
+                    HookEvent::Stop,
                     "Stop".to_string(),
                     crate::domain::ToolInput::Stop(crate::domain::StopInput {
                         status: None,
@@ -303,19 +311,14 @@ impl FormatAdapter {
                 )
             }
             other => {
-                // Unknown action, pass through as-is
-                (
-                    other.to_string(),
-                    "Unknown".to_string(),
-                    crate::domain::ToolInput::Other(serde_json::json!({})),
-                )
+                return Err(anyhow!("Unknown Windsurf action: {}", other));
             }
         };
 
         debug!(
             format = "windsurf",
             agent_action_name = %windsurf_input.agent_action_name,
-            mapped_event = %event,
+            mapped_event = ?event,
             mapped_tool = %tool_name,
             cwd = ?windsurf_input.tool_info.as_ref().and_then(|ti| ti.cwd.as_ref()),
             "🏄 Windsurf parsed input"
@@ -329,7 +332,7 @@ impl FormatAdapter {
         })
     }
 
-    fn format_windsurf_output(&self, decision: &Decision, _event: &str) -> Result<String> {
+    fn format_windsurf_output(&self, decision: &Decision, _event: HookEvent) -> Result<String> {
         // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
         // Since Windsurf doesn't support additionalContext, we use a simplified output
         let output = match decision {
@@ -458,7 +461,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Claude);
         let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
     }
 
@@ -467,7 +470,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Cursor);
         let input = r#"{"command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
         if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
             assert_eq!(bash.command, "rm -rf /tmp/test");
@@ -481,7 +484,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Cursor);
         let input = r#"{"file_path":"/path/to/file.rs"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
         if let crate::domain::ToolInput::File(file) = &result.tool_input {
             assert_eq!(file.file_path, "/path/to/file.rs");
@@ -496,7 +499,7 @@ mod tests {
         // Test with camelCase filePath (Cursor might use either)
         let input = r#"{"filePath":"/path/to/file.tsx"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
         if let crate::domain::ToolInput::File(file) = &result.tool_input {
             assert_eq!(file.file_path, "/path/to/file.tsx");
@@ -510,7 +513,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf);
         let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"rm -rf /tmp/test","cwd":"/path/to/project"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
         if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
             assert_eq!(bash.command, "rm -rf /tmp/test");
@@ -524,7 +527,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf);
         let input = r#"{"agent_action_name":"post_write_code","tool_info":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
     }
 
@@ -532,7 +535,7 @@ mod tests {
     fn test_cursor_output_allow() {
         let adapter = FormatAdapter::new(Format::Cursor);
         let output = adapter
-            .format_output(&Decision::allow(), "PreToolUse")
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""permission":"allow""#));
     }
@@ -545,7 +548,7 @@ mod tests {
                 &Decision::Block {
                     message: "Command blocked for safety".to_string(),
                 },
-                "PreToolUse",
+                HookEvent::BeforeCommand,
             )
             .unwrap();
         assert!(output.contains(r#""permission":"deny""#));
@@ -556,10 +559,10 @@ mod tests {
     fn test_claude_output_allow() {
         let adapter = FormatAdapter::new(Format::Claude);
         let output = adapter
-            .format_output(&Decision::allow(), "PreToolUse")
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // No hookSpecificOutput for PreToolUse
+        // No hookSpecificOutput for BeforeCommand
         assert!(!output.contains("hookSpecificOutput"));
     }
 
@@ -567,9 +570,11 @@ mod tests {
     fn test_claude_output_allow_with_context() {
         let adapter = FormatAdapter::new(Format::Claude);
         let decision = Decision::allow_with_context("Lint warning: unused variable".to_string());
-        let output = adapter.format_output(&decision, "PostToolUse").unwrap();
+        let output = adapter
+            .format_output(&decision, HookEvent::AfterFileEdit)
+            .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // hookSpecificOutput should be present for PostToolUse with context
+        // hookSpecificOutput should be present for AfterFileEdit with context
         assert!(output.contains("hookSpecificOutput"));
         assert!(output.contains("additionalContext"));
         assert!(output.contains("Lint warning: unused variable"));
@@ -583,7 +588,7 @@ mod tests {
                 &Decision::Block {
                     message: "Command blocked for safety".to_string(),
                 },
-                "PreToolUse",
+                HookEvent::BeforeCommand,
             )
             .unwrap();
         assert!(output.contains(r#""decision":"block""#));
@@ -595,7 +600,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Cursor);
         let input = r#"{"status":"completed","loop_count":3}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "Stop");
+        assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert_eq!(stop.status, Some("completed".to_string()));
@@ -611,7 +616,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Cursor);
         let input = r#"{"status":"aborted"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "Stop");
+        assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert_eq!(stop.status, Some("aborted".to_string()));
@@ -626,7 +631,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf);
         let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"Task completed successfully."}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "Stop");
+        assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert!(stop.status.is_none());
@@ -646,7 +651,7 @@ mod tests {
         // Stop events have no tool_name or tool_input
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "Stop");
+        assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
     }
 
@@ -658,7 +663,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
         if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
             assert_eq!(bash.command, "rm -rf /tmp/test");
@@ -673,7 +678,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
     }
 
@@ -682,7 +687,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
     }
 
@@ -692,7 +697,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PostToolUse");
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write"); // replace maps to Write
     }
 
@@ -701,7 +706,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"AfterAgent"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "Stop");
+        assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
     }
 
@@ -710,7 +715,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"BeforeAgent"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "UserPromptSubmit");
+        assert_eq!(result.event, HookEvent::BeforePrompt);
         assert_eq!(result.tool_name, "UserPrompt");
     }
 
@@ -720,7 +725,7 @@ mod tests {
         // Gemini might use "event" instead of "hook_event_name"
         let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
     }
 
@@ -729,7 +734,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Gemini);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"custom_tool","tool_input":{}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, "PreToolUse");
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "custom_tool"); // Unknown tools kept as-is
     }
 
@@ -737,7 +742,7 @@ mod tests {
     fn test_gemini_output_allow() {
         let adapter = FormatAdapter::new(Format::Gemini);
         let output = adapter
-            .format_output(&Decision::allow(), "BeforeTool")
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""decision":"allow""#));
         assert!(!output.contains("reason"));
@@ -751,7 +756,7 @@ mod tests {
                 &Decision::Block {
                     message: "🚫 rm command blocked. Use safe-rm instead.".to_string(),
                 },
-                "BeforeTool",
+                HookEvent::BeforeCommand,
             )
             .unwrap();
         assert!(output.contains(r#""decision":"deny""#));
@@ -854,20 +859,20 @@ impl FormatAdapter {
         let gemini_input: GeminiInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
 
-        let event = gemini_input.hook_event_name.clone();
+        let raw_event = gemini_input.hook_event_name.clone();
 
-        // Map Gemini events to internal events
-        let mapped_event = match event.as_str() {
-            "BeforeTool" => "PreToolUse".to_string(),
-            "AfterTool" => "PostToolUse".to_string(),
-            "AfterAgent" => "Stop".to_string(),
-            "BeforeAgent" => "UserPromptSubmit".to_string(),
-            other => other.to_string(), // Pass through unknown events
+        // Map Gemini events to internal HookEvent
+        let event = match raw_event.as_str() {
+            "BeforeTool" => HookEvent::BeforeCommand,
+            "AfterTool" => HookEvent::AfterFileEdit,
+            "AfterAgent" => HookEvent::Stop,
+            "BeforeAgent" => HookEvent::BeforePrompt,
+            other => return Err(anyhow!("Unknown Gemini event: {}", other)),
         };
 
         // Handle non-tool events
-        if mapped_event == "Stop" || mapped_event == "UserPromptSubmit" {
-            let tool_name = if mapped_event == "Stop" {
+        if event == HookEvent::Stop || event == HookEvent::BeforePrompt {
+            let tool_name = if event == HookEvent::Stop {
                 "Stop".to_string()
             } else {
                 "UserPrompt".to_string()
@@ -875,13 +880,13 @@ impl FormatAdapter {
 
             debug!(
                 format = "gemini",
-                event = %event,
-                mapped_event = %mapped_event,
+                raw_event = %raw_event,
+                mapped_event = ?event,
                 "♊ Gemini CLI parsed input (non-tool event)"
             );
 
             return Ok(HookInput {
-                event: mapped_event,
+                event,
                 tool_name,
                 tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
                     status: None,
@@ -917,15 +922,15 @@ impl FormatAdapter {
 
         debug!(
             format = "gemini",
-            event = %event,
-            mapped_event = %mapped_event,
+            raw_event = %raw_event,
+            mapped_event = ?event,
             raw_tool_name = %raw_tool_name,
             mapped_tool = %tool_name,
             "♊ Gemini CLI parsed input"
         );
 
         Ok(HookInput {
-            event: mapped_event,
+            event,
             tool_name,
             tool_input,
             session_id: gemini_input.session_id,

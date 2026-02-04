@@ -2,7 +2,7 @@
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
-use crate::domain::{Decision, HookInput, ToolInput};
+use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Default message for kill blocking (generic, can be customized via config).
 const DEFAULT_KILL_MESSAGE: &str = "🚫 kill/pkill/killall command blocked for safety. Use safe-kill: safe-kill <PID>, safe-kill -N <name>, or safe-kill -p <port>.";
@@ -74,8 +74,8 @@ impl Filter for KillFilter {
             return false;
         }
 
-        // Only applies to Bash tool in PreToolUse event
-        if input.event != "PreToolUse" || input.tool_name != "Bash" {
+        // Only applies to Bash tool in BeforeCommand event
+        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 

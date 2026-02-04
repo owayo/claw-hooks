@@ -4,7 +4,7 @@ use regex::Regex;
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
-use crate::domain::{Decision, HookInput, ToolInput};
+use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Filter mode for custom command matching.
 enum FilterMode {
@@ -175,8 +175,8 @@ impl CustomCommandFilter {
 
 impl Filter for CustomCommandFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // Only applies to Bash tool in PreToolUse event
-        if input.event != "PreToolUse" || input.tool_name != "Bash" {
+        // Only applies to Bash tool in BeforeCommand event
+        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 

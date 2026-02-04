@@ -8,7 +8,7 @@ use tracing::{debug, error, info};
 
 use crate::cli::Format;
 use crate::config::Config;
-use crate::domain::{Decision, FilterChain, HookInput};
+use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
 
 /// Service for processing hook events.
@@ -74,7 +74,7 @@ impl HookService {
             Ok(parsed) => {
                 if self.trace {
                     eprintln!("🔍 [TRACE] Parsed input:");
-                    eprintln!("  event: {}", parsed.event);
+                    eprintln!("  event: {:?}", parsed.event);
                     eprintln!("  tool_name: {}", parsed.tool_name);
                     eprintln!("  tool_input: {:?}", parsed.tool_input);
                     eprintln!("  session_id: {:?}", parsed.session_id);
@@ -106,7 +106,7 @@ impl HookService {
         }
 
         // Write output using format adapter
-        let output_json = self.adapter.format_output(&decision, &hook_input.event)?;
+        let output_json = self.adapter.format_output(&decision, hook_input.event)?;
 
         if self.trace {
             eprintln!("🔍 [TRACE] Output JSON:");
@@ -123,34 +123,31 @@ impl HookService {
     /// Process hook input and return decision.
     pub fn process(&self, input: &HookInput) -> Decision {
         debug!(
-            "Processing hook: event={}, tool_name={}",
+            "Processing hook: event={:?}, tool_name={}",
             input.event, input.tool_name
         );
 
-        match input.event.as_str() {
-            "PreToolUse" => self.handle_pre_tool_use(input),
-            "PostToolUse" => self.handle_post_tool_use(input),
-            "Stop" => self.handle_stop(input),
-            _ => {
-                debug!("Unknown event type: {}", input.event);
-                Decision::allow()
-            }
+        match input.event {
+            HookEvent::BeforeCommand => self.handle_before_command(input),
+            HookEvent::AfterFileEdit => self.handle_after_file_edit(input),
+            HookEvent::Stop => self.handle_stop(input),
+            HookEvent::BeforePrompt => self.handle_before_prompt(input),
         }
     }
 
-    /// Handle PreToolUse event.
-    fn handle_pre_tool_use(&self, input: &HookInput) -> Decision {
-        debug!("Handling PreToolUse for tool: {}", input.tool_name);
+    /// Handle BeforeCommand event (pre-tool-use).
+    fn handle_before_command(&self, input: &HookInput) -> Decision {
+        debug!("Handling BeforeCommand for tool: {}", input.tool_name);
 
         // Run through filter chain
         self.filter_chain.execute(input)
     }
 
-    /// Handle PostToolUse event.
-    fn handle_post_tool_use(&self, input: &HookInput) -> Decision {
+    /// Handle AfterFileEdit event (post-tool-use for file operations).
+    fn handle_after_file_edit(&self, input: &HookInput) -> Decision {
         if self.config.debug {
             debug!(
-                "PostToolUse: tool_name={}, tool_input={:?}",
+                "AfterFileEdit: tool_name={}, tool_input={:?}",
                 input.tool_name, input.tool_input
             );
         }
@@ -158,13 +155,13 @@ impl HookService {
         // For Write/Edit/MultiEdit, run through filter chain for extension hooks
         // This enables:
         // - Claude Code: PostToolUse with Write
-        // - Cursor: afterFileEdit (mapped to PostToolUse + Write)
-        // - Windsurf: post_write_code (mapped to PostToolUse + Write)
+        // - Cursor: afterFileEdit (mapped to AfterFileEdit + Write)
+        // - Windsurf: post_write_code (mapped to AfterFileEdit + Write)
         if matches!(input.tool_name.as_str(), "Write" | "Edit" | "MultiEdit") {
             return self.filter_chain.execute(input);
         }
 
-        // Other PostToolUse events always allow
+        // Other AfterFileEdit events always allow
         Decision::allow()
     }
 
@@ -174,5 +171,13 @@ impl HookService {
 
         // Execute stop hooks through the filter chain
         self.filter_chain.execute(input)
+    }
+
+    /// Handle BeforePrompt event (Gemini CLI only).
+    fn handle_before_prompt(&self, _input: &HookInput) -> Decision {
+        debug!("Handling BeforePrompt event");
+
+        // BeforePrompt is currently a pass-through event
+        Decision::allow()
     }
 }

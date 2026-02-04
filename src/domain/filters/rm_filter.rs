@@ -2,7 +2,7 @@
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
-use crate::domain::{Decision, HookInput, ToolInput};
+use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Default message for rm blocking (generic, can be customized via config).
 const DEFAULT_RM_MESSAGE: &str = "🚫 rm/rmdir command blocked for safety. Configure rm_block_message in config.toml to customize this message.";
@@ -47,8 +47,8 @@ impl Filter for RmFilter {
             return false;
         }
 
-        // Only applies to Bash tool in PreToolUse event
-        if input.event != "PreToolUse" || input.tool_name != "Bash" {
+        // Only applies to Bash tool in BeforeCommand event
+        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 

@@ -2,7 +2,7 @@
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
-use crate::domain::{Decision, HookInput, ToolInput};
+use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Default message for dd blocking.
 const DEFAULT_DD_MESSAGE: &str = "🚫 dd command is blocked for safety. Use cp or rsync for file operations. If you need dd specifically, use safe-dd or request explicit permission.";
@@ -44,8 +44,8 @@ impl Filter for DdFilter {
             return false;
         }
 
-        // Only applies to Bash tool in PreToolUse event
-        if input.event != "PreToolUse" || input.tool_name != "Bash" {
+        // Only applies to Bash tool in BeforeCommand event
+        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 

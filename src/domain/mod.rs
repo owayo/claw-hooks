@@ -13,7 +13,7 @@ pub mod parser;
 mod types;
 
 pub use filters::FilterChain;
-pub use types::{Decision, HookInput, ToolInput};
+pub use types::{Decision, HookEvent, HookInput, ToolInput};
 
 // Allow unused for potential future use / library API
 #[allow(unused)]

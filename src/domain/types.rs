@@ -2,11 +2,56 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Hook event type.
+///
+/// Represents the type of hook event in an agent-agnostic way.
+/// Each AI coding agent uses different event names externally,
+/// but internally we use this unified enum for type safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    /// Before command execution (target for rm, kill blocking).
+    ///
+    /// External event names:
+    /// - Claude Code: `PreToolUse`
+    /// - Cursor: `ShellExecution`
+    /// - Windsurf: `pre_run_command`
+    /// - Gemini CLI: `BeforeTool`
+    BeforeCommand,
+
+    /// After file edit (target for extension hooks).
+    ///
+    /// External event names:
+    /// - Claude Code: `PostToolUse`
+    /// - Cursor: `FileEdit`
+    /// - Windsurf: `post_write_code`
+    /// - Gemini CLI: `AfterTool`
+    AfterFileEdit,
+
+    /// Agent loop stopped.
+    ///
+    /// External event names:
+    /// - Claude Code: `Stop`
+    /// - Cursor: `Stop`
+    /// - Windsurf: `post_cascade_response`
+    /// - Gemini CLI: `AfterAgent`
+    Stop,
+
+    /// Before user prompt submission (Gemini CLI only).
+    ///
+    /// External event names:
+    /// - Gemini CLI: `BeforeAgent`
+    BeforePrompt,
+}
+
 /// Hook input received from AI agent.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Note: This struct is not directly deserializable from JSON.
+/// Use `FormatAdapter::parse_input()` to convert agent-specific
+/// JSON formats into this internal representation.
+#[derive(Debug, Clone)]
 pub struct HookInput {
-    /// Event type: "PreToolUse", "PostToolUse", "Stop"
-    pub event: String,
+    /// Event type (agent-agnostic).
+    pub event: HookEvent,
 
     /// Tool name: "Bash", "Write", "Edit", "MultiEdit", "Read", etc.
     pub tool_name: String,
@@ -15,7 +60,6 @@ pub struct HookInput {
     pub tool_input: ToolInput,
 
     /// Optional session identifier
-    #[serde(default)]
     pub session_id: Option<String>,
 }
 
@@ -138,12 +182,14 @@ impl Decision {
         }
     }
 
-    /// Convert decision to HookOutput for PostToolUse event.
-    pub fn into_output(self, event: &str) -> HookOutput {
+    /// Convert decision to HookOutput for the given event.
+    pub fn into_output(self, event: HookEvent) -> HookOutput {
         match self {
             Decision::Allow { additional_context } => {
-                let hook_specific_output = if event == "PostToolUse" {
+                // Only include hookSpecificOutput for AfterFileEdit (PostToolUse in Claude Code)
+                let hook_specific_output = if event == HookEvent::AfterFileEdit {
                     additional_context.map(|ctx| HookSpecificOutput {
+                        // External format uses "PostToolUse" for Claude Code compatibility
                         hook_event_name: "PostToolUse".to_string(),
                         additional_context: Some(ctx),
                     })
@@ -194,5 +240,48 @@ impl Decision {
             }
             Decision::Block { message } => Decision::Block { message },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hook_event_equality() {
+        assert_eq!(HookEvent::BeforeCommand, HookEvent::BeforeCommand);
+        assert_eq!(HookEvent::AfterFileEdit, HookEvent::AfterFileEdit);
+        assert_eq!(HookEvent::Stop, HookEvent::Stop);
+        assert_eq!(HookEvent::BeforePrompt, HookEvent::BeforePrompt);
+
+        assert_ne!(HookEvent::BeforeCommand, HookEvent::AfterFileEdit);
+        assert_ne!(HookEvent::BeforeCommand, HookEvent::Stop);
+        assert_ne!(HookEvent::BeforeCommand, HookEvent::BeforePrompt);
+    }
+
+    #[test]
+    fn test_hook_event_copy() {
+        let event = HookEvent::BeforeCommand;
+        let copied = event; // Copy, not move
+        assert_eq!(event, copied);
+        // Both can be used after copy
+        assert_eq!(event, HookEvent::BeforeCommand);
+        assert_eq!(copied, HookEvent::BeforeCommand);
+    }
+
+    #[test]
+    fn test_hook_event_clone() {
+        let event = HookEvent::AfterFileEdit;
+        // Explicitly test Clone trait (not just Copy)
+        let cloned = Clone::clone(&event);
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn test_hook_event_debug() {
+        assert_eq!(format!("{:?}", HookEvent::BeforeCommand), "BeforeCommand");
+        assert_eq!(format!("{:?}", HookEvent::AfterFileEdit), "AfterFileEdit");
+        assert_eq!(format!("{:?}", HookEvent::Stop), "Stop");
+        assert_eq!(format!("{:?}", HookEvent::BeforePrompt), "BeforePrompt");
     }
 }

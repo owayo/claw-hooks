@@ -825,4 +825,84 @@ mod tests {
         assert!(commands.contains(&"cd".to_string()));
         assert!(commands.contains(&"yarn".to_string()));
     }
+
+    // === Boundary Condition Tests ===
+
+    #[test]
+    fn test_extract_commands_empty_input() {
+        let mut parser = ShellParser::new();
+        assert!(parser.extract_commands("").is_empty());
+    }
+
+    #[test]
+    fn test_extract_commands_whitespace_only() {
+        let mut parser = ShellParser::new();
+        assert!(parser.extract_commands("   ").is_empty());
+        assert!(parser.extract_commands("\t\n").is_empty());
+    }
+
+    #[test]
+    fn test_extract_commands_trailing_operator() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("ls &&");
+        assert!(commands.contains(&"ls".to_string()));
+    }
+
+    #[test]
+    fn test_extract_commands_leading_operator() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("&& ls");
+        // Should still extract ls even with leading operator
+        assert!(commands.contains(&"ls".to_string()));
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_empty() {
+        let tokens = parse_shell_tokens("");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_whitespace_only() {
+        let tokens = parse_shell_tokens("   ");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_escaped_space() {
+        let tokens = parse_shell_tokens("echo foo\\ bar");
+        assert_eq!(tokens, vec!["echo", "foo bar"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_escaped_quote() {
+        let tokens = parse_shell_tokens("echo \"hello\\\"world\"");
+        assert_eq!(tokens, vec!["echo", "hello\"world"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_mixed_quotes() {
+        let tokens = parse_shell_tokens("echo 'single' \"double\"");
+        assert_eq!(tokens, vec!["echo", "single", "double"]);
+    }
+
+    #[cfg(feature = "ast-parser")]
+    #[test]
+    fn test_extract_commands_ignores_operators_in_quotes() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo \"a && b\" && rm -rf /tmp/test");
+        assert!(commands.contains(&"echo".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+        // "b" should NOT be extracted as it's inside quotes
+        assert!(!commands.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_extract_commands_newline_separated() {
+        let mut parser = ShellParser::new();
+        // Commands separated by semicolon (newlines handled by shell)
+        let commands = parser.extract_commands("ls; echo hello");
+        assert!(commands.contains(&"ls".to_string()));
+        assert!(commands.contains(&"echo".to_string()));
+    }
 }

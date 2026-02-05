@@ -71,3 +71,130 @@ pub fn validate(config: &Config) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CustomFilter, StopHook};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn default_config() -> Config {
+        Config::default()
+    }
+
+    #[test]
+    fn test_validate_default_config() {
+        let config = default_config();
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_regex() {
+        let mut config = default_config();
+        config.custom_filters.push(CustomFilter {
+            command: "[".to_string(), // Invalid regex
+            args: vec![],
+            message: "msg".to_string(),
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_custom_filter_command() {
+        let mut config = default_config();
+        config.custom_filters.push(CustomFilter {
+            command: "".to_string(),
+            args: vec![],
+            message: "msg".to_string(),
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_custom_filter_message() {
+        let mut config = default_config();
+        config.custom_filters.push(CustomFilter {
+            command: "npm".to_string(),
+            args: vec![],
+            message: "".to_string(),
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_extension_hooks_without_dot() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert("rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_extension_hook_missing_placeholder() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["rustfmt".to_string()]);
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_extension_hook_command() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["".to_string()]);
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_stop_hook_command() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            command: "".to_string(),
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_log_path_with_nul() {
+        let mut config = default_config();
+        config.log_path = PathBuf::from("bad\0path");
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_extension_hooks() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        hooks.insert(
+            ".go".to_string(),
+            vec!["gofmt -w {file}".to_string(), "golint {file}".to_string()],
+        );
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_custom_filters() {
+        let mut config = default_config();
+        config.custom_filters.push(CustomFilter {
+            command: "npm".to_string(),
+            args: vec!["install".to_string()],
+            message: "Use pnpm instead".to_string(),
+        });
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_stop_hooks() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            command: "notify-send 'Done'".to_string(),
+        });
+        assert!(validate(&config).is_ok());
+    }
+}

@@ -485,4 +485,67 @@ mod tests {
         let filter = create_filter_with_go_hooks();
         assert_eq!(filter.priority(), 100);
     }
+
+    // === validate_file_path tests ===
+
+    #[test]
+    fn test_validate_file_path_rejects_path_traversal() {
+        assert!(ExtensionHookFilter::validate_file_path("../secret.txt").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("/tmp/../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_rejects_dash_prefix() {
+        assert!(ExtensionHookFilter::validate_file_path("-rf").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("--help").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_rejects_dangerous_chars() {
+        assert!(ExtensionHookFilter::validate_file_path("bad;rm -rf /").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file`id`").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file$HOME").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file|pipe").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file&bg").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_accepts_safe_paths() {
+        assert!(ExtensionHookFilter::validate_file_path("/path/to/file.go").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("relative/path.rs").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("file with spaces.txt").is_ok());
+    }
+
+    // === parse_command_template tests ===
+
+    #[test]
+    fn test_parse_command_template_basic() {
+        let parsed = ExtensionHookFilter::parse_command_template("gofmt -w {file}").unwrap();
+        assert_eq!(parsed.program, "gofmt");
+        assert_eq!(parsed.args_before, vec!["-w"]);
+        assert!(parsed.args_after.is_empty());
+        assert!(parsed.inline_template.is_none());
+    }
+
+    #[test]
+    fn test_parse_command_template_inline_placeholder() {
+        let parsed =
+            ExtensionHookFilter::parse_command_template("tool --flag --file={file} --opt").unwrap();
+        assert_eq!(parsed.program, "tool");
+        assert_eq!(parsed.args_before, vec!["--flag"]);
+        assert_eq!(parsed.args_after, vec!["--opt"]);
+        assert_eq!(parsed.inline_template.as_deref(), Some("--file={file}"));
+    }
+
+    #[test]
+    fn test_parse_command_template_missing_placeholder_is_error() {
+        assert!(ExtensionHookFilter::parse_command_template("gofmt -w").is_err());
+        assert!(ExtensionHookFilter::parse_command_template("rustfmt").is_err());
+    }
+
+    #[test]
+    fn test_parse_command_template_empty_is_error() {
+        assert!(ExtensionHookFilter::parse_command_template("").is_err());
+        assert!(ExtensionHookFilter::parse_command_template("   ").is_err());
+    }
 }

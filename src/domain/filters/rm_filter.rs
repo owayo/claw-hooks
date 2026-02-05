@@ -185,4 +185,42 @@ mod tests {
             _ => panic!("Expected Block decision"),
         }
     }
+
+    // === Edge Case Tests ===
+
+    #[test]
+    fn test_contains_rm_command_with_sudo_wrapper() {
+        assert!(RmFilter::contains_rm_command("sudo rm -rf /tmp/test"));
+        assert!(RmFilter::contains_rm_command(
+            "sudo -u root rm -rf /tmp/test"
+        ));
+    }
+
+    #[test]
+    fn test_contains_rm_command_with_bash_c_subshell() {
+        assert!(RmFilter::contains_rm_command("bash -c 'rm -rf /tmp/test'"));
+        assert!(RmFilter::contains_rm_command("sh -c \"rm -rf /tmp/test\""));
+    }
+
+    #[test]
+    fn test_contains_rm_command_in_command_substitution() {
+        assert!(RmFilter::contains_rm_command("echo $(rm -rf /tmp/test)"));
+    }
+
+    #[test]
+    fn test_contains_rm_command_in_subshell() {
+        assert!(RmFilter::contains_rm_command("(cd /tmp && rm -rf test)"));
+    }
+
+    #[test]
+    fn test_contains_rm_command_with_env_wrapper() {
+        assert!(RmFilter::contains_rm_command(
+            "env PATH=/usr/bin rm file.txt"
+        ));
+    }
+
+    #[test]
+    fn test_contains_rm_command_with_nohup_wrapper() {
+        assert!(RmFilter::contains_rm_command("nohup rm -rf /tmp/test &"));
+    }
 }

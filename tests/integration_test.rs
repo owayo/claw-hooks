@@ -876,3 +876,197 @@ fn test_gemini_format_with_event_alias() {
         stdout
     );
 }
+
+// === Fail-Closed Error Handling Tests ===
+
+#[test]
+fn test_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook("");
+
+    assert_eq!(
+        exit_code, 2,
+        "Empty input should result in block (fail-closed)"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_malformed_json_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook("{");
+
+    assert_eq!(
+        exit_code, 2,
+        "Malformed JSON should result in block (fail-closed)"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_unknown_event_is_fail_closed() {
+    let input = r#"{"hook_event_name":"Bogus","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 2,
+        "Unknown event should result in block (fail-closed)"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cursor_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "cursor");
+
+    assert_eq!(
+        exit_code, 2,
+        "Empty input should result in deny (fail-closed)"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""permission":"deny""#),
+        "Output should indicate deny: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_windsurf_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "windsurf");
+
+    assert_eq!(
+        exit_code, 2,
+        "Empty input should result in block (fail-closed)"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "gemini");
+
+    // Gemini uses exit 0 but decision should be deny
+    assert_eq!(exit_code, 2, "Gemini empty input should fail");
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+// === Wrapper and Subshell Detection Tests ===
+
+#[test]
+fn test_block_sudo_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "sudo rm should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_bash_c_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c 'rm -rf /tmp/test'"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "bash -c rm should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_sudo_kill() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo kill -9 1234"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "sudo kill should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_sudo_dd() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo dd if=/dev/zero of=/dev/sda"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "sudo dd should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_xargs_kill() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pgrep node | xargs kill -9"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "xargs kill should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_rm_in_subshell() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"(cd /tmp && rm -rf test)"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "rm in subshell should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_rm_in_command_substitution() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo $(rm -rf /tmp/test)"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "rm in command substitution should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}

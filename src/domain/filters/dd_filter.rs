@@ -164,4 +164,40 @@ mod tests {
             _ => panic!("Expected Block decision"),
         }
     }
+
+    // === Edge Case Tests ===
+
+    #[test]
+    fn test_contains_dd_command_with_sudo_wrapper() {
+        assert!(DdFilter::contains_dd_command(
+            "sudo dd if=/dev/zero of=/dev/sda"
+        ));
+        assert!(DdFilter::contains_dd_command(
+            "sudo -u root dd if=/dev/zero of=/dev/sda"
+        ));
+    }
+
+    #[test]
+    fn test_contains_dd_command_with_bash_c_subshell() {
+        assert!(DdFilter::contains_dd_command(
+            "bash -c 'dd if=/dev/zero of=/dev/sda'"
+        ));
+        assert!(DdFilter::contains_dd_command(
+            "sh -c \"dd if=/dev/zero of=/dev/sda\""
+        ));
+    }
+
+    #[test]
+    fn test_contains_dd_command_in_command_substitution() {
+        assert!(DdFilter::contains_dd_command(
+            "echo $(dd if=/dev/zero of=/dev/sda)"
+        ));
+    }
+
+    #[test]
+    fn test_contains_dd_command_in_subshell() {
+        assert!(DdFilter::contains_dd_command(
+            "(cd /dev && dd if=zero of=sda)"
+        ));
+    }
 }

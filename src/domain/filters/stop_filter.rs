@@ -129,4 +129,54 @@ mod tests {
         let decision = filter.execute(&stop_input);
         assert!(matches!(decision, Decision::Allow { .. }));
     }
+
+    // === Edge Case Tests ===
+
+    #[test]
+    fn test_execute_hook_empty_command_is_error() {
+        let hooks = vec![];
+        let filter = StopHookFilter::new(hooks);
+        let hook = StopHook {
+            command: "   ".to_string(),
+        };
+        assert!(filter.execute_hook(&hook).is_err());
+    }
+
+    #[test]
+    fn test_execute_hook_with_quoted_args() {
+        // Test that quoted arguments are parsed correctly
+        let hooks = vec![];
+        let filter = StopHookFilter::new(hooks);
+        let hook = StopHook {
+            command: "echo 'hello world'".to_string(),
+        };
+        // Should not error, echo is a valid command
+        assert!(filter.execute_hook(&hook).is_ok());
+    }
+
+    #[test]
+    fn test_execute_ignores_hook_failure_and_allows() {
+        // Non-existent command should fail but filter should still return Allow
+        let hooks = vec![StopHook {
+            command: "nonexistent-command-xyz-abc-123".to_string(),
+        }];
+        let filter = StopHookFilter::new(hooks);
+
+        let stop_input = HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
+            session_id: None,
+        };
+
+        // execute() should return Allow even if hooks fail
+        let decision = filter.execute(&stop_input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_priority() {
+        let filter = StopHookFilter::new(vec![]);
+        assert_eq!(filter.priority(), 100);
+    }
 }

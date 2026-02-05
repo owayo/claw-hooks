@@ -346,4 +346,60 @@ mod tests {
         // Should not match other commands
         assert!(!filter.matches("python install"));
     }
+
+    // === Edge Case Tests ===
+
+    #[test]
+    fn test_custom_filter_invalid_regex_returns_error() {
+        // Invalid regex pattern should return error
+        assert!(CustomCommandFilter::new("[", "msg".to_string()).is_err());
+        assert!(CustomCommandFilter::new("(unclosed", "msg".to_string()).is_err());
+    }
+
+    #[test]
+    fn test_custom_filter_args_ignores_flags_before_arg() {
+        // args mode matches first argument, flags before should be ignored
+        let filter = CustomCommandFilter::with_args(
+            "npm",
+            vec!["install".to_string()],
+            "Use pnpm instead".to_string(),
+        )
+        .unwrap();
+
+        // Should match when install is the first non-flag argument
+        assert!(filter.matches("npm install"));
+        assert!(filter.matches("npm install lodash"));
+
+        // Should not match when install is not first argument
+        // (--silent is not in args, so this is checking first arg is not "install")
+        assert!(!filter.matches("npm --silent install"));
+    }
+
+    #[test]
+    fn test_custom_filter_with_sudo_wrapper() {
+        // Note: CustomFilter uses extract_command_strings which focuses on direct command matching.
+        // sudo/env wrappers are NOT unwrapped for custom filters (unlike built-in rm/kill filters).
+        // This is a known limitation - custom filters match on command name at start of string.
+        let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
+
+        // Direct npm commands match
+        assert!(filter.matches("npm install"));
+
+        // env with VAR=value prefix: npm is still the command
+        // This works because extract_command_strings handles env prefix
+        assert!(filter.matches("NODE_ENV=prod npm install"));
+
+        // sudo wrapper: Currently does NOT match (known limitation)
+        // The command is "sudo", not "npm" from CustomFilter's perspective
+        assert!(!filter.matches("sudo npm install"));
+    }
+
+    #[test]
+    fn test_custom_filter_with_bash_c_subshell() {
+        let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
+
+        // Should match npm in bash -c
+        assert!(filter.matches("bash -c 'npm install'"));
+        assert!(filter.matches("sh -c \"npm install\""));
+    }
 }

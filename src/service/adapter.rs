@@ -822,6 +822,101 @@ mod tests {
         assert!(error_output.contains(r#""decision":"block""#));
         assert!(error_output.contains("fail-closed"));
     }
+
+    // === Error Handling Tests ===
+
+    #[test]
+    fn test_claude_parse_missing_tool_input_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_claude_parse_missing_tool_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_claude_parse_unknown_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input =
+            r#"{"hook_event_name":"Unknown","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_claude_parse_invalid_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        assert!(adapter.parse_input("{").is_err());
+        assert!(adapter.parse_input("not json").is_err());
+    }
+
+    #[test]
+    fn test_cursor_parse_empty_object_is_error() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        // Empty object doesn't match any CursorInput variant
+        let input = r#"{}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_windsurf_unknown_action_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_windsurf_parse_invalid_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        assert!(adapter.parse_input("{invalid}").is_err());
+    }
+
+    #[test]
+    fn test_gemini_parse_missing_tool_name_for_tool_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeTool"}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_gemini_parse_missing_tool_input_for_tool_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command"}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_gemini_unknown_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let input = r#"{"hook_event_name":"UnknownEvent"}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_cursor_error_format_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let output = adapter.format_error("Invalid JSON input");
+        assert!(output.contains(r#""permission":"deny""#));
+        assert!(output.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_claude_error_format_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter.format_error("Parse error");
+        assert!(output.contains(r#""decision":"block""#));
+        assert!(output.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_error_exit_code() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
 }
 
 // === Gemini CLI Format Types ===

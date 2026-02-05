@@ -203,4 +203,41 @@ mod tests {
             _ => panic!("Expected Block decision"),
         }
     }
+
+    // === Edge Case Tests ===
+
+    #[test]
+    fn test_contains_kill_command_with_sudo_wrapper() {
+        assert!(KillFilter::contains_kill_command("sudo kill -9 1234"));
+        assert!(KillFilter::contains_kill_command("sudo -u root pkill node"));
+    }
+
+    #[test]
+    fn test_contains_kill_command_with_bash_c_subshell() {
+        assert!(KillFilter::contains_kill_command("bash -c 'kill 1234'"));
+        assert!(KillFilter::contains_kill_command("sh -c \"pkill node\""));
+    }
+
+    #[test]
+    fn test_contains_kill_command_with_xargs_double_dash() {
+        // xargs -- kill should still detect kill
+        assert!(KillFilter::contains_kill_command(
+            "pgrep node | xargs -- kill -9"
+        ));
+    }
+
+    #[test]
+    fn test_contains_kill_command_in_command_substitution() {
+        assert!(KillFilter::contains_kill_command("echo $(kill -9 1234)"));
+    }
+
+    #[test]
+    fn test_contains_kill_command_in_subshell() {
+        assert!(KillFilter::contains_kill_command("(cd /tmp && kill 1234)"));
+    }
+
+    #[test]
+    fn test_contains_kill_command_with_nohup_wrapper() {
+        assert!(KillFilter::contains_kill_command("nohup kill -9 1234 &"));
+    }
 }

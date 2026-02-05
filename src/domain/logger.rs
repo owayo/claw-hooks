@@ -1,10 +1,10 @@
-//! Logging system with daily rotation.
+//! Logging system with daily rotation using local timezone.
 
 use anyhow::Result;
+use logroller::{LogRollerBuilder, Rotation, RotationAge, TimeZone};
 use std::fs;
 use std::path::Path;
 use time::macros::format_description;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::prelude::*;
@@ -22,8 +22,16 @@ pub fn init(config: &Config) -> Result<()> {
     // Clean up old logs
     cleanup_old_logs(&config.log_path)?;
 
-    // Create rolling file appender with daily rotation
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, &config.log_path, "claw-hooks");
+    // Create rolling file appender with daily rotation using local timezone
+    // File naming: claw-hooks.YYYY-MM-DD (e.g., claw-hooks.2026-02-05)
+    let appender = LogRollerBuilder::new(config.log_path.as_path(), Path::new("claw-hooks"))
+        .rotation(Rotation::AgeBased(RotationAge::Daily))
+        .time_zone(TimeZone::Local) // Use system local timezone for rotation
+        .max_keep_files(3)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create log roller: {}", e))?;
+
+    let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
 
     // Use local timezone for timestamps
     let time_format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
@@ -35,7 +43,7 @@ pub fn init(config: &Config) -> Result<()> {
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .with(
             fmt::layer()
-                .with_writer(file_appender)
+                .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_target(true)
                 .with_thread_ids(false)
@@ -46,6 +54,11 @@ pub fn init(config: &Config) -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set global subscriber: {}", e))?;
+
+    // Keep the guard alive for the duration of the program
+    // Note: In a real application, this guard should be stored somewhere
+    // to prevent it from being dropped, which would stop the logging thread.
+    std::mem::forget(_guard);
 
     Ok(())
 }

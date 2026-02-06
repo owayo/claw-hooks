@@ -146,8 +146,8 @@ debug = false
 # On failure, the result is returned to the AI agent so it can fix the issues.
 # condition fields (AND logic): file_exists, command_exists
 [[stop_hooks]]
-command = "tsc --noEmit"
-condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+command = "pnpm exec tsc --noEmit"
+condition = { file_exists = "tsconfig.json" }
 
 # [[stop_hooks]]
 # command = "cargo clippy -- -D warnings"

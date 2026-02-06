@@ -463,8 +463,8 @@ command = "cargo clippy -- -D warnings"
 condition = { file_exists = "Cargo.toml" }
 
 [[stop_hooks]]
-command = "tsc --noEmit"
-condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+command = "pnpm exec tsc --noEmit"
+condition = { file_exists = "tsconfig.json" }
 
 # [[stop_hooks]]
 # command = "ruff check"
@@ -488,10 +488,10 @@ Stop hooks with a `condition` field run lint/typecheck commands based on the pro
 command = "cargo clippy -- -D warnings"
 condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
 
-# TypeScript: run tsc when tsconfig.json exists and tsc is installed
+# TypeScript: run tsc when tsconfig.json exists
 [[stop_hooks]]
-command = "tsc --noEmit"
-condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+command = "pnpm exec tsc --noEmit"
+condition = { file_exists = "tsconfig.json" }
 
 # Python: run ruff when pyproject.toml exists and ruff is installed
 [[stop_hooks]]

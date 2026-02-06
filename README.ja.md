@@ -463,8 +463,8 @@ command = "cargo clippy -- -D warnings"
 condition = { file_exists = "Cargo.toml" }
 
 [[stop_hooks]]
-command = "tsc --noEmit"
-condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+command = "pnpm exec tsc --noEmit"
+condition = { file_exists = "tsconfig.json" }
 
 # [[stop_hooks]]
 # command = "ruff check"
@@ -488,10 +488,10 @@ condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
 command = "cargo clippy -- -D warnings"
 condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
 
-# TypeScript: tsconfig.json があり tsc がインストール済みの場合に tsc を実行
+# TypeScript: tsconfig.json がある場合に tsc を実行
 [[stop_hooks]]
-command = "tsc --noEmit"
-condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+command = "pnpm exec tsc --noEmit"
+condition = { file_exists = "tsconfig.json" }
 
 # Python: pyproject.toml があり ruff がインストール済みの場合に ruff を実行
 [[stop_hooks]]

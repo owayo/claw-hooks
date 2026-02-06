@@ -373,7 +373,7 @@ mod tests {
             condition = { file_exists = "Cargo.toml" }
 
             [[stop_hooks]]
-            command = "tsc --noEmit"
+            command = "pnpm exec tsc --noEmit"
             condition = { file_exists = "tsconfig.json" }
         "#;
 

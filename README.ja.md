@@ -37,6 +37,7 @@
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
 - 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
+- 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
 ## なぜ claw-hooks？
@@ -452,7 +453,58 @@ command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS通知音
 
 # [[stop_hooks]]
 # command = "notify-send 'エージェント完了'"  # Linux通知
+
+# 条件付きStopフック（Stop時にプロジェクト全体のlintを実行）
+# プロジェクト構成ファイルの存在とツールの利用可能性を検出し、lint/typecheckを実行。
+# 失敗時はAIエージェントに結果を返し、エージェントが問題を修正します。
+# conditionフィールド（AND条件）: file_exists, command_exists
+[[stop_hooks]]
+command = "cargo clippy -- -D warnings"
+condition = { file_exists = "Cargo.toml" }
+
+[[stop_hooks]]
+command = "tsc --noEmit"
+condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+
+# [[stop_hooks]]
+# command = "ruff check"
+# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 ```
+
+### 条件付きStopフック（プロジェクト全体Lint）
+
+`condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。コマンドが失敗（非ゼロ終了）した場合、出力がAIエージェントにブロック理由として返され、エージェントが問題を修正します。
+
+**conditionフィールド**（AND条件 — 指定されたすべての条件が真である必要があります）:
+
+| フィールド | 説明 |
+|-----------|------|
+| `file_exists` | 作業ディレクトリにこのファイルが存在する場合のみ実行 |
+| `command_exists` | このコマンドがPATH上に存在する場合のみ実行 |
+
+```toml
+# Rust: Cargo.toml があり cargo がインストール済みの場合に clippy を実行
+[[stop_hooks]]
+command = "cargo clippy -- -D warnings"
+condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+
+# TypeScript: tsconfig.json があり tsc がインストール済みの場合に tsc を実行
+[[stop_hooks]]
+command = "tsc --noEmit"
+condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+
+# Python: pyproject.toml があり ruff がインストール済みの場合に ruff を実行
+[[stop_hooks]]
+command = "ruff check"
+condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+# Go: go.mod があり go がインストール済みの場合に go vet を実行
+[[stop_hooks]]
+command = "go vet ./..."
+condition = { file_exists = "go.mod", command_exists = "go" }
+```
+
+`condition` **なし**のフックは従来通りfire-and-forget（コマンド実行、結果無視、常に許可）です。通知音や`notify-send`などの通知用フックとの後方互換性を維持します。
 
 ### カスタムフィルターの動作
 

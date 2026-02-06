@@ -140,6 +140,22 @@ debug = false
 
 # [[stop_hooks]]
 # command = "notify-send 'Agent completed'"  # Linux notification
+
+# Conditional stop hooks (project-wide lint on stop)
+# Detects project type and runs lint/typecheck.
+# On failure, the result is returned to the AI agent so it can fix the issues.
+# condition fields (AND logic): file_exists, command_exists
+[[stop_hooks]]
+command = "tsc --noEmit"
+condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+
+# [[stop_hooks]]
+# command = "cargo clippy -- -D warnings"
+# condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+
+# [[stop_hooks]]
+# command = "ruff check"
+# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 "#
         .to_string()
     }

@@ -98,7 +98,7 @@ impl HookService {
 
         // Process the hook
         let decision = self.process(&hook_input);
-        let exit_code = self.adapter.exit_code(&decision);
+        let exit_code = self.adapter.exit_code(&decision, hook_input.event);
 
         if self.trace {
             eprintln!("🔍 [TRACE] Decision: {:?}", decision);
@@ -106,16 +106,30 @@ impl HookService {
         }
 
         // Write output using format adapter
-        let output_json = self.adapter.format_output(&decision, hook_input.event)?;
+        let output = self.adapter.format_output(&decision, hook_input.event)?;
 
         if self.trace {
-            eprintln!("🔍 [TRACE] Output JSON:");
-            eprintln!("{}", output_json);
+            eprintln!("🔍 [TRACE] Output:");
+            eprintln!("{}", output);
         }
 
-        info!("Output: {}", output_json);
-        writeln!(stdout, "{}", output_json)?;
-        stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
+        let emoji = if matches!(decision, crate::domain::Decision::Block { .. }) {
+            "🚫"
+        } else {
+            "✅"
+        };
+        info!("Output {}: {}", emoji, output);
+
+        // Windsurf Stop Block outputs to stderr (agent reads stderr on exit 2)
+        if self.adapter.use_stderr(&decision, hook_input.event) {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            writeln!(stderr, "{}", output)?;
+            stderr.flush()?;
+        } else {
+            writeln!(stdout, "{}", output)?;
+            stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
+        }
 
         process::exit(exit_code);
     }

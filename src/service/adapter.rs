@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::Format;
-use crate::domain::{Decision, HookEvent, HookInput};
+use crate::domain::{normalize_lint_output, Decision, HookEvent, HookInput};
 
 /// Adapter for converting between format-specific I/O and internal types.
 pub struct FormatAdapter {
@@ -38,7 +38,7 @@ impl FormatAdapter {
     pub fn format_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         match self.format {
             Format::Claude => self.format_claude_output(decision, event),
-            Format::Cursor => self.format_cursor_output(decision),
+            Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
             Format::Gemini => self.format_gemini_output(decision),
         }
@@ -46,9 +46,10 @@ impl FormatAdapter {
 
     /// Get the exit code for the decision.
     /// Note: Different agents use different exit code semantics.
-    /// - Claude/Cursor/Windsurf: 0 = allow, 2 = block
+    /// - Claude/Windsurf: 0 = allow, 2 = block
+    /// - Cursor: 0 = allow/stop, 2 = block (non-stop)
     /// - Gemini CLI: 0 = success (decision in JSON), 2 = system error only
-    pub fn exit_code(&self, decision: &Decision) -> i32 {
+    pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
             Format::Gemini => {
                 // Gemini CLI: Always return 0 for successful JSON output.
@@ -56,8 +57,21 @@ impl FormatAdapter {
                 // Exit code 2 is reserved for system errors (stderr used as reason).
                 0
             }
+            Format::Cursor if event == HookEvent::Stop => {
+                // Cursor Stop: decision communicated via followup_message in JSON.
+                0
+            }
             _ => decision.exit_code(),
         }
+    }
+
+    /// Whether the output should be written to stderr instead of stdout.
+    /// Windsurf Stop Block uses stderr for error output.
+    pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
+        matches!(
+            (&self.format, event, decision),
+            (&Format::Windsurf, HookEvent::Stop, Decision::Block { .. })
+        )
     }
 
     /// Format an error message for output.
@@ -128,6 +142,7 @@ impl FormatAdapter {
                     status: None,
                     loop_count: None,
                     response: None,
+                    stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
                 }),
             )
         } else {
@@ -156,6 +171,22 @@ impl FormatAdapter {
     }
 
     fn format_claude_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Stop events use "reason" instead of "message" for Block decisions
+        if event == HookEvent::Stop {
+            let output = match decision {
+                Decision::Allow { .. } => ClaudeStopOutput {
+                    decision: "approve".to_string(),
+                    reason: None,
+                },
+                Decision::Block { message } => ClaudeStopOutput {
+                    decision: "block".to_string(),
+                    reason: Some(normalize_lint_output(message)),
+                },
+            };
+            return serde_json::to_string(&output)
+                .map_err(|e| anyhow!("Failed to serialize output: {}", e));
+        }
+
         let output = decision.clone().into_output(event);
         serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
@@ -188,6 +219,7 @@ impl FormatAdapter {
                         status: Some(status),
                         loop_count,
                         response: None,
+                        stop_hook_active: false,
                     }),
                     session_id: None,
                 })
@@ -238,7 +270,18 @@ impl FormatAdapter {
         }
     }
 
-    fn format_cursor_output(&self, decision: &Decision) -> Result<String> {
+    fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Stop Block events use "followup_message" to instruct the agent to fix issues
+        if event == HookEvent::Stop {
+            if let Decision::Block { message } = decision {
+                let output = CursorStopOutput {
+                    followup_message: normalize_lint_output(message),
+                };
+                return serde_json::to_string(&output)
+                    .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e));
+            }
+        }
+
         let output = match decision {
             Decision::Allow { .. } => CursorOutput {
                 permission: "allow".to_string(),
@@ -307,6 +350,7 @@ impl FormatAdapter {
                         status: None,
                         loop_count: None,
                         response,
+                        stop_hook_active: false,
                     }),
                 )
             }
@@ -332,7 +376,14 @@ impl FormatAdapter {
         })
     }
 
-    fn format_windsurf_output(&self, decision: &Decision, _event: HookEvent) -> Result<String> {
+    fn format_windsurf_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Stop Block: return plain text for stderr output (Windsurf reads stderr on exit 2)
+        if event == HookEvent::Stop {
+            if let Decision::Block { message } = decision {
+                return Ok(normalize_lint_output(message));
+            }
+        }
+
         // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
         // Since Windsurf doesn't support additionalContext, we use a simplified output
         let output = match decision {
@@ -378,6 +429,18 @@ struct ClaudeInput {
     stop_hook_active: Option<bool>,
 }
 
+/// Claude Code Stop event output format.
+/// Uses "reason" instead of "message" for Block decisions on Stop events.
+/// This tells Claude to not stop and follow the instructions in "reason".
+#[derive(Debug, Serialize)]
+struct ClaudeStopOutput {
+    /// Decision: "approve" or "block"
+    decision: String,
+    /// Reason for blocking (tells the agent to fix the issues)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
 // === Cursor Format Types ===
 
 /// Cursor input format - supports beforeShellExecution, afterFileEdit, and stop hooks.
@@ -407,6 +470,14 @@ enum CursorInput {
         #[serde(alias = "filePath")]
         file_path: String,
     },
+}
+
+/// Cursor Stop Block output format.
+/// Uses "followup_message" to instruct the agent to fix lint/typecheck issues.
+#[derive(Debug, Serialize)]
+struct CursorStopOutput {
+    /// Message instructing the agent to continue and fix the issues
+    followup_message: String,
 }
 
 /// Cursor output format.
@@ -653,6 +724,35 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_hook_active_false() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"Stop","stop_hook_active":false}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(!stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_hook_active_unset() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"Stop"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(!stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
     }
 
     // === Gemini CLI Format Tests ===
@@ -821,6 +921,310 @@ mod tests {
         let error_output = adapter.format_error("Invalid JSON input");
         assert!(error_output.contains(r#""decision":"block""#));
         assert!(error_output.contains("fail-closed"));
+    }
+
+    // === Task 4.1: Claude Code & Gemini CLI Stop Block Output ===
+
+    #[test]
+    fn test_claude_output_stop_block_uses_reason_field() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "Stop hook failed: cargo clippy\nerror: unused variable".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        // Stop Block should use "reason" instead of "message"
+        assert!(output.contains(r#""decision":"block""#));
+        assert!(output.contains(r#""reason":"#));
+        assert!(!output.contains(r#""message""#));
+        assert!(output.contains("unused variable"));
+    }
+
+    #[test]
+    fn test_claude_output_stop_allow_unchanged() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
+        // No reason field for Allow
+        assert!(!output.contains(r#""reason""#));
+    }
+
+    #[test]
+    fn test_claude_output_before_command_block_still_uses_message() {
+        // Non-Stop events should continue using "message" field
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "Command blocked".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        assert!(output.contains(r#""decision":"block""#));
+        assert!(output.contains(r#""message""#));
+        assert!(!output.contains(r#""reason""#));
+    }
+
+    #[test]
+    fn test_gemini_output_stop_block() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint errors found".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        assert!(output.contains(r#""decision":"deny""#));
+        assert!(output.contains(r#""reason""#));
+        assert!(output.contains("lint errors found"));
+    }
+
+    #[test]
+    fn test_gemini_output_stop_allow() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        assert!(output.contains(r#""decision":"allow""#));
+        assert!(!output.contains(r#""reason""#));
+    }
+
+    #[test]
+    fn test_normalize_strips_ansi_codes() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let message =
+            "Stop hook failed: cargo clippy\n\x1b[31merror\x1b[0m: unused variable `x`".to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.contains("error: unused variable `x`"));
+        assert!(!reason.contains("\x1b"));
+    }
+
+    #[test]
+    fn test_normalize_strips_leading_whitespace() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let message =
+            "Stop hook failed: cargo clippy\n    error: unused\n        --> src/main.rs:1:1"
+                .to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        // Leading whitespace should be stripped from each line
+        assert!(reason.contains("error: unused"));
+        assert!(reason.contains("--> src/main.rs:1:1"));
+        assert!(!reason.contains("    error"));
+        assert!(!reason.contains("        -->"));
+    }
+
+    #[test]
+    fn test_normalize_collapses_blank_lines() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let message = "error 1\n\n\n\nerror 2\n\n\nerror 3".to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        // Consecutive blank lines should be collapsed into one
+        assert_eq!(reason, "error 1\n\nerror 2\n\nerror 3");
+    }
+
+    #[test]
+    fn test_normalize_preserves_simple_messages() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let message = "short lint error".to_string();
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: message.clone(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        assert_eq!(reason, message);
+    }
+
+    #[test]
+    fn test_normalize_gemini_strips_ansi_and_whitespace() {
+        let adapter = FormatAdapter::new(Format::Gemini);
+        let message = "  \x1b[1;31merror\x1b[0m: type mismatch\n    expected `u32`".to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.contains("error: type mismatch"));
+        assert!(reason.contains("expected `u32`"));
+        assert!(!reason.contains("\x1b"));
+        assert!(!reason.starts_with(' '));
+    }
+
+    // === Task 4.2: Cursor & Windsurf Stop Block Output ===
+
+    #[test]
+    fn test_cursor_output_stop_block_uses_followup_message() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "tsc --noEmit failed\nerror TS2322: Type 'string' is not assignable"
+                        .to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        // Stop Block should use "followup_message" instead of "permission"/"user_message"
+        assert!(output.contains(r#""followup_message":"#));
+        assert!(!output.contains(r#""permission""#));
+        assert!(!output.contains(r#""user_message""#));
+        assert!(output.contains("Type 'string' is not assignable"));
+    }
+
+    #[test]
+    fn test_cursor_output_stop_allow_unchanged() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        // Stop Allow should use standard allow format
+        assert!(output.contains(r#""permission":"allow""#));
+        assert!(!output.contains(r#""followup_message""#));
+    }
+
+    #[test]
+    fn test_cursor_output_stop_block_normalizes_output() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let message =
+            "  \x1b[1;31merror\x1b[0m: type mismatch\n    expected `u32`\n\n\n    got `String`"
+                .to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let followup = parsed["followup_message"].as_str().unwrap();
+        // ANSI codes stripped, leading whitespace stripped, blank lines collapsed
+        assert!(followup.contains("error: type mismatch"));
+        assert!(!followup.contains("\x1b"));
+        assert!(!followup.starts_with(' '));
+        assert!(followup.contains("expected `u32`\n\ngot `String`"));
+    }
+
+    #[test]
+    fn test_cursor_output_before_command_block_still_uses_deny() {
+        // Non-Stop events should continue using "permission":"deny" format
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "Command blocked".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        assert!(output.contains(r#""permission":"deny""#));
+        assert!(!output.contains(r#""followup_message""#));
+    }
+
+    #[test]
+    fn test_windsurf_output_stop_block_plain_text() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "cargo clippy failed\nerror: unused variable".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        // Stop Block should return plain text (not JSON) for stderr output
+        assert!(!output.starts_with('{'));
+        assert!(output.contains("unused variable"));
+    }
+
+    #[test]
+    fn test_windsurf_output_stop_allow_unchanged() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        // Stop Allow should use standard approve format
+        assert!(output.contains(r#""decision":"approve""#));
+    }
+
+    #[test]
+    fn test_windsurf_output_stop_block_normalizes_output() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let message = "  \x1b[31merror\x1b[0m: unused\n\n\n    --> src/main.rs:1:1".to_string();
+        let output = adapter
+            .format_output(&Decision::Block { message }, HookEvent::Stop)
+            .unwrap();
+        // ANSI codes stripped, leading whitespace stripped, blank lines collapsed
+        assert!(output.contains("error: unused"));
+        assert!(!output.contains("\x1b"));
+        assert!(output.contains("--> src/main.rs:1:1"));
+        assert!(!output.contains("    -->"));
+    }
+
+    #[test]
+    fn test_cursor_exit_code_stop_block_is_zero() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let decision = Decision::Block {
+            message: "lint error".to_string(),
+        };
+        // Cursor Stop Block should use exit code 0 (decision in JSON)
+        assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
+    }
+
+    #[test]
+    fn test_cursor_exit_code_before_command_block_is_two() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        // Non-Stop Block should still use exit code 2
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_for_stop_block() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let block = Decision::Block {
+            message: "error".to_string(),
+        };
+        assert!(adapter.use_stderr(&block, HookEvent::Stop));
+    }
+
+    #[test]
+    fn test_windsurf_use_stdout_for_non_stop() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let block = Decision::Block {
+            message: "error".to_string(),
+        };
+        assert!(!adapter.use_stderr(&block, HookEvent::BeforeCommand));
+    }
+
+    #[test]
+    fn test_claude_use_stdout_for_stop_block() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let block = Decision::Block {
+            message: "error".to_string(),
+        };
+        assert!(!adapter.use_stderr(&block, HookEvent::Stop));
     }
 
     // === Error Handling Tests ===
@@ -1037,6 +1441,7 @@ impl FormatAdapter {
                     status: None,
                     loop_count: None,
                     response: None,
+                    stop_hook_active: gemini_input.stop_hook_active.unwrap_or(false),
                 }),
                 session_id: gemini_input.session_id,
             });
@@ -1090,7 +1495,7 @@ impl FormatAdapter {
             },
             Decision::Block { message } => GeminiOutput {
                 decision: "deny".to_string(),
-                reason: Some(message.clone()),
+                reason: Some(normalize_lint_output(message)),
             },
         };
         serde_json::to_string(&output)

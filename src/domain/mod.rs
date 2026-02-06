@@ -9,6 +9,7 @@
 mod error;
 pub mod filters;
 pub mod logger;
+pub mod normalize;
 pub mod parser;
 mod types;
 
@@ -22,4 +23,5 @@ pub use error::ClawError;
 #[allow(unused)]
 pub use types::{BashInput, FileOperationInput, HookOutput, StopInput};
 
+pub use normalize::normalize_lint_output;
 pub use parser::parse_shell_tokens;

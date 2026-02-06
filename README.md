@@ -37,6 +37,7 @@
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
+- 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
 ## Why claw-hooks?
@@ -452,7 +453,58 @@ command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS notification sound
 
 # [[stop_hooks]]
 # command = "notify-send 'Agent completed'"  # Linux notification
+
+# Conditional stop hooks (project-wide lint on stop)
+# Detects project type by file existence and tool availability.
+# On failure, the result is returned to the AI agent so it can fix the issues.
+# condition fields (AND logic): file_exists, command_exists
+[[stop_hooks]]
+command = "cargo clippy -- -D warnings"
+condition = { file_exists = "Cargo.toml" }
+
+[[stop_hooks]]
+command = "tsc --noEmit"
+condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+
+# [[stop_hooks]]
+# command = "ruff check"
+# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 ```
+
+### Conditional Stop Hooks (Project-wide Lint)
+
+Stop hooks with a `condition` field run lint/typecheck commands based on the project type. When the command fails (non-zero exit), the output is returned to the AI agent as a block reason, prompting it to fix the issues.
+
+**Condition fields** (AND logic — all specified conditions must be true):
+
+| Field | Description |
+|-------|-------------|
+| `file_exists` | Run only when this file exists in the working directory |
+| `command_exists` | Run only when this command is available in PATH |
+
+```toml
+# Rust: run clippy when Cargo.toml exists and cargo is installed
+[[stop_hooks]]
+command = "cargo clippy -- -D warnings"
+condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+
+# TypeScript: run tsc when tsconfig.json exists and tsc is installed
+[[stop_hooks]]
+command = "tsc --noEmit"
+condition = { file_exists = "tsconfig.json", command_exists = "tsc" }
+
+# Python: run ruff when pyproject.toml exists and ruff is installed
+[[stop_hooks]]
+command = "ruff check"
+condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+# Go: run go vet when go.mod exists and go is installed
+[[stop_hooks]]
+command = "go vet ./..."
+condition = { file_exists = "go.mod", command_exists = "go" }
+```
+
+Hooks **without** `condition` are fire-and-forget (run the command, ignore the result, always allow). This preserves backward compatibility for notification-style hooks like sounds and `notify-send`.
 
 ### Custom Filter Behavior
 

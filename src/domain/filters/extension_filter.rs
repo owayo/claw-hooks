@@ -6,6 +6,7 @@ use std::process::Command;
 use tracing::{debug, warn};
 
 use super::Filter;
+use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// Parsed command template result.
@@ -263,8 +264,9 @@ impl Filter for ExtensionHookFilter {
 
                 // Return Allow with additional context if there's any output
                 // This passes lint warnings/errors to the agent (Claude Code only)
+                // Normalize output for token efficiency (strip ANSI, collapse blanks)
                 if let Some(ctx) = output {
-                    return Decision::allow_with_context(ctx);
+                    return Decision::allow_with_context(normalize_lint_output(&ctx));
                 }
             }
         }
@@ -547,5 +549,57 @@ mod tests {
     fn test_parse_command_template_empty_is_error() {
         assert!(ExtensionHookFilter::parse_command_template("").is_err());
         assert!(ExtensionHookFilter::parse_command_template("   ").is_err());
+    }
+
+    // === Output normalization tests ===
+
+    #[test]
+    fn test_execute_normalizes_output() {
+        // Use "sh -c" with printf to produce ANSI-colored output with indentation
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec![
+                "sh -c 'printf \"\\033[31m  error:\\033[0m bad\\n\\n\\n  detail\" #ignore {file}'"
+                    .to_string(),
+            ],
+        );
+        let filter = ExtensionHookFilter::new(hooks);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Allow { additional_context } => {
+                let ctx = additional_context.expect("Should have context");
+                // ANSI codes should be stripped
+                assert!(
+                    !ctx.contains("\x1b"),
+                    "ANSI codes should be stripped: {}",
+                    ctx
+                );
+                // Leading whitespace should be stripped
+                assert!(
+                    !ctx.contains("\n  "),
+                    "Leading whitespace should be stripped: {}",
+                    ctx
+                );
+                // Consecutive blank lines should be collapsed
+                assert!(
+                    !ctx.contains("\n\n\n"),
+                    "Blank lines should be collapsed: {}",
+                    ctx
+                );
+            }
+            _ => panic!("Expected Allow decision"),
+        }
     }
 }

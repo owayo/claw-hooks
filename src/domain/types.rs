@@ -118,6 +118,10 @@ pub struct StopInput {
     /// Response content (Windsurf: full cascade response)
     #[serde(default)]
     pub response: Option<String>,
+
+    /// Whether stop hooks are already active (prevents infinite loops)
+    #[serde(default)]
+    pub stop_hook_active: bool,
 }
 
 /// Hook output sent back to AI agent.

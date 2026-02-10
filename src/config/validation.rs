@@ -64,8 +64,13 @@ pub fn validate(config: &Config) -> Result<()> {
 
     // Validate stop hooks
     for (i, hook) in config.stop_hooks.iter().enumerate() {
-        if hook.command.is_empty() {
-            bail!("stop_hooks[{}]: command cannot be empty", i);
+        if hook.commands.is_empty() {
+            bail!("stop_hooks[{}]: commands cannot be empty", i);
+        }
+        for (j, cmd) in hook.commands.iter().enumerate() {
+            if cmd.is_empty() {
+                bail!("stop_hooks[{}]: commands[{}] cannot be empty", i, j);
+            }
         }
 
         // Validate condition if present
@@ -170,7 +175,7 @@ mod tests {
     fn test_validate_rejects_empty_stop_hook_command() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "".to_string(),
+            commands: vec!["".to_string()],
             condition: None,
         });
         assert!(validate(&config).is_err());
@@ -211,7 +216,7 @@ mod tests {
     fn test_validate_accepts_valid_stop_hooks() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "notify-send 'Done'".to_string(),
+            commands: vec!["notify-send 'Done'".to_string()],
             condition: None,
         });
         assert!(validate(&config).is_ok());
@@ -221,7 +226,7 @@ mod tests {
     fn test_validate_rejects_empty_file_exists_condition() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "cargo clippy".to_string(),
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
             condition: Some(HookCondition {
                 file_exists: Some("".to_string()),
                 command_exists: None,
@@ -234,7 +239,7 @@ mod tests {
     fn test_validate_accepts_valid_file_exists_condition() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "cargo clippy -- -D warnings".to_string(),
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
@@ -247,7 +252,7 @@ mod tests {
     fn test_validate_rejects_empty_command_exists_condition() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "cargo clippy".to_string(),
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
             condition: Some(HookCondition {
                 file_exists: None,
                 command_exists: Some("".to_string()),
@@ -260,7 +265,7 @@ mod tests {
     fn test_validate_accepts_valid_command_exists_condition() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "cargo clippy -- -D warnings".to_string(),
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: Some("cargo".to_string()),
@@ -273,8 +278,34 @@ mod tests {
     fn test_validate_accepts_stop_hook_without_condition() {
         let mut config = default_config();
         config.stop_hooks.push(StopHook {
-            command: "echo done".to_string(),
+            commands: vec!["echo done".to_string()],
             condition: None,
+        });
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_commands_array() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            commands: vec![],
+            condition: None,
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_multiple_commands() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            commands: vec![
+                "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
+                "cargo fmt --check".to_string(),
+            ],
+            condition: Some(HookCondition {
+                file_exists: Some("Cargo.toml".to_string()),
+                command_exists: None,
+            }),
         });
         assert!(validate(&config).is_ok());
     }

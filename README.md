@@ -169,10 +169,11 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ```toml
 [extension_hooks]
+".css" = ["biome format --write {file}", "biome lint --write {file}"]
+".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
 ".rs" = ["rustfmt {file}"]
-".py" = ["ruff format {file}", "ruff check --fix {file}"]
-".ts" = ["biome format --write {file}", "biome lint --write {file}"]
-".tsx" = ["biome format --write {file}", "biome lint --write {file}"]
+".ts" = ["biome check {file}"]
+".tsx" = ["biome check {file}"]
 ```
 
 **Why it works better:**
@@ -440,40 +441,44 @@ message = "Ask the user to run this command manually"
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
 # Output (stdout/stderr) is passed to AI agent as additionalContext (Claude Code only)
 [extension_hooks]
-".rs" = ["rustfmt {file}"]
-".go" = ["gofmt -w {file}", "golangci-lint run {file}"]
-".py" = ["ruff format {file}", "ruff check --fix {file}"]
-".ts" = ["biome format --write {file}", "biome lint --write {file}"]
-".tsx" = ["biome format --write {file}", "biome lint --write {file}"]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]
+".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
+".rs" = ["rustfmt {file}"]
+".ts" = ["biome check {file}"]
+".tsx" = ["biome check {file}"]
 
 # Stop hooks (triggered when agent loop ends)
-[[stop_hooks]]
-command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS notification sound
+# All commands in the array are executed in parallel.
+# [[stop_hooks]]
+# commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 
 # [[stop_hooks]]
-# command = "notify-send 'Agent completed'"  # Linux notification
+# commands = ["notify-send 'Agent completed'"]  # Linux notification
 
 # Conditional stop hooks (project-wide lint on stop)
 # Detects project type by file existence and tool availability.
 # On failure, the result is returned to the AI agent so it can fix the issues.
 # condition fields (AND logic): file_exists, command_exists
 [[stop_hooks]]
-command = "cargo clippy -- -D warnings"
+commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
 
 [[stop_hooks]]
-command = "pnpm exec tsc --noEmit"
+commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 
-# [[stop_hooks]]
-# command = "ruff check"
-# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+[[stop_hooks]]
+commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
+condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+[[stop_hooks]]
+commands = ["biome check --write ."]
+condition = { file_exists = "package.json" }
 ```
 
 ### Conditional Stop Hooks (Project-wide Lint)
 
-Stop hooks with a `condition` field run lint/typecheck commands based on the project type. When the command fails (non-zero exit), the output is returned to the AI agent as a block reason, prompting it to fix the issues.
+Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
 
 **Condition fields** (AND logic — all specified conditions must be true):
 
@@ -483,28 +488,28 @@ Stop hooks with a `condition` field run lint/typecheck commands based on the pro
 | `command_exists` | Run only when this command is available in PATH |
 
 ```toml
-# Rust: run clippy when Cargo.toml exists and cargo is installed
+# Rust: run clippy and fmt check when Cargo.toml exists
 [[stop_hooks]]
-command = "cargo clippy -- -D warnings"
-condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+condition = { file_exists = "Cargo.toml" }
 
 # TypeScript: run tsc when tsconfig.json exists
 [[stop_hooks]]
-command = "pnpm exec tsc --noEmit"
+commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 
-# Python: run ruff when pyproject.toml exists and ruff is installed
+# Python: run ruff format/check when pyproject.toml exists and ruff is installed
 [[stop_hooks]]
-command = "ruff check"
+commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
 condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 
-# Go: run go vet when go.mod exists and go is installed
+# JavaScript/TypeScript: run biome check when package.json exists
 [[stop_hooks]]
-command = "go vet ./..."
-condition = { file_exists = "go.mod", command_exists = "go" }
+commands = ["biome check --write ."]
+condition = { file_exists = "package.json" }
 ```
 
-Hooks **without** `condition` are fire-and-forget (run the command, ignore the result, always allow). This preserves backward compatibility for notification-style hooks like sounds and `notify-send`.
+Hooks **without** `condition` are fire-and-forget (run all commands in parallel, ignore results, always allow). This is useful for notification-style hooks like sounds and `notify-send`.
 
 ### Custom Filter Behavior
 
@@ -749,7 +754,7 @@ cargo test -- --nocapture  # Verbose
 ### Lint
 
 ```bash
-cargo clippy
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 

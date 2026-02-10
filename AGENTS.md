@@ -59,7 +59,7 @@ cargo test
 cargo test -- --nocapture
 
 # Lint
-cargo clippy
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 
 # Run

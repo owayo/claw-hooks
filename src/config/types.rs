@@ -149,10 +149,16 @@ impl HookCondition {
 }
 
 /// Stop event hook configuration.
+///
+/// ```toml
+/// [[stop_hooks]]
+/// commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+/// condition = { file_exists = "Cargo.toml" }
+/// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopHook {
-    /// Command to execute on Stop event
-    pub command: String,
+    /// Commands to execute on Stop event (executed in parallel)
+    pub commands: Vec<String>,
 
     /// Optional condition for execution
     #[serde(default)]
@@ -179,6 +185,7 @@ pub fn default_log_path_for_config_dir(config_dir: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use std::path::Path;
@@ -289,7 +296,7 @@ mod tests {
     fn test_stop_hook_with_condition_deserializes() {
         let toml_str = r#"
             [[stop_hooks]]
-            command = "cargo clippy -- -D warnings"
+            commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
             condition = { file_exists = "Cargo.toml" }
         "#;
 
@@ -300,17 +307,62 @@ mod tests {
 
         let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
         assert_eq!(wrapper.stop_hooks.len(), 1);
-        assert_eq!(wrapper.stop_hooks[0].command, "cargo clippy -- -D warnings");
+        assert_eq!(
+            wrapper.stop_hooks[0].commands,
+            vec!["cargo clippy --all-targets --all-features -- -D warnings"]
+        );
         let condition = wrapper.stop_hooks[0].condition.as_ref().unwrap();
         assert_eq!(condition.file_exists, Some("Cargo.toml".to_string()));
         assert_eq!(condition.command_exists, None);
     }
 
     #[test]
+    fn test_stop_hook_with_commands_array_deserializes() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+            condition = { file_exists = "Cargo.toml" }
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(wrapper.stop_hooks.len(), 1);
+        assert_eq!(
+            wrapper.stop_hooks[0].commands,
+            vec![
+                "cargo clippy --all-targets --all-features -- -D warnings",
+                "cargo fmt --check"
+            ]
+        );
+        let condition = wrapper.stop_hooks[0].condition.as_ref().unwrap();
+        assert_eq!(condition.file_exists, Some("Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn test_stop_hook_rejects_missing_commands() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            condition = { file_exists = "Cargo.toml" }
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let result: Result<Wrapper, toml::de::Error> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_stop_hook_with_command_exists_condition_deserializes() {
         let toml_str = r#"
             [[stop_hooks]]
-            command = "cargo clippy -- -D warnings"
+            commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
             condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
         "#;
 
@@ -329,7 +381,7 @@ mod tests {
     fn test_stop_hook_with_only_command_exists_deserializes() {
         let toml_str = r#"
             [[stop_hooks]]
-            command = "cargo clippy -- -D warnings"
+            commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
             condition = { command_exists = "cargo" }
         "#;
 
@@ -348,7 +400,7 @@ mod tests {
     fn test_stop_hook_without_condition_deserializes() {
         let toml_str = r#"
             [[stop_hooks]]
-            command = "notify-send 'Agent stopped'"
+            commands = ["notify-send 'Agent stopped'"]
         "#;
 
         #[derive(Deserialize)]
@@ -358,7 +410,10 @@ mod tests {
 
         let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
         assert_eq!(wrapper.stop_hooks.len(), 1);
-        assert_eq!(wrapper.stop_hooks[0].command, "notify-send 'Agent stopped'");
+        assert_eq!(
+            wrapper.stop_hooks[0].commands,
+            vec!["notify-send 'Agent stopped'"]
+        );
         assert!(wrapper.stop_hooks[0].condition.is_none());
     }
 
@@ -366,14 +421,14 @@ mod tests {
     fn test_multiple_stop_hooks_mixed_conditions() {
         let toml_str = r#"
             [[stop_hooks]]
-            command = "notify-send 'Done'"
+            commands = ["notify-send 'Done'"]
 
             [[stop_hooks]]
-            command = "cargo clippy -- -D warnings"
+            commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
             condition = { file_exists = "Cargo.toml" }
 
             [[stop_hooks]]
-            command = "pnpm exec tsc --noEmit"
+            commands = ["pnpm exec tsc --noEmit"]
             condition = { file_exists = "tsconfig.json" }
         "#;
 
@@ -387,10 +442,18 @@ mod tests {
 
         // First: no condition
         assert!(wrapper.stop_hooks[0].condition.is_none());
+        assert_eq!(wrapper.stop_hooks[0].commands, vec!["notify-send 'Done'"]);
 
-        // Second: Cargo.toml condition
+        // Second: Cargo.toml condition, commands array
         let cond1 = wrapper.stop_hooks[1].condition.as_ref().unwrap();
         assert_eq!(cond1.file_exists, Some("Cargo.toml".to_string()));
+        assert_eq!(
+            wrapper.stop_hooks[1].commands,
+            vec![
+                "cargo clippy --all-targets --all-features -- -D warnings",
+                "cargo fmt --check"
+            ]
+        );
 
         // Third: tsconfig.json condition
         let cond2 = wrapper.stop_hooks[2].condition.as_ref().unwrap();

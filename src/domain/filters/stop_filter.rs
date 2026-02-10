@@ -18,10 +18,10 @@ impl StopHookFilter {
         Self { hooks }
     }
 
-    /// Execute a stop hook command safely.
+    /// Execute a single command string safely.
     /// Uses shell-aware tokenizer to properly handle quoted arguments.
-    fn execute_hook(&self, hook: &StopHook) -> Result<Output, String> {
-        let parts = crate::domain::parse_shell_tokens(&hook.command);
+    fn execute_command(command: &str) -> Result<Output, String> {
+        let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             return Err("Empty command".to_string());
         }
@@ -31,19 +31,18 @@ impl StopHookFilter {
 
         debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
-        let mut cmd = Command::new(program);
-        cmd.args(args);
-
-        cmd.output()
-            .map_err(|e| format!("Failed to execute stop hook '{}': {}", hook.command, e))
+        Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))
     }
 
     /// Build a block reason from command output (stdout + stderr).
-    fn build_reason(&self, hook: &StopHook, output: &Output) -> String {
+    fn build_reason(command: &str, output: &Output) -> String {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let mut reason = format!("Stop hook failed: {}\n", hook.command);
+        let mut reason = format!("Stop hook failed: {}\n", command);
         if !stdout.trim().is_empty() {
             reason.push_str(&stdout);
         }
@@ -74,48 +73,88 @@ impl Filter for StopHookFilter {
 
         let cwd = std::env::current_dir().unwrap_or_default();
 
-        // Execute all stop hooks
+        // Phase 1: Evaluate conditions and collect commands to execute
+        let mut unconditional_commands: Vec<String> = Vec::new();
+        let mut conditional_commands: Vec<String> = Vec::new();
+
         for hook in &self.hooks {
             match &hook.condition {
                 None => {
-                    // Legacy hook (no condition): fire and forget, ignore result
-                    match self.execute_hook(hook) {
-                        Ok(output) => {
-                            if !output.status.success() {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                warn!("🛑 Stop hook command failed: {}", stderr);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("🛑 Stop hook failed: {}", e);
-                        }
-                    }
+                    unconditional_commands.extend(hook.commands.iter().cloned());
                 }
                 Some(condition) => {
-                    // Conditional hook: evaluate condition → execute → evaluate result
-                    if !condition.is_satisfied(&cwd) {
-                        debug!("Stop hook condition not met, skipping: {}", hook.command);
-                        continue;
-                    }
-
-                    debug!("Stop hook condition met, executing: {}", hook.command);
-                    match self.execute_hook(hook) {
-                        Ok(output) => {
-                            if !output.status.success() {
-                                let reason = self.build_reason(hook, &output);
-                                return Decision::Block { message: reason };
-                            }
-                        }
-                        Err(e) => {
-                            // Command not found or execution error → Block
-                            return Decision::Block { message: e };
-                        }
+                    if condition.is_satisfied(&cwd) {
+                        debug!("Stop hook condition met, queuing: {:?}", hook.commands);
+                        conditional_commands.extend(hook.commands.iter().cloned());
+                    } else {
+                        debug!("Stop hook condition not met, skipping: {:?}", hook.commands);
                     }
                 }
             }
         }
 
-        Decision::allow()
+        // Phase 2: Run unconditional commands in parallel.
+        // Unconditional hooks never block the decision, but we still wait for completion
+        // so they are not dropped by process::exit in HookService::run().
+        let unconditional_handles: Vec<_> = unconditional_commands
+            .into_iter()
+            .map(|command| {
+                std::thread::spawn(move || match Self::execute_command(&command) {
+                    Ok(output) => {
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            warn!("🛑 Stop hook command failed: {}", stderr);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("🛑 Stop hook failed: {}", e);
+                    }
+                })
+            })
+            .collect();
+
+        // Phase 3: Execute conditional commands in parallel, wait for all results
+        let mut failures: Vec<String> = Vec::new();
+        let conditional_handles: Vec<_> = conditional_commands
+            .into_iter()
+            .map(|command| {
+                std::thread::spawn(move || -> Option<String> {
+                    match Self::execute_command(&command) {
+                        Ok(output) => {
+                            if output.status.success() {
+                                None
+                            } else {
+                                Some(Self::build_reason(&command, &output))
+                            }
+                        }
+                        Err(e) => Some(e),
+                    }
+                })
+            })
+            .collect();
+
+        for handle in conditional_handles {
+            match handle.join() {
+                Ok(Some(reason)) => failures.push(reason),
+                Ok(None) => {}
+                Err(_) => failures.push("Stop hook thread panicked".to_string()),
+            }
+        }
+
+        // Unconditional hook failures are intentionally ignored (warn only), but panic is logged.
+        for handle in unconditional_handles {
+            if handle.join().is_err() {
+                warn!("🛑 Unconditional stop hook thread panicked");
+            }
+        }
+
+        if failures.is_empty() {
+            Decision::allow()
+        } else {
+            Decision::Block {
+                message: failures.join("\n\n"),
+            }
+        }
     }
 
     fn priority(&self) -> u32 {
@@ -131,7 +170,7 @@ mod tests {
     #[test]
     fn test_stop_hook_filter_applies_to_stop_event() {
         let hooks = vec![StopHook {
-            command: "echo done".to_string(),
+            commands: vec!["echo done".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -149,7 +188,7 @@ mod tests {
     #[test]
     fn test_stop_hook_filter_does_not_apply_to_other_events() {
         let hooks = vec![StopHook {
-            command: "echo done".to_string(),
+            commands: vec!["echo done".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -170,7 +209,7 @@ mod tests {
     #[test]
     fn test_stop_hook_filter_execute_returns_allow() {
         let hooks = vec![StopHook {
-            command: "echo done".to_string(),
+            commands: vec!["echo done".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -189,34 +228,20 @@ mod tests {
     // === Edge Case Tests ===
 
     #[test]
-    fn test_execute_hook_empty_command_is_error() {
-        let hooks = vec![];
-        let filter = StopHookFilter::new(hooks);
-        let hook = StopHook {
-            command: "   ".to_string(),
-            condition: None,
-        };
-        assert!(filter.execute_hook(&hook).is_err());
+    fn test_execute_command_empty_is_error() {
+        assert!(StopHookFilter::execute_command("   ").is_err());
     }
 
     #[test]
-    fn test_execute_hook_with_quoted_args() {
-        // Test that quoted arguments are parsed correctly
-        let hooks = vec![];
-        let filter = StopHookFilter::new(hooks);
-        let hook = StopHook {
-            command: "echo 'hello world'".to_string(),
-            condition: None,
-        };
-        // Should not error, echo is a valid command
-        assert!(filter.execute_hook(&hook).is_ok());
+    fn test_execute_command_with_quoted_args() {
+        assert!(StopHookFilter::execute_command("echo 'hello world'").is_ok());
     }
 
     #[test]
     fn test_execute_ignores_hook_failure_and_allows() {
         // Non-existent command should fail but filter should still return Allow
         let hooks = vec![StopHook {
-            command: "nonexistent-command-xyz-abc-123".to_string(),
+            commands: vec!["nonexistent-command-xyz-abc-123".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -228,7 +253,6 @@ mod tests {
             session_id: None,
         };
 
-        // execute() should return Allow even if hooks fail
         let decision = filter.execute(&stop_input);
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -239,13 +263,12 @@ mod tests {
         assert_eq!(filter.priority(), 100);
     }
 
-    // === Task 3.1: Loop prevention and backward compatibility ===
+    // === Loop prevention ===
 
     #[test]
     fn test_stop_hook_active_true_skips_all_hooks() {
-        // When stop_hook_active is true, all hooks should be skipped
         let hooks = vec![StopHook {
-            command: "echo should-not-run".to_string(),
+            commands: vec!["echo should-not-run".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -268,9 +291,8 @@ mod tests {
 
     #[test]
     fn test_stop_hook_active_false_runs_hooks() {
-        // When stop_hook_active is false, hooks should execute normally
         let hooks = vec![StopHook {
-            command: "echo running".to_string(),
+            commands: vec!["echo running".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -293,9 +315,8 @@ mod tests {
 
     #[test]
     fn test_condition_none_hook_always_allows_even_on_failure() {
-        // Hooks without condition should fire-and-forget (backward compat)
         let hooks = vec![StopHook {
-            command: "nonexistent-command-xyz".to_string(),
+            commands: vec!["nonexistent-command-xyz".to_string()],
             condition: None,
         }];
         let filter = StopHookFilter::new(hooks);
@@ -312,12 +333,11 @@ mod tests {
             session_id: None,
         };
 
-        // Should still Allow even when command fails (fire-and-forget)
         let decision = filter.execute(&stop_input);
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
-    // === Task 3.2: Conditional hooks - condition evaluation & result evaluation ===
+    // === Conditional hooks ===
 
     fn make_stop_input() -> HookInput {
         HookInput {
@@ -336,9 +356,8 @@ mod tests {
     #[test]
     fn test_conditional_hook_file_not_found_skips() {
         use crate::config::HookCondition;
-        // When condition file doesn't exist, hook should be skipped
         let hooks = vec![StopHook {
-            command: "false".to_string(), // Would fail if executed
+            commands: vec!["false".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
                 file_exists: Some("nonexistent-file-xyz-abc.toml".to_string()),
@@ -352,9 +371,8 @@ mod tests {
     #[test]
     fn test_conditional_hook_file_exists_command_succeeds() {
         use crate::config::HookCondition;
-        // Cargo.toml exists, command succeeds → Allow
         let hooks = vec![StopHook {
-            command: "true".to_string(),
+            commands: vec!["true".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
@@ -368,9 +386,8 @@ mod tests {
     #[test]
     fn test_conditional_hook_file_exists_command_fails_blocks() {
         use crate::config::HookCondition;
-        // Cargo.toml exists, command fails → Block with reason
         let hooks = vec![StopHook {
-            command: "sh -c 'echo lint-error >&2; exit 1'".to_string(),
+            commands: vec!["sh -c 'echo lint-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
@@ -393,9 +410,8 @@ mod tests {
     #[test]
     fn test_conditional_hook_command_not_found_blocks() {
         use crate::config::HookCondition;
-        // Cargo.toml exists, command not found → Block with error
         let hooks = vec![StopHook {
-            command: "nonexistent-lint-tool-xyz-123".to_string(),
+            commands: vec!["nonexistent-lint-tool-xyz-123".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
@@ -407,19 +423,19 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_hooks_first_failure_stops() {
+    fn test_multiple_hooks_both_fail_collects_all() {
         use crate::config::HookCondition;
-        // First conditional hook fails → Block, second never runs
+        // All conditional hooks run in parallel, both failures collected
         let hooks = vec![
             StopHook {
-                command: "sh -c 'echo first-error >&2; exit 1'".to_string(),
+                commands: vec!["sh -c 'echo first-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
             },
             StopHook {
-                command: "sh -c 'echo second-error >&2; exit 1'".to_string(),
+                commands: vec!["sh -c 'echo second-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
@@ -436,8 +452,9 @@ mod tests {
                     message
                 );
                 assert!(
-                    !message.contains("second-error"),
-                    "Second hook should not have run"
+                    message.contains("second-error"),
+                    "Expected second-error in message, got: {}",
+                    message
                 );
             }
             _ => panic!("Expected Block decision"),
@@ -445,16 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_hooks_legacy_then_conditional() {
+    fn test_mixed_hooks_unconditional_then_conditional() {
         use crate::config::HookCondition;
-        // Legacy hook (fire-and-forget) + conditional hook (succeeds) → Allow
         let hooks = vec![
             StopHook {
-                command: "echo legacy".to_string(),
+                commands: vec!["echo unconditional".to_string()],
                 condition: None,
             },
             StopHook {
-                command: "true".to_string(),
+                commands: vec!["true".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
@@ -469,9 +485,10 @@ mod tests {
     #[test]
     fn test_conditional_hook_stdout_in_block_reason() {
         use crate::config::HookCondition;
-        // stdout should also be included in block reason
         let hooks = vec![StopHook {
-            command: "sh -c 'echo stdout-content; echo stderr-content >&2; exit 1'".to_string(),
+            commands: vec![
+                "sh -c 'echo stdout-content; echo stderr-content >&2; exit 1'".to_string(),
+            ],
             condition: Some(HookCondition {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
@@ -489,5 +506,119 @@ mod tests {
             }
             _ => panic!("Expected Block decision"),
         }
+    }
+
+    #[test]
+    fn test_conditional_hook_multiple_commands_all_succeed() {
+        use crate::config::HookCondition;
+        let hooks = vec![StopHook {
+            commands: vec!["true".to_string(), "echo ok".to_string()],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks);
+        let decision = filter.execute(&make_stop_input());
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_conditional_hook_multiple_commands_second_fails_blocks() {
+        use crate::config::HookCondition;
+        let hooks = vec![StopHook {
+            commands: vec![
+                "true".to_string(),
+                "sh -c 'echo second-cmd-error >&2; exit 1'".to_string(),
+            ],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("second-cmd-error"),
+                    "Expected second-cmd-error in message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
+
+    #[test]
+    fn test_conditional_hook_multiple_commands_both_fail_collects_all() {
+        use crate::config::HookCondition;
+        // All commands run in parallel, both failures collected
+        let hooks = vec![StopHook {
+            commands: vec![
+                "sh -c 'echo first-error >&2; exit 1'".to_string(),
+                "sh -c 'echo second-error >&2; exit 1'".to_string(),
+            ],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("first-error"),
+                    "Expected first-error in message, got: {}",
+                    message
+                );
+                assert!(
+                    message.contains("second-error"),
+                    "Expected second-error in message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
+
+    #[test]
+    fn test_unconditional_hook_multiple_commands_fire_and_forget() {
+        let hooks = vec![StopHook {
+            commands: vec![
+                "echo first".to_string(),
+                "nonexistent-command-xyz".to_string(),
+                "echo third".to_string(),
+            ],
+            condition: None,
+        }];
+        let filter = StopHookFilter::new(hooks);
+        let decision = filter.execute(&make_stop_input());
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_unconditional_hook_is_completed_before_execute_returns() {
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-stop-marker-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+
+        let _ = std::fs::remove_file(&marker);
+
+        let hooks = vec![StopHook {
+            commands: vec![format!("sh -c 'sleep 0.1; echo done > {}'", marker_path)],
+            condition: None,
+        }];
+        let filter = StopHookFilter::new(hooks);
+
+        let decision = filter.execute(&make_stop_input());
+        assert!(matches!(decision, Decision::Allow { .. }));
+        assert!(
+            marker.exists(),
+            "unconditional hook should complete before execute() returns"
+        );
+
+        let _ = std::fs::remove_file(marker);
     }
 }

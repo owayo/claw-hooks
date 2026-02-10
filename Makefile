@@ -29,7 +29,7 @@ fmt: ## Format code
 	cargo fmt
 
 check: ## Run clippy and check
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 	cargo check
 
 clean: ## Clean build artifacts

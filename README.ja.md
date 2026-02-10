@@ -169,10 +169,11 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ```toml
 [extension_hooks]
+".css" = ["biome format --write {file}", "biome lint --write {file}"]
+".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
 ".rs" = ["rustfmt {file}"]
-".py" = ["ruff format {file}", "ruff check --fix {file}"]
-".ts" = ["biome format --write {file}", "biome lint --write {file}"]
-".tsx" = ["biome format --write {file}", "biome lint --write {file}"]
+".ts" = ["biome check {file}"]
+".tsx" = ["biome check {file}"]
 ```
 
 **なぜ高精度か:**
@@ -440,40 +441,45 @@ message = "ユーザーに直接実行を依頼してください"
 # マップ形式: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
 # 出力（stdout/stderr）はadditionalContextとしてAIエージェントに送信（Claude Codeのみ）
 [extension_hooks]
-".rs" = ["rustfmt {file}"]
-".go" = ["gofmt -w {file}", "golangci-lint run {file}"]
-".py" = ["ruff format {file}", "ruff check --fix {file}"]
-".ts" = ["biome format --write {file}", "biome lint --write {file}"]
-".tsx" = ["biome format --write {file}", "biome lint --write {file}"]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]
+".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
+".rs" = ["rustfmt {file}"]
+".ts" = ["biome check {file}"]
+".tsx" = ["biome check {file}"]
 
 # Stopフック（エージェントループ終了時にトリガー）
-[[stop_hooks]]
-command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS通知音
+# 配列内のすべてのコマンドは並列実行されます。
+# [[stop_hooks]]
+# commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS通知音
 
 # [[stop_hooks]]
-# command = "notify-send 'エージェント完了'"  # Linux通知
+# commands = ["notify-send 'エージェント完了'"]  # Linux通知
 
 # 条件付きStopフック（Stop時にプロジェクト全体のlintを実行）
 # プロジェクト構成ファイルの存在とツールの利用可能性を検出し、lint/typecheckを実行。
 # 失敗時はAIエージェントに結果を返し、エージェントが問題を修正します。
+# 配列内のすべてのコマンドが順次実行され、失敗結果がまとめて返されます。
 # conditionフィールド（AND条件）: file_exists, command_exists
 [[stop_hooks]]
-command = "cargo clippy -- -D warnings"
+commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
 
 [[stop_hooks]]
-command = "pnpm exec tsc --noEmit"
+commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 
-# [[stop_hooks]]
-# command = "ruff check"
-# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+[[stop_hooks]]
+commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
+condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+[[stop_hooks]]
+commands = ["biome check --write ."]
+condition = { file_exists = "package.json" }
 ```
 
 ### 条件付きStopフック（プロジェクト全体Lint）
 
-`condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。コマンドが失敗（非ゼロ終了）した場合、出力がAIエージェントにブロック理由として返され、エージェントが問題を修正します。
+`condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。`commands`配列内のすべてのコマンドは**並列実行**されます。失敗したコマンドの出力はすべて収集され、AIエージェントにブロック理由としてまとめて返されます。
 
 **conditionフィールド**（AND条件 — 指定されたすべての条件が真である必要があります）:
 
@@ -483,28 +489,28 @@ condition = { file_exists = "tsconfig.json" }
 | `command_exists` | このコマンドがPATH上に存在する場合のみ実行 |
 
 ```toml
-# Rust: Cargo.toml があり cargo がインストール済みの場合に clippy を実行
+# Rust: Cargo.toml がある場合に clippy と fmt check を実行
 [[stop_hooks]]
-command = "cargo clippy -- -D warnings"
-condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+condition = { file_exists = "Cargo.toml" }
 
 # TypeScript: tsconfig.json がある場合に tsc を実行
 [[stop_hooks]]
-command = "pnpm exec tsc --noEmit"
+commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 
-# Python: pyproject.toml があり ruff がインストール済みの場合に ruff を実行
+# Python: pyproject.toml があり ruff がインストール済みの場合に ruff format/check を実行
 [[stop_hooks]]
-command = "ruff check"
+commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
 condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 
-# Go: go.mod があり go がインストール済みの場合に go vet を実行
+# JavaScript/TypeScript: package.json がある場合に biome check を実行
 [[stop_hooks]]
-command = "go vet ./..."
-condition = { file_exists = "go.mod", command_exists = "go" }
+commands = ["biome check --write ."]
+condition = { file_exists = "package.json" }
 ```
 
-`condition` **なし**のフックは従来通りfire-and-forget（コマンド実行、結果無視、常に許可）です。通知音や`notify-send`などの通知用フックとの後方互換性を維持します。
+`condition` **なし**のフックはfire-and-forget（すべてのコマンドを並列実行、結果無視、常に許可）です。通知音や`notify-send`などの通知用フックに適しています。
 
 ### カスタムフィルターの動作
 
@@ -749,7 +755,7 @@ cargo test -- --nocapture  # 詳細出力
 ### リント
 
 ```bash
-cargo clippy
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 

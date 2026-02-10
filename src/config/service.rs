@@ -126,36 +126,41 @@ debug = false
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified
 # [extension_hooks]
-# ".rs" = ["rustfmt {file}"]
-# ".go" = ["gofmt -w {file}", "golangci-lint run {file}"]
-# ".py" = ["ruff format {file}", "ruff check --fix {file}"]
-# ".ts" = ["biome format --write {file}", "biome lint --write {file}"]
-# ".tsx" = ["biome format --write {file}", "biome lint --write {file}"]
 # ".css" = ["biome format --write {file}", "biome lint --write {file}"]
+# ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
+# ".rs" = ["rustfmt {file}"]
+# ".ts" = ["biome check {file}"]
+# ".tsx" = ["biome check {file}"]
 
 # Stop hooks
 # Execute commands when the agent loop ends (notifications, sounds, cleanup)
+# All commands in the array are executed in parallel.
 # [[stop_hooks]]
-# command = "afplay /System/Library/Sounds/Glass.aiff"  # macOS notification sound
+# commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 
 # [[stop_hooks]]
-# command = "notify-send 'Agent completed'"  # Linux notification
+# commands = ["notify-send 'Agent completed'"]  # Linux notification
 
 # Conditional stop hooks (project-wide lint on stop)
 # Detects project type and runs lint/typecheck.
 # On failure, the result is returned to the AI agent so it can fix the issues.
+# All commands are executed in parallel; failures are collected and returned.
 # condition fields (AND logic): file_exists, command_exists
-[[stop_hooks]]
-command = "pnpm exec tsc --noEmit"
-condition = { file_exists = "tsconfig.json" }
+# [[stop_hooks]]
+# commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+# condition = { file_exists = "Cargo.toml" }
 
 # [[stop_hooks]]
-# command = "cargo clippy -- -D warnings"
-# condition = { file_exists = "Cargo.toml", command_exists = "cargo" }
+# commands = ["pnpm exec tsc --noEmit"]
+# condition = { file_exists = "tsconfig.json" }
 
 # [[stop_hooks]]
-# command = "ruff check"
+# commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
 # condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+# [[stop_hooks]]
+# commands = ["biome check --write ."]
+# condition = { file_exists = "package.json" }
 "#
         .to_string()
     }

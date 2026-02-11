@@ -35,12 +35,21 @@ struct CommandResult {
 pub struct ExtensionHookFilter {
     /// Map of extension -> commands (e.g., ".go" -> ["gofmt -w {file}", "golangci-lint run {file}"])
     hooks: BTreeMap<String, Vec<String>>,
+    nano_buddy: bool,
 }
 
 impl ExtensionHookFilter {
     /// Create a new ExtensionHookFilter.
-    pub fn new(hooks: BTreeMap<String, Vec<String>>) -> Self {
-        Self { hooks }
+    pub fn new(hooks: BTreeMap<String, Vec<String>>, nano_buddy: bool) -> Self {
+        Self { hooks, nano_buddy }
+    }
+
+    /// Extract extension from file path (without the leading dot).
+    fn extract_ext(file_path: &str) -> Option<String> {
+        Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_string())
     }
 
     /// Get matching commands for file path.
@@ -262,6 +271,14 @@ impl Filter for ExtensionHookFilter {
                 // Execute commands and collect output
                 let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
 
+                // NanoBuddy notification (after hook commands complete)
+                if self.nano_buddy {
+                    if let Some(ext) = Self::extract_ext(&file_input.file_path) {
+                        debug!("🐱 NanoBuddy ext notification: .{}", ext);
+                        crate::notify::nano_buddy::notify_extension_hook(&ext);
+                    }
+                }
+
                 // Return Allow with additional context if there's any output
                 // This passes lint warnings/errors to the agent (Claude Code only)
                 // Normalize output for token efficiency (strip ANSI, collapse blanks)
@@ -288,11 +305,11 @@ mod tests {
     fn create_filter_with_go_hooks() -> ExtensionHookFilter {
         let mut hooks = BTreeMap::new();
         hooks.insert(".go".to_string(), vec!["gofmt -w {file}".to_string()]);
-        ExtensionHookFilter::new(hooks)
+        ExtensionHookFilter::new(hooks, false)
     }
 
     fn create_empty_filter() -> ExtensionHookFilter {
-        ExtensionHookFilter::new(BTreeMap::new())
+        ExtensionHookFilter::new(BTreeMap::new(), false)
     }
 
     // applies_to tests
@@ -564,7 +581,7 @@ mod tests {
                     .to_string(),
             ],
         );
-        let filter = ExtensionHookFilter::new(hooks);
+        let filter = ExtensionHookFilter::new(hooks, false);
 
         let input = HookInput {
             event: HookEvent::AfterFileEdit,

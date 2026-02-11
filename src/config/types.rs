@@ -46,6 +46,10 @@ pub struct Config {
     /// Stop event hooks
     #[serde(default)]
     pub stop_hooks: Vec<StopHook>,
+
+    /// NanoBuddy連携を有効化 (隠しオプション)
+    #[serde(default)]
+    pub nano_buddy: bool,
 }
 
 impl Default for Config {
@@ -62,6 +66,7 @@ impl Default for Config {
             custom_filters: Vec::new(),
             extension_hooks: BTreeMap::new(),
             stop_hooks: Vec::new(),
+            nano_buddy: false,
         }
     }
 }

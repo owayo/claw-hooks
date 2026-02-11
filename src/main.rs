@@ -6,6 +6,7 @@
 mod cli;
 mod config;
 mod domain;
+mod notify;
 mod service;
 
 use anyhow::Result;

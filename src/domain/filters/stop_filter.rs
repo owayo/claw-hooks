@@ -10,12 +10,13 @@ use crate::domain::{Decision, HookEvent, HookInput};
 /// Filter for Stop event hooks.
 pub struct StopHookFilter {
     hooks: Vec<StopHook>,
+    nano_buddy: bool,
 }
 
 impl StopHookFilter {
     /// Create a new StopHookFilter.
-    pub fn new(hooks: Vec<StopHook>) -> Self {
-        Self { hooks }
+    pub fn new(hooks: Vec<StopHook>, nano_buddy: bool) -> Self {
+        Self { hooks, nano_buddy }
     }
 
     /// Execute a single command string safely.
@@ -148,6 +149,12 @@ impl Filter for StopHookFilter {
             }
         }
 
+        // NanoBuddy notification (after all stop hooks complete)
+        if self.nano_buddy {
+            debug!("🐱 NanoBuddy stop notification");
+            crate::notify::nano_buddy::notify_stop_hook();
+        }
+
         if failures.is_empty() {
             Decision::allow()
         } else {
@@ -173,7 +180,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -191,7 +198,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let bash_input = HookInput {
             event: HookEvent::BeforeCommand,
@@ -212,7 +219,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -244,7 +251,7 @@ mod tests {
             commands: vec!["nonexistent-command-xyz-abc-123".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -259,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_priority() {
-        let filter = StopHookFilter::new(vec![]);
+        let filter = StopHookFilter::new(vec![], false);
         assert_eq!(filter.priority(), 100);
     }
 
@@ -271,7 +278,7 @@ mod tests {
             commands: vec!["echo should-not-run".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -295,7 +302,7 @@ mod tests {
             commands: vec!["echo running".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -319,7 +326,7 @@ mod tests {
             commands: vec!["nonexistent-command-xyz".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -363,7 +370,7 @@ mod tests {
                 file_exists: Some("nonexistent-file-xyz-abc.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -378,7 +385,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -393,7 +400,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -417,7 +424,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Block { .. }));
     }
@@ -442,7 +449,7 @@ mod tests {
                 }),
             },
         ];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -477,7 +484,7 @@ mod tests {
                 }),
             },
         ];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -494,7 +501,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -518,7 +525,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -536,7 +543,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -564,7 +571,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -593,7 +600,7 @@ mod tests {
             ],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -610,7 +617,7 @@ mod tests {
             commands: vec![format!("sh -c 'sleep 0.1; echo done > {}'", marker_path)],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks);
+        let filter = StopHookFilter::new(hooks, false);
 
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));

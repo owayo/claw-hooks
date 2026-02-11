@@ -59,14 +59,20 @@ impl FilterChain {
 
         // Add extension hook filter
         if !config.extension_hooks.is_empty() {
+            let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
             filters.push(Box::new(ExtensionHookFilter::new(
                 config.extension_hooks.clone(),
+                nano_buddy,
             )));
         }
 
         // Add stop hook filter
         if !config.stop_hooks.is_empty() {
-            filters.push(Box::new(StopHookFilter::new(config.stop_hooks.clone())));
+            let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
+            filters.push(Box::new(StopHookFilter::new(
+                config.stop_hooks.clone(),
+                nano_buddy,
+            )));
         }
 
         // Sort by priority (lower = higher priority)

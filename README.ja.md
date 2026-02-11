@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Gemini CLIに対応 - コマンドブロック、自動フォーマット、通知
+  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Gemini CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、bash -c、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
-- 🔔 **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
+- ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
@@ -205,7 +205,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
 | lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Codeのみ）* |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
-| 停止通知 | カスタム通知スクリプト | `[[stop_hooks]]`設定 |
+| Stopフック（lint、通知等） | ユースケースごとにスクリプト作成 | `[[stop_hooks]]`設定 |
 
 \* lint/フォーマッターの出力は`additionalContext`経由でClaude Codeに自動送信され、エージェントが警告を修正できます。
 
@@ -670,7 +670,7 @@ graph LR
         WS3[Windsurf: post_cascade_response]
         GE3[Gemini: AfterAgent]
     end
-    CH3[🔔 通知を送信]
+    CH3[⏹️ Lint / 通知 / クリーンアップ]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3

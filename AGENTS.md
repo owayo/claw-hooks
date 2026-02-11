@@ -16,7 +16,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 2. **AST Parsing**: tree-sitter-bash for accurate command detection
 3. **Custom Filters**: Regex-based command filtering
 4. **Extension Hooks**: Auto-format/lint on file save
-5. **Stop Hooks**: Notifications when agent loop ends
+5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 
 ## Project Structure
 

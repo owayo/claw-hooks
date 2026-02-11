@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI - Command blocking, auto-formatting, notifications
+  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI - Command blocking, auto-formatting, stop-time automation
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@
 - 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
-- 🔔 **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
+- ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
@@ -205,7 +205,7 @@ Configure once:
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
 | Lint output to agent | Manual JSON construction | Automatic (Claude Code only)* |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
-| Stop notifications | Custom notification script | `[[stop_hooks]]` config |
+| Stop hooks (lint, notifications, etc.) | Custom scripts per use case | `[[stop_hooks]]` config |
 
 \* Lint/formatter output is automatically passed to Claude Code via `additionalContext`, enabling the agent to fix warnings.
 
@@ -669,7 +669,7 @@ graph LR
         WS3[Windsurf: post_cascade_response]
         GE3[Gemini: AfterAgent]
     end
-    CH3[🔔 Send notifications]
+    CH3[⏹️ Lint / notifications / cleanup]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3

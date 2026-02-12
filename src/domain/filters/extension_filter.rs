@@ -576,6 +576,87 @@ mod tests {
         assert!(ExtensionHookFilter::parse_command_template("   ").is_err());
     }
 
+    // === Timeout tests ===
+
+    #[test]
+    fn test_extension_hook_timeout_returns_allow_with_error_context() {
+        // Extension hooks always allow, but timeout error should appear in context
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'sleep 30 #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 2);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&input);
+        let elapsed = start.elapsed();
+
+        // Should still allow (extension hooks are side effects, not blockers)
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Extension hooks always allow even on timeout"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Should timeout in ~2s, took {:?}",
+            elapsed
+        );
+        // Error context should mention the failure
+        match decision {
+            Decision::Allow { additional_context } => {
+                let ctx = additional_context.expect("Should have error context on timeout");
+                assert!(
+                    ctx.contains("timed out") || ctx.contains("ERROR"),
+                    "Context should indicate timeout: {}",
+                    ctx
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_extension_hook_completes_within_timeout() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'echo ok #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&input);
+        let elapsed = start.elapsed();
+
+        assert!(matches!(decision, Decision::Allow { .. }));
+        assert!(
+            elapsed.as_secs() < 5,
+            "Fast hook should complete quickly: {:?}",
+            elapsed
+        );
+    }
+
     // === Output normalization tests ===
 
     #[test]

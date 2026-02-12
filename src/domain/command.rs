@@ -92,3 +92,166 @@ pub fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child
         .spawn()
         .map_err(|e| format!("Failed to execute '{}': {}", program, e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === spawn_piped tests ===
+
+    #[test]
+    fn test_spawn_piped_valid_command() {
+        let child = spawn_piped("echo", &["hello".to_string()]);
+        assert!(child.is_ok(), "Should spawn valid command");
+        // Reap the child
+        let _ = child.unwrap().wait();
+    }
+
+    #[test]
+    fn test_spawn_piped_nonexistent_command() {
+        let child = spawn_piped("nonexistent-command-xyz-abc-999", &[]);
+        assert!(child.is_err(), "Should fail for nonexistent command");
+        assert!(
+            child.unwrap_err().contains("Failed to execute"),
+            "Error should indicate execution failure"
+        );
+    }
+
+    // === run_with_timeout tests ===
+
+    #[test]
+    fn test_run_with_timeout_captures_stdout() {
+        let child = spawn_piped("echo", &["hello-stdout".to_string()]).unwrap();
+        let output = run_with_timeout(child, 10, "echo hello-stdout").unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("hello-stdout"),
+            "Should capture stdout, got: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_captures_stderr() {
+        let child = spawn_piped(
+            "sh",
+            &["-c".to_string(), "echo hello-stderr >&2".to_string()],
+        )
+        .unwrap();
+        let output = run_with_timeout(child, 10, "echo stderr").unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("hello-stderr"),
+            "Should capture stderr, got: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_captures_both_stdout_and_stderr() {
+        let child = spawn_piped(
+            "sh",
+            &[
+                "-c".to_string(),
+                "echo out-data; echo err-data >&2".to_string(),
+            ],
+        )
+        .unwrap();
+        let output = run_with_timeout(child, 10, "both streams").unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("out-data"), "stdout: {}", stdout);
+        assert!(stderr.contains("err-data"), "stderr: {}", stderr);
+    }
+
+    #[test]
+    fn test_run_with_timeout_nonzero_exit_code() {
+        let child = spawn_piped("sh", &["-c".to_string(), "exit 42".to_string()]).unwrap();
+        let output = run_with_timeout(child, 10, "exit 42").unwrap();
+
+        assert!(!output.status.success());
+        assert_eq!(output.status.code(), Some(42));
+    }
+
+    #[test]
+    fn test_run_with_timeout_kills_on_timeout() {
+        let child = spawn_piped("sleep", &["30".to_string()]).unwrap();
+        let pid = child.id();
+
+        let start = Instant::now();
+        let result = run_with_timeout(child, 1, "sleep 30");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Should return error on timeout");
+        let err = result.unwrap_err();
+        assert!(err.contains("timed out"), "Error: {}", err);
+        assert!(
+            elapsed.as_secs() < 5,
+            "Should timeout quickly, took {:?}",
+            elapsed
+        );
+
+        // Verify process is actually dead by checking /proc (Linux) or kill -0 via shell
+        #[cfg(unix)]
+        {
+            let check = Command::new("kill").args(["-0", &pid.to_string()]).output();
+            if let Ok(output) = check {
+                assert!(
+                    !output.status.success(),
+                    "Process {} should be dead after timeout kill",
+                    pid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_run_with_timeout_large_output_no_deadlock() {
+        // Generate >64KB of output (typical pipe buffer size) to verify no deadlock
+        let child = spawn_piped(
+            "sh",
+            &[
+                "-c".to_string(),
+                "dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'A'".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let start = Instant::now();
+        let output = run_with_timeout(child, 10, "large output");
+        let elapsed = start.elapsed();
+
+        assert!(output.is_ok(), "Should not deadlock on large output");
+        assert!(
+            elapsed.as_secs() < 10,
+            "Should complete quickly, took {:?}",
+            elapsed
+        );
+        let out = output.unwrap();
+        assert!(
+            out.stdout.len() >= 128 * 1024,
+            "Should capture all output: {} bytes",
+            out.stdout.len()
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_fast_command_under_timeout() {
+        let child = spawn_piped("true", &[]).unwrap();
+        let start = Instant::now();
+        let result = run_with_timeout(child, 60, "true");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().status.success());
+        assert!(
+            elapsed.as_secs() < 2,
+            "Fast command should return quickly: {:?}",
+            elapsed
+        );
+    }
+}

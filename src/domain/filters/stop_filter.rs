@@ -718,4 +718,117 @@ mod tests {
             elapsed
         );
     }
+
+    #[test]
+    fn test_execute_command_timeout_captures_partial_output() {
+        // Command that outputs then hangs: should capture the pre-timeout output in error
+        let result = StopHookFilter::execute_command("sh -c 'echo before-timeout; sleep 30'", 2);
+        // Timeout is returned as Err, not as Output, so we can only verify it timed out
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn test_stop_hook_timeout_mixed_fast_and_slow_conditional() {
+        use crate::config::HookCondition;
+        // Two conditional commands in parallel: one fast success, one timeout
+        // The timeout should still block
+        let hooks = vec![StopHook {
+            commands: vec!["true".to_string(), "sleep 10".to_string()],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("timed out"),
+                    "Expected timeout in message: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision when one command times out"),
+        }
+        assert!(
+            elapsed.as_secs() < 5,
+            "Should timeout in ~2s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_timeout_mixed_fast_and_slow_unconditional() {
+        // Unconditional: one fast, one slow. Both should complete/timeout without blocking
+        let hooks = vec![StopHook {
+            commands: vec!["echo fast".to_string(), "sleep 10".to_string()],
+            condition: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Unconditional hooks always allow"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Should timeout in ~2s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_timeout_process_is_killed() {
+        // Use a marker file: the sleep process should be killed before it creates it
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-timeout-kill-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        // Command: sleep 10 then create marker. If killed properly, marker won't exist
+        let cmd = format!("sh -c 'sleep 10; echo done > {}'", marker_path);
+        let result = StopHookFilter::execute_command(&cmd, 2);
+        assert!(result.is_err());
+
+        // Give a moment for any zombie/orphan cleanup
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert!(
+            !marker.exists(),
+            "Marker file should not exist because process was killed before sleep finished"
+        );
+
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn test_stop_hook_custom_timeout_value() {
+        // Verify custom timeout value is respected (3s timeout, 1s command succeeds)
+        let hooks = vec![StopHook {
+            commands: vec!["sleep 1".to_string()],
+            condition: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 3);
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
+        assert!(matches!(decision, Decision::Allow { .. }));
+        assert!(
+            elapsed.as_secs() < 3,
+            "1s command should complete before 3s timeout: {:?}",
+            elapsed
+        );
+    }
 }

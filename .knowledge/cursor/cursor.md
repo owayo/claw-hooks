@@ -1,8 +1,3 @@
----
-title: "Hooks | Cursor Docs"
-url: "https://cursor.com/en-US/docs/agent/hooks"
----
-
 Agent
 
 # Hooks
@@ -18,11 +13,11 @@ With hooks, you can:
 * Control subagent (Task tool) execution
 * Inject context at session start
 
-Looking for ready-to-use integrations? See [Partner Integrations](#partner-integrations) for security, governance, and secrets management solutions from our ecosystem partners.
+Looking for ready-to-use integrations? See [Partner Integrations](https://cursor.com/en-US/docs/agent/hooks#partner-integrations) for security, governance, and secrets management solutions from our ecosystem partners.
 
-Cursor supports loading hooks from third-party tools like Claude Code. See [Third Party Hooks](/docs/agent/third-party-hooks) for details on compatibility and configuration.
+Cursor supports loading hooks from third-party tools like Claude Code. See [Third Party Hooks](https://cursor.com/docs/agent/third-party-hooks) for details on compatibility and configuration.
 
-## [Agent and Tab Support](#agent-and-tab-support)
+## [Agent and Tab Support](https://cursor.com/en-US/docs/agent/hooks#agent-and-tab-support)
 
 Hooks work with both **Cursor Agent** (Cmd+K/Agent Chat) and **Cursor Tab** (inline completions), but they use different hook events:
 
@@ -46,11 +41,11 @@ Hooks work with both **Cursor Agent** (Cmd+K/Agent Chat) and **Cursor Tab** (inl
 
 These separate hooks allow different policies for autonomous Tab operations versus user-directed Agent operations.
 
-## [Quickstart](#quickstart)
+## [Quickstart](https://cursor.com/en-US/docs/agent/hooks#quickstart)
 
 Create a `hooks.json` file. You can create it at the project level (`<project>/.cursor/hooks.json`) or in your home directory (`~/.cursor/hooks.json`). Project-level hooks apply only to that specific project, while home directory hooks apply globally.
 
-<button>User hooks (~/.cursor/)</button><button>Project hooks (.cursor/)</button>
+User hooks (~/.cursor/)Project hooks (.cursor/)
 
 For user-level hooks that apply globally, create `~/.cursor/hooks.json`:
 
@@ -80,11 +75,11 @@ chmod +x ~/.cursor/hooks/format.sh
 
 Restart Cursor. Your hook now runs after every file edit.
 
-## [Hook Types](#hook-types)
+## [Hook Types](https://cursor.com/en-US/docs/agent/hooks#hook-types)
 
 Hooks support two execution types: command-based (default) and prompt-based (LLM-evaluated).
 
-### [Command-Based Hooks](#command-based-hooks)
+### [Command-Based Hooks](https://cursor.com/en-US/docs/agent/hooks#command-based-hooks)
 
 Command hooks execute shell scripts that receive JSON input via stdin and return JSON output via stdout.
 
@@ -108,7 +103,7 @@ Command hooks execute shell scripts that receive JSON input via stdin and return
 * Exit code `2` - Block the action (equivalent to returning `permission: "deny"`)
 * Other exit codes - Hook failed, action proceeds (fail-open by default)
 
-### [Prompt-Based Hooks](#prompt-based-hooks)
+### [Prompt-Based Hooks](https://cursor.com/en-US/docs/agent/hooks#prompt-based-hooks)
 
 Prompt hooks use an LLM to evaluate a natural language condition. They're useful for policy enforcement without writing custom scripts.
 
@@ -134,11 +129,11 @@ Prompt hooks use an LLM to evaluate a natural language condition. They're useful
 * If `$ARGUMENTS` is absent, hook input is auto-appended
 * Optional `model` field to override the default LLM model
 
-## [Examples](#examples)
+## [Examples](https://cursor.com/en-US/docs/agent/hooks#examples)
 
 The examples below use `./hooks/...` paths, which work for **user hooks** (`~/.cursor/hooks.json`) where scripts run from `~/.cursor/`. For **project hooks** (`<project>/.cursor/hooks.json`), use `.cursor/hooks/...` paths instead since scripts run from the project root.
 
-<button>hooks.json</button><button>audit.sh</button><button>block-git.sh</button>
+hooks.jsonaudit.shblock-git.sh
 
 ```
 {
@@ -211,11 +206,11 @@ The examples below use `./hooks/...` paths, which work for **user hooks** (`~/.c
 }
 ```
 
-### [TypeScript stop automation hook](#typescript-stop-automation-hook)
+### [TypeScript stop automation hook](https://cursor.com/en-US/docs/agent/hooks#typescript-stop-automation-hook)
 
 Choose TypeScript when you need typed JSON, durable file I/O, and HTTP calls in the same hook. This Bun-powered `stop` hook tracks per-conversation failure counts on disk, forwards structured telemetry to an internal API, and can automatically schedule a retry when the agent fails twice in a row.
 
-<button>hooks.json</button><button>.cursor/hooks/track-stop.ts</button>
+hooks.json.cursor/hooks/track-stop.ts
 
 ```
 {
@@ -232,11 +227,11 @@ Choose TypeScript when you need typed JSON, durable file I/O, and HTTP calls in 
 
 Set `AGENT_TELEMETRY_URL` to the internal endpoint that should receive run summaries.
 
-### [Python manifest guard hook](#python-manifest-guard-hook)
+### [Python manifest guard hook](https://cursor.com/en-US/docs/agent/hooks#python-manifest-guard-hook)
 
 Python shines when you need rich parsing libraries. This hook uses `pyyaml` to inspect Kubernetes manifests before `kubectl apply` runs; Bash would struggle to parse multi-document YAML safely.
 
-<button>hooks.json</button><button>.cursor/hooks/kube\_guard.py</button>
+hooks.json.cursor/hooks/kube\_guard.py
 
 ```
 {
@@ -253,46 +248,46 @@ Python shines when you need rich parsing libraries. This hook uses `pyyaml` to i
 
 Install PyYAML (for example, `pip install pyyaml`) wherever your hook scripts run so the parser import succeeds.
 
-## [Partner Integrations](#partner-integrations)
+## [Partner Integrations](https://cursor.com/en-US/docs/agent/hooks#partner-integrations)
 
 We partner with ecosystem vendors who have built hooks support with Cursor. These integrations cover security scanning, governance, secrets management, and more.
 
-### [MCP governance and visibility](#mcp-governance-and-visibility)
+### [MCP governance and visibility](https://cursor.com/en-US/docs/agent/hooks#mcp-governance-and-visibility)
 
-|Partner|Description|
-|---|---|
-|[MintMCP](https://www.mintmcp.com/blog/mcp-governance-cursor-hooks)|Build a complete inventory of MCP servers, monitor tool usage patterns, and scan responses for sensitive data before it reaches the AI model.|
-|[Oasis Security](https://www.oasis.security/blog/cursor-oasis-governing-agentic-access)|Enforce least-privilege policies on AI agent actions and maintain full audit trails across enterprise systems.|
-|[Runlayer](https://www.runlayer.com/blog/cursor-hooks)|Wrap MCP tools and integrate with their MCP broker for centralized control and visibility over agent-to-tool interactions.|
+| Partner | Description |
+| - | - |
+| [MintMCP](https://www.mintmcp.com/blog/mcp-governance-cursor-hooks) | Build a complete inventory of MCP servers, monitor tool usage patterns, and scan responses for sensitive data before it reaches the AI model. |
+| [Oasis Security](https://www.oasis.security/blog/cursor-oasis-governing-agentic-access) | Enforce least-privilege policies on AI agent actions and maintain full audit trails across enterprise systems. |
+| [Runlayer](https://www.runlayer.com/blog/cursor-hooks) | Wrap MCP tools and integrate with their MCP broker for centralized control and visibility over agent-to-tool interactions. |
 
-### [Code security and best practices](#code-security-and-best-practices)
+### [Code security and best practices](https://cursor.com/en-US/docs/agent/hooks#code-security-and-best-practices)
 
-|Partner|Description|
-|---|---|
-|[Corridor](https://corridor.dev/blog/corridor-cursor-hooks/)|Get real-time feedback on code implementation and security design decisions as code is being written.|
-|[Semgrep](https://semgrep.dev/blog/2025/cursor-hooks-mcp-server)|Automatically scan AI-generated code for vulnerabilities with real-time feedback to regenerate code until security issues are resolved.|
+| Partner | Description |
+| - | - |
+| [Corridor](https://corridor.dev/blog/corridor-cursor-hooks/) | Get real-time feedback on code implementation and security design decisions as code is being written. |
+| [Semgrep](https://semgrep.dev/blog/2025/cursor-hooks-mcp-server) | Automatically scan AI-generated code for vulnerabilities with real-time feedback to regenerate code until security issues are resolved. |
 
-### [Dependency security](#dependency-security)
+### [Dependency security](https://cursor.com/en-US/docs/agent/hooks#dependency-security)
 
-|Partner|Description|
-|---|---|
-|[Endor Labs](https://www.endorlabs.com/learn/bringing-malware-detection-into-ai-coding-workflows-with-cursor-hooks)|Intercept package installations and scan for malicious dependencies, preventing supply chain attacks before they enter your codebase.|
+| Partner | Description |
+| - | - |
+| [Endor Labs](https://www.endorlabs.com/learn/bringing-malware-detection-into-ai-coding-workflows-with-cursor-hooks) | Intercept package installations and scan for malicious dependencies, preventing supply chain attacks before they enter your codebase. |
 
-### [Agent security and safety](#agent-security-and-safety)
+### [Agent security and safety](https://cursor.com/en-US/docs/agent/hooks#agent-security-and-safety)
 
-|Partner|Description|
-|---|---|
-|[Snyk](https://snyk.io/blog/evo-agent-guard-cursor-integration/)|Review agent actions in real-time with Evo Agent Guard, detecting and preventing issues like prompt injection and dangerous tool calls.|
+| Partner | Description |
+| - | - |
+| [Snyk](https://snyk.io/blog/evo-agent-guard-cursor-integration/) | Review agent actions in real-time with Evo Agent Guard, detecting and preventing issues like prompt injection and dangerous tool calls. |
 
-### [Secrets management](#secrets-management)
+### [Secrets management](https://cursor.com/en-US/docs/agent/hooks#secrets-management)
 
-|Partner|Description|
-|---|---|
-|[1Password](https://marketplace.1password.com/integration/cursor-hooks)|Validate that environment files from 1Password Environments are properly mounted before shell commands execute, enabling just-in-time secrets access without writing credentials to disk.|
+| Partner | Description |
+| - | - |
+| [1Password](https://marketplace.1password.com/integration/cursor-hooks) | Validate that environment files from 1Password Environments are properly mounted before shell commands execute, enabling just-in-time secrets access without writing credentials to disk. |
 
-For more details about our hooks partners, see the [Hooks for security and platform teams](/blog/hooks-partners) blog post.
+For more details about our hooks partners, see the [Hooks for security and platform teams](https://cursor.com/blog/hooks-partners) blog post.
 
-## [Configuration](#configuration)
+## [Configuration](https://cursor.com/en-US/docs/agent/hooks#configuration)
 
 Define hooks in a `hooks.json` file. Configuration can exist at multiple levels; higher-priority sources override lower ones:
 
@@ -325,7 +320,7 @@ The `hooks` object maps hook names to arrays of hook definitions. Each definitio
 
 For project hooks, use paths like `.cursor/hooks/script.sh` (relative to project root), not `./hooks/script.sh` (which would look for `<project>/hooks/script.sh`).
 
-### [Configuration file](#configuration-file)
+### [Configuration file](https://cursor.com/en-US/docs/agent/hooks#configuration-file)
 
 This example shows a user-level hooks file (`~/.cursor/hooks.json`). For project-level hooks, change paths like `./hooks/script.sh` to `.cursor/hooks/script.sh`:
 
@@ -358,23 +353,23 @@ This example shows a user-level hooks file (`~/.cursor/hooks.json`). For project
 
 The Agent hooks (`sessionStart`, `sessionEnd`, `preToolUse`, `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, `afterFileEdit`, `beforeSubmitPrompt`, `preCompact`, `stop`, `afterAgentResponse`, `afterAgentThought`) apply to Cmd+K and Agent Chat operations. The Tab hooks (`beforeTabFileRead`, `afterTabFileEdit`) apply specifically to inline Tab completions.
 
-### [Global Configuration Options](#global-configuration-options)
+### [Global Configuration Options](https://cursor.com/en-US/docs/agent/hooks#global-configuration-options)
 
-|Option|Type|Default|Description|
-|---|---|---|---|
-|`version`|number|`1`|Config schema version|
+| Option | Type | Default | Description |
+| - | - | - | - |
+| `version` | number | `1` | Config schema version |
 
-### [Per-Script Configuration Options](#per-script-configuration-options)
+### [Per-Script Configuration Options](https://cursor.com/en-US/docs/agent/hooks#per-script-configuration-options)
 
-|Option|Type|Default|Description|
-|---|---|---|---|
-|`command`|string|required|Script path or command|
-|`type`|`"command"` \| `"prompt"`|`"command"`|Hook execution type|
-|`timeout`|number|platform default|Execution timeout in seconds|
-|`loop_limit`|number \| null|`5`|Per-script loop limit for stop/subagentStop hooks. `null` means no limit. Default is `5` for Cursor hooks, `null` for Claude Code hooks.|
-|`matcher`|object|\-|Filter criteria for when hook runs|
+| Option | Type | Default | Description |
+| - | - | - | - |
+| `command` | string | required | Script path or command |
+| `type` | `"command"` &#124; `"prompt"` | `"command"` | Hook execution type |
+| `timeout` | number | platform default | Execution timeout in seconds |
+| `loop_limit` | number &#124; null | `5` | Per-script loop limit for stop/subagentStop hooks. `null` means no limit. Default is `5` for Cursor hooks, `null` for Claude Code hooks. |
+| `matcher` | object | - | Filter criteria for when hook runs |
 
-### [Matcher Configuration](#matcher-configuration)
+### [Matcher Configuration](https://cursor.com/en-US/docs/agent/hooks#matcher-configuration)
 
 Matchers let you filter when a hook runs. Which field the matcher applies to depends on the hook:
 
@@ -412,11 +407,11 @@ Matchers let you filter when a hook runs. Which field the matcher applies to dep
 * **subagentStart**: Filter by subagent type — `generalPurpose`, `explore`, `shell`, etc.
 * **beforeShellExecution**: Filter by the shell command text; the matcher is matched against the full command string.
 
-## [Team Distribution](#team-distribution)
+## [Team Distribution](https://cursor.com/en-US/docs/agent/hooks#team-distribution)
 
 Hooks can be distributed to team members using project hooks (via version control), MDM tools, or Cursor's cloud distribution system.
 
-### [Project Hooks (Version Control)](#project-hooks-version-control)
+### [Project Hooks (Version Control)](https://cursor.com/en-US/docs/agent/hooks#project-hooks-version-control)
 
 Project hooks are the simplest way to share hooks with your team. Place a `hooks.json` file at `<project-root>/.cursor/hooks.json` and commit it to your repository. When team members open the project in a trusted workspace, Cursor automatically loads and runs the project hooks.
 
@@ -427,7 +422,7 @@ Project hooks:
 * Can be project-specific (e.g., enforce formatting standards for a particular codebase)
 * Require the workspace to be trusted to run (for security)
 
-### [MDM Distribution](#mdm-distribution)
+### [MDM Distribution](https://cursor.com/en-US/docs/agent/hooks#mdm-distribution)
 
 Distribute hooks across your organization using Mobile Device Management (MDM) tools. Place the `hooks.json` file and hook scripts in the target directories on each machine.
 
@@ -444,7 +439,7 @@ Distribute hooks across your organization using Mobile Device Management (MDM) t
 
 Note: MDM-based distribution is fully managed by your organization. Cursor does not deploy or manage files through your MDM solution. Ensure your internal IT or security team handles configuration, deployment, and updates in accordance with your organization's policies.
 
-### [Cloud Distribution (Enterprise Only)](#cloud-distribution-enterprise-only)
+### [Cloud Distribution (Enterprise Only)](https://cursor.com/en-US/docs/agent/hooks#cloud-distribution-enterprise-only)
 
 Enterprise teams can use Cursor's native cloud distribution to automatically sync hooks to all team members. Configure hooks in the [web dashboard](https://cursor.com/dashboard?tab=team-content&section=hooks). Cursor automatically delivers configured hooks to all client machines when team members log in.
 
@@ -456,11 +451,11 @@ Cloud distribution provides:
 
 Enterprise administrators can create, edit, and manage team hooks from the dashboard without requiring access to individual machines.
 
-## [Reference](#reference)
+## [Reference](https://cursor.com/en-US/docs/agent/hooks#reference)
 
-### [Common schema](#common-schema)
+### [Common schema](https://cursor.com/en-US/docs/agent/hooks#common-schema)
 
-#### [Input (all hooks)](#input-all-hooks)
+#### [Input (all hooks)](https://cursor.com/en-US/docs/agent/hooks#input-all-hooks)
 
 All hooks receive a base set of fields in addition to their hook-specific fields:
 
@@ -477,20 +472,20 @@ All hooks receive a base set of fields in addition to their hook-specific fields
 }
 ```
 
-|Field|Type|Description|
-|---|---|---|
-|`conversation_id`|string|Stable ID of the conversation across many turns|
-|`generation_id`|string|The current generation that changes with every user message|
-|`model`|string|The model configured for the composer that triggered the hook|
-|`hook_event_name`|string|Which hook is being run|
-|`cursor_version`|string|Cursor application version (e.g. "1.7.2")|
-|`workspace_roots`|string\[\]|The list of root folders in the workspace (normally just one, but multiroot workspaces can have multiple)|
-|`user_email`|string \| null|Email address of the authenticated user, if available|
-|`transcript_path`|string \| null|Path to the main conversation transcript file (null if transcripts disabled)|
+| Field | Type | Description |
+| - | - | - |
+| `conversation_id` | string | Stable ID of the conversation across many turns |
+| `generation_id` | string | The current generation that changes with every user message |
+| `model` | string | The model configured for the composer that triggered the hook |
+| `hook_event_name` | string | Which hook is being run |
+| `cursor_version` | string | Cursor application version (e.g. "1.7.2") |
+| `workspace_roots` | string\[\] | The list of root folders in the workspace (normally just one, but multiroot workspaces can have multiple) |
+| `user_email` | string &#124; null | Email address of the authenticated user, if available |
+| `transcript_path` | string &#124; null | Path to the main conversation transcript file (null if transcripts disabled) |
 
-### [Hook events](#hook-events)
+### [Hook events](https://cursor.com/en-US/docs/agent/hooks#hook-events)
 
-#### [preToolUse](#pretooluse)
+#### [preToolUse](https://cursor.com/en-US/docs/agent/hooks#pretooluse)
 
 Called before any tool execution. This is a generic hook that fires for all tool types (Shell, Read, Write, MCP, Task, etc.). Use matchers to filter by specific tools.
 
@@ -513,13 +508,13 @@ Called before any tool execution. This is a generic hook that fires for all tool
 }
 ```
 
-|Output Field|Type|Description|
-|---|---|---|
-|`decision`|string|`"allow"` to proceed, `"deny"` to block|
-|`reason`|string (optional)|Explanation shown to agent when denied|
-|`updated_input`|object (optional)|Modified tool input to use instead|
+| Output Field | Type | Description |
+| - | - | - |
+| `decision` | string | `"allow"` to proceed, `"deny"` to block |
+| `reason` | string (optional) | Explanation shown to agent when denied |
+| `updated_input` | object (optional) | Modified tool input to use instead |
 
-#### [postToolUse](#posttooluse)
+#### [postToolUse](https://cursor.com/en-US/docs/agent/hooks#posttooluse)
 
 Called after successful tool execution. Useful for auditing and analytics.
 
@@ -541,16 +536,16 @@ Called after successful tool execution. Useful for auditing and analytics.
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`duration`|number|Execution time in milliseconds|
-|`tool_output`|string|Full output from the tool|
+| Input Field | Type | Description |
+| - | - | - |
+| `duration` | number | Execution time in milliseconds |
+| `tool_output` | string | Full output from the tool |
 
-|Output Field|Type|Description|
-|---|---|---|
-|`updated_mcp_tool_output`|object (optional)|For MCP tools only: replaces the tool output seen by the model|
+| Output Field | Type | Description |
+| - | - | - |
+| `updated_mcp_tool_output` | object (optional) | For MCP tools only: replaces the tool output seen by the model |
 
-#### [postToolUseFailure](#posttoolusefailure)
+#### [postToolUseFailure](https://cursor.com/en-US/docs/agent/hooks#posttoolusefailure)
 
 Called when a tool fails, times out, or is denied. Useful for error tracking and recovery logic.
 
@@ -573,14 +568,14 @@ Called when a tool fails, times out, or is denied. Useful for error tracking and
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`error_message`|string|Description of the failure|
-|`failure_type`|string|Type of failure: `"error"`, `"timeout"`, or `"permission_denied"`|
-|`duration`|number|Time in milliseconds until the failure occurred|
-|`is_interrupt`|boolean|Whether this failure was caused by a user interrupt/cancellation|
+| Input Field | Type | Description |
+| - | - | - |
+| `error_message` | string | Description of the failure |
+| `failure_type` | string | Type of failure: `"error"`, `"timeout"`, or `"permission_denied"` |
+| `duration` | number | Time in milliseconds until the failure occurred |
+| `is_interrupt` | boolean | Whether this failure was caused by a user interrupt/cancellation |
 
-#### [subagentStart](#subagentstart)
+#### [subagentStart](https://cursor.com/en-US/docs/agent/hooks#subagentstart)
 
 Called before spawning a subagent (Task tool). Can allow or deny subagent creation.
 
@@ -599,7 +594,7 @@ Called before spawning a subagent (Task tool). Can allow or deny subagent creati
 }
 ```
 
-#### [subagentStop](#subagentstop)
+#### [subagentStop](https://cursor.com/en-US/docs/agent/hooks#subagentstop)
 
 Called when a subagent completes or errors. Can trigger follow-up actions.
 
@@ -619,17 +614,17 @@ Called when a subagent completes or errors. Can trigger follow-up actions.
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`subagent_type`|string|Type of subagent: `generalPurpose`, `explore`, `shell`, etc.|
-|`status`|string|`"completed"` or `"error"`|
-|`result`|string|Output/result from the subagent|
-|`duration`|number|Execution time in milliseconds|
-|`agent_transcript_path`|string \| null|Path to the subagent's own transcript file (separate from the parent conversation)|
+| Input Field | Type | Description |
+| - | - | - |
+| `subagent_type` | string | Type of subagent: `generalPurpose`, `explore`, `shell`, etc. |
+| `status` | string | `"completed"` or `"error"` |
+| `result` | string | Output/result from the subagent |
+| `duration` | number | Execution time in milliseconds |
+| `agent_transcript_path` | string &#124; null | Path to the subagent's own transcript file (separate from the parent conversation) |
 
 The `followup_message` field enables loop-style flows where subagent completion triggers the next iteration.
 
-#### [beforeShellExecution / beforeMCPExecution](#beforeshellexecution-beforemcpexecution)
+#### [beforeShellExecution / beforeMCPExecution](https://cursor.com/en-US/docs/agent/hooks#beforeshellexecution-beforemcpexecution)
 
 Called before any shell command or MCP tool is executed. Return a permission decision.
 
@@ -661,7 +656,7 @@ Called before any shell command or MCP tool is executed. Return a permission dec
 }
 ```
 
-#### [afterShellExecution](#aftershellexecution)
+#### [afterShellExecution](https://cursor.com/en-US/docs/agent/hooks#aftershellexecution)
 
 Fires after a shell command executes; useful for auditing or collecting metrics from command output.
 
@@ -674,13 +669,13 @@ Fires after a shell command executes; useful for auditing or collecting metrics 
 }
 ```
 
-|Field|Type|Description|
-|---|---|---|
-|`command`|string|The full terminal command that was executed|
-|`output`|string|Full output captured from the terminal|
-|`duration`|number|Duration in milliseconds spent executing the shell command (excludes approval wait time)|
+| Field | Type | Description |
+| - | - | - |
+| `command` | string | The full terminal command that was executed |
+| `output` | string | Full output captured from the terminal |
+| `duration` | number | Duration in milliseconds spent executing the shell command (excludes approval wait time) |
 
-#### [afterMCPExecution](#aftermcpexecution)
+#### [afterMCPExecution](https://cursor.com/en-US/docs/agent/hooks#aftermcpexecution)
 
 Fires after an MCP tool executes; includes the tool's input parameters and full JSON result.
 
@@ -694,14 +689,14 @@ Fires after an MCP tool executes; includes the tool's input parameters and full 
 }
 ```
 
-|Field|Type|Description|
-|---|---|---|
-|`tool_name`|string|Name of the MCP tool that was executed|
-|`tool_input`|string|JSON params string passed to the tool|
-|`result_json`|string|JSON string of the tool response|
-|`duration`|number|Duration in milliseconds spent executing the MCP tool (excludes approval wait time)|
+| Field | Type | Description |
+| - | - | - |
+| `tool_name` | string | Name of the MCP tool that was executed |
+| `tool_input` | string | JSON params string passed to the tool |
+| `result_json` | string | JSON string of the tool response |
+| `duration` | number | Duration in milliseconds spent executing the MCP tool (excludes approval wait time) |
 
-#### [afterFileEdit](#afterfileedit)
+#### [afterFileEdit](https://cursor.com/en-US/docs/agent/hooks#afterfileedit)
 
 Fires after the Agent edits a file; useful for formatters or accounting of agent-written code.
 
@@ -713,7 +708,7 @@ Fires after the Agent edits a file; useful for formatters or accounting of agent
 }
 ```
 
-#### [beforeReadFile](#beforereadfile)
+#### [beforeReadFile](https://cursor.com/en-US/docs/agent/hooks#beforereadfile)
 
 Called before Agent reads a file. Use for access control to block sensitive files from being sent to the model.
 
@@ -739,18 +734,18 @@ This hook uses **fail-closed** behavior. If the hook script fails to execute (cr
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`file_path`|string|Absolute path to the file being read|
-|`content`|string|Full contents of the file|
-|`attachments`|array|Context attachments associated with the prompt|
+| Input Field | Type | Description |
+| - | - | - |
+| `file_path` | string | Absolute path to the file being read |
+| `content` | string | Full contents of the file |
+| `attachments` | array | Context attachments associated with the prompt |
 
-|Output Field|Type|Description|
-|---|---|---|
-|`permission`|string|`"allow"` to proceed, `"deny"` to block|
-|`user_message`|string (optional)|Message shown to user when denied|
+| Output Field | Type | Description |
+| - | - | - |
+| `permission` | string | `"allow"` to proceed, `"deny"` to block |
+| `user_message` | string (optional) | Message shown to user when denied |
 
-#### [beforeTabFileRead](#beforetabfileread)
+#### [beforeTabFileRead](https://cursor.com/en-US/docs/agent/hooks#beforetabfileread)
 
 Called before Tab (inline completions) reads a file. Enable redaction or access control before Tab accesses file contents.
 
@@ -773,7 +768,7 @@ Called before Tab (inline completions) reads a file. Enable redaction or access 
 }
 ```
 
-#### [afterTabFileEdit](#aftertabfileedit)
+#### [afterTabFileEdit](https://cursor.com/en-US/docs/agent/hooks#aftertabfileedit)
 
 Called after Tab (inline completions) edits a file. Useful for formatters or auditing of Tab-written code.
 
@@ -809,7 +804,7 @@ Called after Tab (inline completions) edits a file. Useful for formatters or aud
 }
 ```
 
-#### [beforeSubmitPrompt](#beforesubmitprompt)
+#### [beforeSubmitPrompt](https://cursor.com/en-US/docs/agent/hooks#beforesubmitprompt)
 
 Called right after user hits send but before backend request. Can prevent submission.
 
@@ -832,12 +827,12 @@ Called right after user hits send but before backend request. Can prevent submis
 }
 ```
 
-|Output Field|Type|Description|
-|---|---|---|
-|`continue`|boolean|Whether to allow the prompt submission to proceed|
-|`user_message`|string (optional)|Message shown to the user when the prompt is blocked|
+| Output Field | Type | Description |
+| - | - | - |
+| `continue` | boolean | Whether to allow the prompt submission to proceed |
+| `user_message` | string (optional) | Message shown to the user when the prompt is blocked |
 
-#### [afterAgentResponse](#afteragentresponse)
+#### [afterAgentResponse](https://cursor.com/en-US/docs/agent/hooks#afteragentresponse)
 
 Called after the agent has completed an assistant message.
 
@@ -848,7 +843,7 @@ Called after the agent has completed an assistant message.
 }
 ```
 
-#### [afterAgentThought](#afteragentthought)
+#### [afterAgentThought](https://cursor.com/en-US/docs/agent/hooks#afteragentthought)
 
 Called after the agent completes a thinking block. Useful for observing the agent's reasoning process.
 
@@ -865,12 +860,12 @@ Called after the agent completes a thinking block. Useful for observing the agen
 }
 ```
 
-|Field|Type|Description|
-|---|---|---|
-|`text`|string|Fully aggregated thinking text for the completed block|
-|`duration_ms`|number (optional)|Duration in milliseconds for the thinking block|
+| Field | Type | Description |
+| - | - | - |
+| `text` | string | Fully aggregated thinking text for the completed block |
+| `duration_ms` | number (optional) | Duration in milliseconds for the thinking block |
 
-#### [stop](#stop)
+#### [stop](https://cursor.com/en-US/docs/agent/hooks#stop)
 
 Called when the agent loop ends. Can optionally auto-submit a follow-up user message to keep iterating.
 
@@ -892,7 +887,7 @@ Called when the agent loop ends. Can optionally auto-submit a follow-up user mes
 * The optional `followup_message` is a string. When provided and non-empty, Cursor will automatically submit it as the next user message. This enables loop-style flows (e.g., iterate until a goal is met).
 * The `loop_count` field indicates how many times the stop hook has already triggered an automatic follow-up for this conversation (starts at 0). To prevent infinite loops, a maximum of 5 auto follow-ups is enforced.
 
-#### [sessionStart](#sessionstart)
+#### [sessionStart](https://cursor.com/en-US/docs/agent/hooks#sessionstart)
 
 Called when a new composer conversation is created. Use this hook to set up session-specific environment variables, inject additional context, or block session creation based on custom policies.
 
@@ -915,20 +910,20 @@ Called when a new composer conversation is created. Use this hook to set up sess
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`session_id`|string|Unique identifier for this session (same as `conversation_id`)|
-|`is_background_agent`|boolean|Whether this is a background agent session vs interactive session|
-|`composer_mode`|string (optional)|The mode the composer is starting in (e.g., "agent", "ask", "edit")|
+| Input Field | Type | Description |
+| - | - | - |
+| `session_id` | string | Unique identifier for this session (same as `conversation_id`) |
+| `is_background_agent` | boolean | Whether this is a background agent session vs interactive session |
+| `composer_mode` | string (optional) | The mode the composer is starting in (e.g., "agent", "ask", "edit") |
 
-|Output Field|Type|Description|
-|---|---|---|
-|`env`|object (optional)|Environment variables to set for this session. Available to all subsequent hook executions|
-|`additional_context`|string (optional)|Additional context to add to the conversation's initial system context|
-|`continue`|boolean (optional)|Whether to continue with session creation. If false, the session will not be created. Default: true|
-|`user_message`|string (optional)|Message to show to the user if `continue` is false|
+| Output Field | Type | Description |
+| - | - | - |
+| `env` | object (optional) | Environment variables to set for this session. Available to all subsequent hook executions |
+| `additional_context` | string (optional) | Additional context to add to the conversation's initial system context |
+| `continue` | boolean (optional) | Whether to continue with session creation. If false, the session will not be created. Default: true |
+| `user_message` | string (optional) | Message to show to the user if `continue` is false |
 
-#### [sessionEnd](#sessionend)
+#### [sessionEnd](https://cursor.com/en-US/docs/agent/hooks#sessionend)
 
 Called when a composer conversation ends. This is a fire-and-forget hook useful for logging, analytics, or cleanup tasks. The response is logged but not used.
 
@@ -951,16 +946,16 @@ Called when a composer conversation ends. This is a fire-and-forget hook useful 
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`session_id`|string|Unique identifier for the session that is ending|
-|`reason`|string|How the session ended: "completed", "aborted", "error", "window\_close", or "user\_close"|
-|`duration_ms`|number|Total duration of the session in milliseconds|
-|`is_background_agent`|boolean|Whether this was a background agent session|
-|`final_status`|string|Final status of the session|
-|`error_message`|string (optional)|Error message if reason is "error"|
+| Input Field | Type | Description |
+| - | - | - |
+| `session_id` | string | Unique identifier for the session that is ending |
+| `reason` | string | How the session ended: "completed", "aborted", "error", "window\_close", or "user\_close" |
+| `duration_ms` | number | Total duration of the session in milliseconds |
+| `is_background_agent` | boolean | Whether this was a background agent session |
+| `final_status` | string | Final status of the session |
+| `error_message` | string (optional) | Error message if reason is "error" |
 
-#### [preCompact](#precompact)
+#### [preCompact](https://cursor.com/en-US/docs/agent/hooks#precompact)
 
 Called before context window compaction/summarization occurs. This is an observational hook that cannot block or modify the compaction behavior. Useful for logging when compaction happens or notifying users.
 
@@ -984,35 +979,35 @@ Called before context window compaction/summarization occurs. This is an observa
 }
 ```
 
-|Input Field|Type|Description|
-|---|---|---|
-|`trigger`|string|What triggered the compaction: "auto" or "manual"|
-|`context_usage_percent`|number|Current context window usage as a percentage (0-100)|
-|`context_tokens`|number|Current context window token count|
-|`context_window_size`|number|Maximum context window size in tokens|
-|`message_count`|number|Number of messages in the conversation|
-|`messages_to_compact`|number|Number of messages that will be summarized|
-|`is_first_compaction`|boolean|Whether this is the first compaction for this conversation|
+| Input Field | Type | Description |
+| - | - | - |
+| `trigger` | string | What triggered the compaction: "auto" or "manual" |
+| `context_usage_percent` | number | Current context window usage as a percentage (0-100) |
+| `context_tokens` | number | Current context window token count |
+| `context_window_size` | number | Maximum context window size in tokens |
+| `message_count` | number | Number of messages in the conversation |
+| `messages_to_compact` | number | Number of messages that will be summarized |
+| `is_first_compaction` | boolean | Whether this is the first compaction for this conversation |
 
-|Output Field|Type|Description|
-|---|---|---|
-|`user_message`|string (optional)|Message to show to the user when compaction occurs|
+| Output Field | Type | Description |
+| - | - | - |
+| `user_message` | string (optional) | Message to show to the user when compaction occurs |
 
-## [Environment Variables](#environment-variables)
+## [Environment Variables](https://cursor.com/en-US/docs/agent/hooks#environment-variables)
 
 Hook scripts receive environment variables when executed:
 
-|Variable|Description|Always Present|
-|---|---|---|
-|`CURSOR_PROJECT_DIR`|Workspace root directory|Yes|
-|`CURSOR_VERSION`|Cursor version string|Yes|
-|`CURSOR_USER_EMAIL`|Authenticated user email|If logged in|
-|`CURSOR_CODE_REMOTE`|Remote-aware project path|For remote workspaces|
-|`CLAUDE_PROJECT_DIR`|Alias for project dir (Claude compatibility)|Yes|
+| Variable | Description | Always Present |
+| - | - | - |
+| `CURSOR_PROJECT_DIR` | Workspace root directory | Yes |
+| `CURSOR_VERSION` | Cursor version string | Yes |
+| `CURSOR_USER_EMAIL` | Authenticated user email | If logged in |
+| `CURSOR_CODE_REMOTE` | Remote-aware project path | For remote workspaces |
+| `CLAUDE_PROJECT_DIR` | Alias for project dir (Claude compatibility) | Yes |
 
 Session-scoped environment variables from `sessionStart` hooks are passed to all subsequent hook executions within that session.
 
-## [Troubleshooting](#troubleshooting)
+## [Troubleshooting](https://cursor.com/en-US/docs/agent/hooks#troubleshooting)
 
 **How to confirm hooks are active**
 
@@ -1029,17 +1024,72 @@ There is a Hooks tab in Cursor Settings to debug configured and executed hooks, 
 
 Exit code `2` from command hooks blocks the action (equivalent to returning `decision: "deny"`). This matches Claude Code behavior for compatibility.
 
-<button>English</button>
+English
 
-* <button>English</button>
-* <button>简体中文</button>
-* <button>日本語</button>
-* <button>繁體中文</button>
-* <button>Español</button>
-* <button>Français</button>
-* <button>Português</button>
-* <button>한국어</button>
-* <button>Русский</button>
-* <button>Türkçe</button>
-* <button>Bahasa Indonesia</button>
-* <button>Deutsch</button>
+* English
+* 简体中文
+* 日本語
+* 繁體中文
+* Español
+* Français
+* Português
+* 한국어
+* Русский
+* Türkçe
+* Bahasa Indonesia
+* Deutsch
+
+* [Agent and Tab Support](https://cursor.com/en-US/docs/agent/hooks#agent-and-tab-support)
+* [Quickstart](https://cursor.com/en-US/docs/agent/hooks#quickstart)
+* [Hook Types](https://cursor.com/en-US/docs/agent/hooks#hook-types)
+* [Command-Based Hooks](https://cursor.com/en-US/docs/agent/hooks#command-based-hooks)
+* [Prompt-Based Hooks](https://cursor.com/en-US/docs/agent/hooks#prompt-based-hooks)
+* [Examples](https://cursor.com/en-US/docs/agent/hooks#examples)
+* [TypeScript stop automation hook](https://cursor.com/en-US/docs/agent/hooks#typescript-stop-automation-hook)
+* [Python manifest guard hook](https://cursor.com/en-US/docs/agent/hooks#python-manifest-guard-hook)
+* [Partner Integrations](https://cursor.com/en-US/docs/agent/hooks#partner-integrations)
+* [MCP governance and visibility](https://cursor.com/en-US/docs/agent/hooks#mcp-governance-and-visibility)
+* [Code security and best practices](https://cursor.com/en-US/docs/agent/hooks#code-security-and-best-practices)
+* [Dependency security](https://cursor.com/en-US/docs/agent/hooks#dependency-security)
+* [Agent security and safety](https://cursor.com/en-US/docs/agent/hooks#agent-security-and-safety)
+* [Secrets management](https://cursor.com/en-US/docs/agent/hooks#secrets-management)
+* [Configuration](https://cursor.com/en-US/docs/agent/hooks#configuration)
+* [Configuration file](https://cursor.com/en-US/docs/agent/hooks#configuration-file)
+* [Global Configuration Options](https://cursor.com/en-US/docs/agent/hooks#global-configuration-options)
+* [Per-Script Configuration Options](https://cursor.com/en-US/docs/agent/hooks#per-script-configuration-options)
+* [Matcher Configuration](https://cursor.com/en-US/docs/agent/hooks#matcher-configuration)
+* [Team Distribution](https://cursor.com/en-US/docs/agent/hooks#team-distribution)
+* [Project Hooks (Version Control)](https://cursor.com/en-US/docs/agent/hooks#project-hooks-version-control)
+* [MDM Distribution](https://cursor.com/en-US/docs/agent/hooks#mdm-distribution)
+* [Cloud Distribution (Enterprise Only)](https://cursor.com/en-US/docs/agent/hooks#cloud-distribution-enterprise-only)
+* [Reference](https://cursor.com/en-US/docs/agent/hooks#reference)
+* [Common schema](https://cursor.com/en-US/docs/agent/hooks#common-schema)
+* [Input (all hooks)](https://cursor.com/en-US/docs/agent/hooks#input-all-hooks)
+* [Hook events](https://cursor.com/en-US/docs/agent/hooks#hook-events)
+* [preToolUse](https://cursor.com/en-US/docs/agent/hooks#pretooluse)
+* [postToolUse](https://cursor.com/en-US/docs/agent/hooks#posttooluse)
+* [postToolUseFailure](https://cursor.com/en-US/docs/agent/hooks#posttoolusefailure)
+* [subagentStart](https://cursor.com/en-US/docs/agent/hooks#subagentstart)
+* [subagentStop](https://cursor.com/en-US/docs/agent/hooks#subagentstop)
+* [beforeShellExecution / beforeMCPExecution](https://cursor.com/en-US/docs/agent/hooks#beforeshellexecution-beforemcpexecution)
+* [afterShellExecution](https://cursor.com/en-US/docs/agent/hooks#aftershellexecution)
+* [afterMCPExecution](https://cursor.com/en-US/docs/agent/hooks#aftermcpexecution)
+* [afterFileEdit](https://cursor.com/en-US/docs/agent/hooks#afterfileedit)
+* [beforeReadFile](https://cursor.com/en-US/docs/agent/hooks#beforereadfile)
+* [beforeTabFileRead](https://cursor.com/en-US/docs/agent/hooks#beforetabfileread)
+* [afterTabFileEdit](https://cursor.com/en-US/docs/agent/hooks#aftertabfileedit)
+* [beforeSubmitPrompt](https://cursor.com/en-US/docs/agent/hooks#beforesubmitprompt)
+* [afterAgentResponse](https://cursor.com/en-US/docs/agent/hooks#afteragentresponse)
+* [afterAgentThought](https://cursor.com/en-US/docs/agent/hooks#afteragentthought)
+* [stop](https://cursor.com/en-US/docs/agent/hooks#stop)
+* [sessionStart](https://cursor.com/en-US/docs/agent/hooks#sessionstart)
+* [sessionEnd](https://cursor.com/en-US/docs/agent/hooks#sessionend)
+* [preCompact](https://cursor.com/en-US/docs/agent/hooks#precompact)
+* [Environment Variables](https://cursor.com/en-US/docs/agent/hooks#environment-variables)
+* [Troubleshooting](https://cursor.com/en-US/docs/agent/hooks#troubleshooting)
+
+Copy page
+
+Share feedback
+
+Explain more

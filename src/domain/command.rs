@@ -54,6 +54,7 @@ pub fn run_with_timeout(
                     let _ = child.kill();
                     // Reap the zombie process
                     let _ = child.wait();
+                    warn!("💀 Process killed (SIGKILL): {}", command_desc);
                     break Err(format!(
                         "Command timed out after {}s: {}",
                         timeout_secs, command_desc

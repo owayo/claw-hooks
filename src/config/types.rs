@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 use super::validation;
 
+/// Default hook command timeout in seconds.
+fn default_hook_timeout() -> u64 {
+    60
+}
+
 /// Main configuration structure.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -50,6 +55,10 @@ pub struct Config {
     /// NanoBuddy連携を有効化 (隠しオプション)
     #[serde(default)]
     pub nano_buddy: bool,
+
+    /// Timeout in seconds for hook command execution (default: 60)
+    #[serde(default = "default_hook_timeout")]
+    pub hook_timeout: u64,
 }
 
 impl Default for Config {
@@ -67,6 +76,7 @@ impl Default for Config {
             extension_hooks: BTreeMap::new(),
             stop_hooks: Vec::new(),
             nano_buddy: false,
+            hook_timeout: default_hook_timeout(),
         }
     }
 }
@@ -463,5 +473,26 @@ mod tests {
         // Third: tsconfig.json condition
         let cond2 = wrapper.stop_hooks[2].condition.as_ref().unwrap();
         assert_eq!(cond2.file_exists, Some("tsconfig.json".to_string()));
+    }
+
+    // === hook_timeout tests ===
+
+    #[test]
+    fn test_hook_timeout_default_value() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.hook_timeout, 60);
+    }
+
+    #[test]
+    fn test_hook_timeout_custom_value() {
+        let config: Config = toml::from_str("hook_timeout = 120").unwrap();
+        assert_eq!(config.hook_timeout, 120);
+    }
+
+    #[test]
+    fn test_hook_timeout_zero() {
+        // hook_timeout = 0 is technically valid (immediate timeout)
+        let config: Config = toml::from_str("hook_timeout = 0").unwrap();
+        assert_eq!(config.hook_timeout, 0);
     }
 }

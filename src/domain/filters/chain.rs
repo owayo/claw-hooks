@@ -63,6 +63,7 @@ impl FilterChain {
             filters.push(Box::new(ExtensionHookFilter::new(
                 config.extension_hooks.clone(),
                 nano_buddy,
+                config.hook_timeout,
             )));
         }
 
@@ -72,6 +73,7 @@ impl FilterChain {
             filters.push(Box::new(StopHookFilter::new(
                 config.stop_hooks.clone(),
                 nano_buddy,
+                config.hook_timeout,
             )));
         }
 

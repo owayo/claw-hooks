@@ -123,6 +123,10 @@ debug = false
 # args = ["install", "uninstall"]
 # message = "Use `uv pip` instead"
 
+# Timeout in seconds for hook command execution (default: 60)
+# Commands exceeding this timeout will be killed (SIGKILL)
+# hook_timeout = 60
+
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified
 # [extension_hooks]

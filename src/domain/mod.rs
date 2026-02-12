@@ -6,6 +6,7 @@
 //! - Shell command parser
 //! - Logger with rotation
 
+pub mod command;
 mod error;
 pub mod filters;
 pub mod logger;

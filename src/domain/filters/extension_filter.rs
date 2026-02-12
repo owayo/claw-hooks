@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tracing::{debug, warn};
 
 use super::Filter;
+use crate::domain::command::run_with_timeout;
 use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
@@ -36,12 +37,17 @@ pub struct ExtensionHookFilter {
     /// Map of extension -> commands (e.g., ".go" -> ["gofmt -w {file}", "golangci-lint run {file}"])
     hooks: BTreeMap<String, Vec<String>>,
     nano_buddy: bool,
+    timeout_secs: u64,
 }
 
 impl ExtensionHookFilter {
     /// Create a new ExtensionHookFilter.
-    pub fn new(hooks: BTreeMap<String, Vec<String>>, nano_buddy: bool) -> Self {
-        Self { hooks, nano_buddy }
+    pub fn new(hooks: BTreeMap<String, Vec<String>>, nano_buddy: bool, timeout_secs: u64) -> Self {
+        Self {
+            hooks,
+            nano_buddy,
+            timeout_secs,
+        }
     }
 
     /// Extract extension from file path (without the leading dot).
@@ -173,10 +179,12 @@ impl ExtensionHookFilter {
         }
 
         cmd.args(&parsed.args_after);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = cmd
-            .output()
+        let child = cmd
+            .spawn()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
+        let output = run_with_timeout(child, self.timeout_secs, command_template)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -268,16 +276,16 @@ impl Filter for ExtensionHookFilter {
         // Extract file path and execute commands
         if let ToolInput::File(file_input) = &input.tool_input {
             if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
-                // Execute commands and collect output
-                let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
-
-                // NanoBuddy notification (after hook commands complete)
+                // NanoBuddy notification (before hook commands so it arrives first)
                 if self.nano_buddy {
                     if let Some(ext) = Self::extract_ext(&file_input.file_path) {
                         debug!("🐱 NanoBuddy ext notification: .{}", ext);
                         crate::notify::nano_buddy::notify_extension_hook(&ext);
                     }
                 }
+
+                // Execute commands and collect output
+                let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
 
                 // Return Allow with additional context if there's any output
                 // This passes lint warnings/errors to the agent (Claude Code only)
@@ -305,11 +313,11 @@ mod tests {
     fn create_filter_with_go_hooks() -> ExtensionHookFilter {
         let mut hooks = BTreeMap::new();
         hooks.insert(".go".to_string(), vec!["gofmt -w {file}".to_string()]);
-        ExtensionHookFilter::new(hooks, false)
+        ExtensionHookFilter::new(hooks, false, 60)
     }
 
     fn create_empty_filter() -> ExtensionHookFilter {
-        ExtensionHookFilter::new(BTreeMap::new(), false)
+        ExtensionHookFilter::new(BTreeMap::new(), false, 60)
     }
 
     // applies_to tests
@@ -581,7 +589,7 @@ mod tests {
                     .to_string(),
             ],
         );
-        let filter = ExtensionHookFilter::new(hooks, false);
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
 
         let input = HookInput {
             event: HookEvent::AfterFileEdit,

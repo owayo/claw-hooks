@@ -1,27 +1,33 @@
 //! Stop event hook filter implementation.
 
-use std::process::{Command, Output};
+use std::process::Output;
 use tracing::{debug, warn};
 
 use super::Filter;
 use crate::config::StopHook;
+use crate::domain::command::{run_with_timeout, spawn_piped};
 use crate::domain::{Decision, HookEvent, HookInput};
 
 /// Filter for Stop event hooks.
 pub struct StopHookFilter {
     hooks: Vec<StopHook>,
     nano_buddy: bool,
+    timeout_secs: u64,
 }
 
 impl StopHookFilter {
     /// Create a new StopHookFilter.
-    pub fn new(hooks: Vec<StopHook>, nano_buddy: bool) -> Self {
-        Self { hooks, nano_buddy }
+    pub fn new(hooks: Vec<StopHook>, nano_buddy: bool, timeout_secs: u64) -> Self {
+        Self {
+            hooks,
+            nano_buddy,
+            timeout_secs,
+        }
     }
 
-    /// Execute a single command string safely.
+    /// Execute a single command string safely with timeout.
     /// Uses shell-aware tokenizer to properly handle quoted arguments.
-    fn execute_command(command: &str) -> Result<Output, String> {
+    fn execute_command(command: &str, timeout_secs: u64) -> Result<Output, String> {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             return Err("Empty command".to_string());
@@ -32,10 +38,9 @@ impl StopHookFilter {
 
         debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
-        Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))
+        let child = spawn_piped(program, args)
+            .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
+        run_with_timeout(child, timeout_secs, command)
     }
 
     /// Build a block reason from command output (stdout + stderr).
@@ -72,6 +77,12 @@ impl Filter for StopHookFilter {
             }
         }
 
+        // NanoBuddy notification (before all stop hooks so it arrives first)
+        if self.nano_buddy {
+            debug!("🐱 NanoBuddy stop notification");
+            crate::notify::nano_buddy::notify_stop_hook();
+        }
+
         let cwd = std::env::current_dir().unwrap_or_default();
 
         // Phase 1: Evaluate conditions and collect commands to execute
@@ -97,20 +108,23 @@ impl Filter for StopHookFilter {
         // Phase 2: Run unconditional commands in parallel.
         // Unconditional hooks never block the decision, but we still wait for completion
         // so they are not dropped by process::exit in HookService::run().
+        let timeout_secs = self.timeout_secs;
         let unconditional_handles: Vec<_> = unconditional_commands
             .into_iter()
             .map(|command| {
-                std::thread::spawn(move || match Self::execute_command(&command) {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            warn!("🛑 Stop hook command failed: {}", stderr);
+                std::thread::spawn(
+                    move || match Self::execute_command(&command, timeout_secs) {
+                        Ok(output) => {
+                            if !output.status.success() {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                warn!("🛑 Stop hook command failed: {}", stderr);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        warn!("🛑 Stop hook failed: {}", e);
-                    }
-                })
+                        Err(e) => {
+                            warn!("🛑 Stop hook failed: {}", e);
+                        }
+                    },
+                )
             })
             .collect();
 
@@ -120,7 +134,7 @@ impl Filter for StopHookFilter {
             .into_iter()
             .map(|command| {
                 std::thread::spawn(move || -> Option<String> {
-                    match Self::execute_command(&command) {
+                    match Self::execute_command(&command, timeout_secs) {
                         Ok(output) => {
                             if output.status.success() {
                                 None
@@ -149,12 +163,6 @@ impl Filter for StopHookFilter {
             }
         }
 
-        // NanoBuddy notification (after all stop hooks complete)
-        if self.nano_buddy {
-            debug!("🐱 NanoBuddy stop notification");
-            crate::notify::nano_buddy::notify_stop_hook();
-        }
-
         if failures.is_empty() {
             Decision::allow()
         } else {
@@ -180,7 +188,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -198,7 +206,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let bash_input = HookInput {
             event: HookEvent::BeforeCommand,
@@ -219,7 +227,7 @@ mod tests {
             commands: vec!["echo done".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -236,12 +244,12 @@ mod tests {
 
     #[test]
     fn test_execute_command_empty_is_error() {
-        assert!(StopHookFilter::execute_command("   ").is_err());
+        assert!(StopHookFilter::execute_command("   ", 60).is_err());
     }
 
     #[test]
     fn test_execute_command_with_quoted_args() {
-        assert!(StopHookFilter::execute_command("echo 'hello world'").is_ok());
+        assert!(StopHookFilter::execute_command("echo 'hello world'", 60).is_ok());
     }
 
     #[test]
@@ -251,7 +259,7 @@ mod tests {
             commands: vec!["nonexistent-command-xyz-abc-123".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -266,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_priority() {
-        let filter = StopHookFilter::new(vec![], false);
+        let filter = StopHookFilter::new(vec![], false, 60);
         assert_eq!(filter.priority(), 100);
     }
 
@@ -278,7 +286,7 @@ mod tests {
             commands: vec!["echo should-not-run".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -302,7 +310,7 @@ mod tests {
             commands: vec!["echo running".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -326,7 +334,7 @@ mod tests {
             commands: vec!["nonexistent-command-xyz".to_string()],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let stop_input = HookInput {
             event: HookEvent::Stop,
@@ -370,7 +378,7 @@ mod tests {
                 file_exists: Some("nonexistent-file-xyz-abc.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -385,7 +393,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -400,7 +408,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -424,7 +432,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Block { .. }));
     }
@@ -449,7 +457,7 @@ mod tests {
                 }),
             },
         ];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -484,7 +492,7 @@ mod tests {
                 }),
             },
         ];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -501,7 +509,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -525,7 +533,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -543,7 +551,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -571,7 +579,7 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
             }),
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         match decision {
             Decision::Block { message } => {
@@ -600,7 +608,7 @@ mod tests {
             ],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
     }
@@ -617,7 +625,7 @@ mod tests {
             commands: vec![format!("sh -c 'sleep 0.1; echo done > {}'", marker_path)],
             condition: None,
         }];
-        let filter = StopHookFilter::new(hooks, false);
+        let filter = StopHookFilter::new(hooks, false, 60);
 
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
@@ -627,5 +635,87 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(marker);
+    }
+
+    // === Timeout tests ===
+
+    #[test]
+    fn test_execute_command_timeout_kills_process() {
+        // sleep 10 should be killed after 2 second timeout
+        let start = std::time::Instant::now();
+        let result = StopHookFilter::execute_command("sleep 10", 2);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "Should have timed out");
+        assert!(
+            result.unwrap_err().contains("timed out"),
+            "Error should mention timeout"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "Should have timed out in ~2s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_execute_command_completes_before_timeout() {
+        let result = StopHookFilter::execute_command("echo hello", 60);
+        assert!(result.is_ok(), "Should complete before timeout");
+    }
+
+    #[test]
+    fn test_stop_hook_timeout_unconditional() {
+        // Unconditional hook with timeout should allow (fire-and-forget, timeout just warns)
+        let hooks = vec![StopHook {
+            commands: vec!["sleep 10".to_string()],
+            condition: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
+        assert!(matches!(decision, Decision::Allow { .. }));
+        assert!(
+            elapsed.as_secs() < 5,
+            "Unconditional hook should timeout in ~2s, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_timeout_conditional_blocks() {
+        use crate::config::HookCondition;
+        // Conditional hook with timeout should block with timeout error
+        let hooks = vec![StopHook {
+            commands: vec!["sleep 10".to_string()],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
+
+        let start = std::time::Instant::now();
+        let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("timed out"),
+                    "Expected timeout message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision for timed out conditional hook"),
+        }
+        assert!(
+            elapsed.as_secs() < 5,
+            "Conditional hook should timeout in ~2s, took {:?}",
+            elapsed
+        );
     }
 }

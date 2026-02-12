@@ -38,6 +38,7 @@
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
+- ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
 ## Why claw-hooks?
@@ -410,6 +411,10 @@ dd_block_message = "🚫 dd command blocked for safety."
 # Debug logging
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
+
+# Hook command timeout in seconds (default: 60)
+# Commands exceeding this timeout will be killed (SIGKILL)
+# hook_timeout = 60
 
 # Custom command filters (regex supported)
 [[custom_filters]]

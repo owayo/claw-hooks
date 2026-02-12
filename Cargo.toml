@@ -11,10 +11,10 @@ keywords = ["cli", "hooks", "ai", "claude-code", "cursor"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-clap = { version = "4.5.57", features = ["derive"] }
+clap = { version = "4.5.58", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-toml = "0.9.8"
+toml = "1.0.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "local-time"] }
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
@@ -36,6 +36,10 @@ optional = true
 [features]
 default = ["ast-parser"]
 ast-parser = ["tree-sitter", "tree-sitter-bash"]
+
+[dev-dependencies]
+tempfile = "3.25.0"
+libc = "0.2.181"
 
 [profile.release]
 lto = true

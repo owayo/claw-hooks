@@ -22,7 +22,7 @@ pub use types::{Decision, HookEvent, HookInput, ToolInput};
 pub use error::ClawError;
 
 #[allow(unused)]
-pub use types::{BashInput, FileOperationInput, HookOutput, StopInput};
+pub use types::{BashInput, FileOperationInput, HookOutput, StopInput, SubagentInput};
 
 pub use normalize::normalize_lint_output;
 pub use parser::parse_shell_tokens;

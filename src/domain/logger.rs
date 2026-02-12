@@ -105,3 +105,95 @@ pub fn cleanup_old_logs(log_path: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    fn set_file_modified_time(path: &Path, time: SystemTime) -> std::io::Result<()> {
+        let since_epoch = time.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let secs = since_epoch.as_secs();
+        let atime = libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: 0,
+        };
+        let mtime = libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: 0,
+        };
+        let times = [atime, mtime];
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_removes_old_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path();
+
+        // Create an old log file (3 days ago)
+        let old_file = log_path.join("claw-hooks.2020-01-01");
+        fs::write(&old_file, "old log").unwrap();
+        let three_days_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+        set_file_modified_time(&old_file, three_days_ago).unwrap();
+
+        // Create a recent log file
+        let recent_file = log_path.join("claw-hooks.2026-02-12");
+        fs::write(&recent_file, "recent log").unwrap();
+
+        cleanup_old_logs(log_path).unwrap();
+
+        assert!(!old_file.exists(), "Old log file should be deleted");
+        assert!(recent_file.exists(), "Recent log file should be kept");
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_ignores_non_claw_hooks_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path();
+
+        // Create an old file that is NOT a claw-hooks log
+        let other_file = log_path.join("other-app.log");
+        fs::write(&other_file, "other log").unwrap();
+        let three_days_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+        set_file_modified_time(&other_file, three_days_ago).unwrap();
+
+        cleanup_old_logs(log_path).unwrap();
+
+        assert!(other_file.exists(), "Non-claw-hooks file should be kept");
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_nonexistent_dir() {
+        let result = cleanup_old_logs(Path::new("/tmp/nonexistent_claw_hooks_test_dir"));
+        assert!(result.is_ok(), "Should return Ok for nonexistent directory");
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_empty_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = cleanup_old_logs(dir.path());
+        assert!(result.is_ok(), "Should return Ok for empty directory");
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_ignores_subdirectories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path();
+
+        // Create a subdirectory named like a log file
+        let subdir = log_path.join("claw-hooks.subdir");
+        fs::create_dir(&subdir).unwrap();
+
+        cleanup_old_logs(log_path).unwrap();
+
+        assert!(subdir.exists(), "Subdirectory should not be deleted");
+    }
+}

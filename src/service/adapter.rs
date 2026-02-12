@@ -131,6 +131,8 @@ impl FormatAdapter {
             "PreToolUse" => HookEvent::BeforeCommand,
             "PostToolUse" => HookEvent::AfterFileEdit,
             "Stop" => HookEvent::Stop,
+            "SubagentStart" => HookEvent::SubagentStart,
+            "SubagentStop" => HookEvent::SubagentStop,
             other => return Err(anyhow!("Unknown Claude event: {}", other)),
         };
 
@@ -144,6 +146,46 @@ impl FormatAdapter {
                     response: None,
                     stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
                 }),
+            )
+        } else if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
+            // SubagentStart/SubagentStop: extract subagent info from raw JSON
+            // NOTE: We re-parse from raw input because serde(untagged) ToolInput
+            // may deserialize the tool_input object as Stop(StopInput) instead of
+            // Other(Value), since StopInput has all-optional fields.
+            let raw: serde_json::Value = serde_json::from_str(input)
+                .map_err(|e| anyhow!("Failed to re-parse raw input: {}", e))?;
+            // agent_type はルートレベルまたは tool_input 内にある場合がある
+            let root_agent_type = raw
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let subagent_input = if let Some(val) = raw.get("tool_input") {
+                let tool_input_type = val
+                    .get("subagent_type")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                crate::domain::SubagentInput {
+                    subagent_type: tool_input_type.or(root_agent_type),
+                    prompt: val.get("prompt").and_then(|v| v.as_str()).map(String::from),
+                    status: val.get("status").and_then(|v| v.as_str()).map(String::from),
+                    duration: val.get("duration").and_then(|v| v.as_u64()),
+                }
+            } else {
+                crate::domain::SubagentInput {
+                    subagent_type: root_agent_type,
+                    ..Default::default()
+                }
+            };
+            let tool_name = if event == HookEvent::SubagentStart {
+                "SubagentStart"
+            } else {
+                "SubagentStop"
+            };
+            (
+                tool_name.to_string(),
+                crate::domain::ToolInput::Subagent(subagent_input),
             )
         } else {
             let tool_name = claude_input
@@ -201,6 +243,58 @@ impl FormatAdapter {
 
         // Convert Cursor format to internal HookInput based on hook type
         match cursor_input {
+            CursorInput::SubagentStart {
+                subagent_type,
+                prompt,
+                ..
+            } => {
+                debug!(
+                    format = "cursor",
+                    hook_type = "subagentStart",
+                    subagent_type = %subagent_type,
+                    mapped_event = ?HookEvent::SubagentStart,
+                    "🖱️ Cursor parsed input"
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::SubagentStart,
+                    tool_name: "SubagentStart".to_string(),
+                    tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                        subagent_type: Some(subagent_type),
+                        prompt,
+                        status: None,
+                        duration: None,
+                    }),
+                    session_id: None,
+                })
+            }
+            CursorInput::SubagentStop {
+                subagent_type,
+                subagent_status,
+                duration,
+                ..
+            } => {
+                debug!(
+                    format = "cursor",
+                    hook_type = "subagentStop",
+                    subagent_type = %subagent_type,
+                    status = %subagent_status,
+                    mapped_event = ?HookEvent::SubagentStop,
+                    "🖱️ Cursor parsed input"
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::SubagentStop,
+                    tool_name: "SubagentStop".to_string(),
+                    tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                        subagent_type: Some(subagent_type),
+                        prompt: None,
+                        status: Some(subagent_status),
+                        duration,
+                    }),
+                    session_id: None,
+                })
+            }
             CursorInput::Stop { status, loop_count } => {
                 debug!(
                     format = "cursor",
@@ -443,10 +537,40 @@ struct ClaudeStopOutput {
 
 // === Cursor Format Types ===
 
-/// Cursor input format - supports beforeShellExecution, afterFileEdit, and stop hooks.
+/// Cursor input format - supports beforeShellExecution, afterFileEdit, stop, and subagent hooks.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum CursorInput {
+    // NOTE: SubagentStop MUST come before SubagentStart because serde(untagged)
+    // tries variants in order. SubagentStop requires "status" (stricter),
+    // while SubagentStart would match any payload with just "subagent_type".
+    /// subagentStop hook - subagent has finished
+    SubagentStop {
+        /// Subagent type
+        subagent_type: String,
+        /// Subagent completion status: "completed" or "error"
+        #[serde(rename = "status")]
+        subagent_status: String,
+        /// Subagent output/result
+        #[serde(default)]
+        #[allow(dead_code)]
+        result: Option<String>,
+        /// Duration in milliseconds
+        #[serde(default)]
+        duration: Option<u64>,
+    },
+    /// subagentStart hook - subagent is being spawned
+    SubagentStart {
+        /// Subagent type: "generalPurpose", "explore", "shell", etc.
+        subagent_type: String,
+        /// Prompt given to the subagent
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Model used by the subagent
+        #[serde(default)]
+        #[allow(dead_code)]
+        model: Option<String>,
+    },
     /// stop hook - agent loop has ended
     Stop {
         /// Stop status: "completed", "aborted", or "error"
@@ -1225,6 +1349,142 @@ mod tests {
             message: "error".to_string(),
         };
         assert!(!adapter.use_stderr(&block, HookEvent::Stop));
+    }
+
+    // === SubagentStart/SubagentStop Tests ===
+
+    #[test]
+    fn test_claude_input_parsing_subagent_start() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"SubagentStart","tool_input":{"subagent_type":"explore","prompt":"Search the codebase"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        assert_eq!(result.tool_name, "SubagentStart");
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("explore".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_subagent_stop() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"SubagentStop","tool_input":{"subagent_type":"generalPurpose","status":"completed","duration":5000}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStop);
+        assert_eq!(result.tool_name, "SubagentStop");
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("generalPurpose".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_subagent_start_no_tool_input() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"SubagentStart"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, None);
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_subagent_start_root_agent_type() {
+        // Claude Code sends agent_type at root level (not inside tool_input)
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input =
+            r#"{"hook_event_name":"SubagentStart","agent_id":"aa1c090","agent_type":"readme-en"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("readme-en".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_subagent_stop_root_agent_type() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"SubagentStop","agent_id":"aa1c090","agent_type":"readme-en","permission_mode":"bypassPermissions"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStop);
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("readme-en".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_subagent_start_no_agent_type() {
+        // agent_type が無い場合は subagent_type = None
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"SubagentStart","agent_id":"aa1c090"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, None);
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_cursor_input_parsing_subagent_start() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let input = r#"{"subagent_type":"explore","prompt":"Explore the authentication flow","model":"claude-sonnet-4-20250514"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        assert_eq!(result.tool_name, "SubagentStart");
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("explore".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_cursor_input_parsing_subagent_stop() {
+        let adapter = FormatAdapter::new(Format::Cursor);
+        let input = r#"{"subagent_type":"generalPurpose","status":"completed","result":"Task done","duration":45000}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(
+            result.event,
+            HookEvent::SubagentStop,
+            "Should parse as SubagentStop, not SubagentStart"
+        );
+        assert_eq!(result.tool_name, "SubagentStop");
+        if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
+            assert_eq!(sub.subagent_type, Some("generalPurpose".to_string()));
+            assert_eq!(sub.status, Some("completed".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_output_subagent_start_allow() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::SubagentStart)
+            .unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
+    }
+
+    #[test]
+    fn test_claude_output_subagent_stop_allow() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::SubagentStop)
+            .unwrap();
+        assert!(output.contains(r#""decision":"approve""#));
     }
 
     // === Error Handling Tests ===

@@ -41,6 +41,20 @@ pub enum HookEvent {
     /// External event names:
     /// - Gemini CLI: `BeforeAgent`
     BeforePrompt,
+
+    /// Before spawning a subagent.
+    ///
+    /// External event names:
+    /// - Claude Code: `SubagentStart`
+    /// - Cursor: `subagentStart`
+    SubagentStart,
+
+    /// After a subagent finishes.
+    ///
+    /// External event names:
+    /// - Claude Code: `SubagentStop`
+    /// - Cursor: `subagentStop`
+    SubagentStop,
 }
 
 /// Hook input received from AI agent.
@@ -74,6 +88,8 @@ pub enum ToolInput {
     /// Stop event input (agent loop ended)
     #[allow(dead_code)]
     Stop(StopInput),
+    /// Subagent event input (SubagentStart/SubagentStop)
+    Subagent(SubagentInput),
     /// Other/unknown tool input
     #[allow(dead_code)]
     Other(serde_json::Value),
@@ -101,6 +117,27 @@ pub struct FileOperationInput {
     #[serde(default)]
     #[allow(dead_code)]
     pub content: Option<String>,
+}
+
+/// Subagent event input (SubagentStart/SubagentStop).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
+pub struct SubagentInput {
+    /// Subagent type (e.g., "generalPurpose", "explore", "shell")
+    #[serde(default)]
+    pub subagent_type: Option<String>,
+
+    /// Prompt given to the subagent (SubagentStart only)
+    #[serde(default)]
+    pub prompt: Option<String>,
+
+    /// Status of the subagent (SubagentStop only: "completed", "error")
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Duration in milliseconds (SubagentStop only)
+    #[serde(default)]
+    pub duration: Option<u64>,
 }
 
 /// Stop event input.
@@ -257,10 +294,13 @@ mod tests {
         assert_eq!(HookEvent::AfterFileEdit, HookEvent::AfterFileEdit);
         assert_eq!(HookEvent::Stop, HookEvent::Stop);
         assert_eq!(HookEvent::BeforePrompt, HookEvent::BeforePrompt);
+        assert_eq!(HookEvent::SubagentStart, HookEvent::SubagentStart);
+        assert_eq!(HookEvent::SubagentStop, HookEvent::SubagentStop);
 
         assert_ne!(HookEvent::BeforeCommand, HookEvent::AfterFileEdit);
         assert_ne!(HookEvent::BeforeCommand, HookEvent::Stop);
         assert_ne!(HookEvent::BeforeCommand, HookEvent::BeforePrompt);
+        assert_ne!(HookEvent::SubagentStart, HookEvent::SubagentStop);
     }
 
     #[test]
@@ -287,6 +327,8 @@ mod tests {
         assert_eq!(format!("{:?}", HookEvent::AfterFileEdit), "AfterFileEdit");
         assert_eq!(format!("{:?}", HookEvent::Stop), "Stop");
         assert_eq!(format!("{:?}", HookEvent::BeforePrompt), "BeforePrompt");
+        assert_eq!(format!("{:?}", HookEvent::SubagentStart), "SubagentStart");
+        assert_eq!(format!("{:?}", HookEvent::SubagentStop), "SubagentStop");
     }
 
     // Decision::into_output() tests
@@ -386,5 +428,89 @@ mod tests {
             message: "blocked".to_string(),
         };
         assert_eq!(block.exit_code(), 2);
+    }
+
+    #[test]
+    fn test_decision_default_is_allow() {
+        let decision: Decision = Decision::default();
+        assert!(matches!(
+            decision,
+            Decision::Allow {
+                additional_context: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_decision_merge_context_both_some() {
+        let decision = Decision::allow_with_context("first".to_string());
+        let merged = decision.merge_context(Some("second".to_string()));
+        if let Decision::Allow { additional_context } = merged {
+            assert_eq!(additional_context, Some("first\nsecond".to_string()));
+        } else {
+            panic!("Expected Allow");
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_context_first_some() {
+        let decision = Decision::allow_with_context("only".to_string());
+        let merged = decision.merge_context(None);
+        if let Decision::Allow { additional_context } = merged {
+            assert_eq!(additional_context, Some("only".to_string()));
+        } else {
+            panic!("Expected Allow");
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_context_second_some() {
+        let decision = Decision::allow();
+        let merged = decision.merge_context(Some("new".to_string()));
+        if let Decision::Allow { additional_context } = merged {
+            assert_eq!(additional_context, Some("new".to_string()));
+        } else {
+            panic!("Expected Allow");
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_context_both_none() {
+        let decision = Decision::allow();
+        let merged = decision.merge_context(None);
+        if let Decision::Allow { additional_context } = merged {
+            assert!(additional_context.is_none());
+        } else {
+            panic!("Expected Allow");
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_context_block_ignores() {
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        let merged = decision.merge_context(Some("context".to_string()));
+        if let Decision::Block { message } = merged {
+            assert_eq!(message, "blocked");
+        } else {
+            panic!("Expected Block");
+        }
+    }
+
+    #[test]
+    fn test_decision_into_output_subagent_start() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::SubagentStart);
+        assert_eq!(output.decision, "approve");
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_subagent_stop() {
+        let decision = Decision::allow();
+        let output = decision.into_output(HookEvent::SubagentStop);
+        assert_eq!(output.decision, "approve");
+        assert!(output.hook_specific_output.is_none());
     }
 }

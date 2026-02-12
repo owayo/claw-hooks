@@ -8,6 +8,7 @@ mod filter_trait;
 mod kill_filter;
 mod rm_filter;
 mod stop_filter;
+mod subagent_filter;
 
 pub use chain::FilterChain;
 pub use custom_filter::CustomCommandFilter;
@@ -17,3 +18,4 @@ pub use filter_trait::Filter;
 pub use kill_filter::KillFilter;
 pub use rm_filter::RmFilter;
 pub use stop_filter::StopHookFilter;
+pub use subagent_filter::SubagentFilter;

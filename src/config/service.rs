@@ -169,3 +169,106 @@ debug = false
         .to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_path_ends_with_config_toml() {
+        let path = ConfigService::default_path();
+        assert!(path.ends_with("claw-hooks/config.toml"));
+    }
+
+    #[test]
+    fn test_default_path_contains_dot_config() {
+        let path = ConfigService::default_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains(".config"),
+            "Path should contain .config: {}",
+            path_str
+        );
+    }
+
+    #[test]
+    fn test_generate_at_creates_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+
+        ConfigService::generate_at(&config_path).unwrap();
+
+        assert!(config_path.exists());
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("rm_block = true"));
+        assert!(content.contains("kill_block = true"));
+        assert!(content.contains("dd_block = true"));
+    }
+
+    #[test]
+    fn test_generate_at_creates_parent_dirs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("nested").join("dir").join("config.toml");
+
+        ConfigService::generate_at(&config_path).unwrap();
+
+        assert!(config_path.exists());
+    }
+
+    #[test]
+    fn test_load_creates_default_when_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("new_config.toml");
+
+        let config = ConfigService::load(Some(&config_path)).unwrap();
+
+        // Should have created the file and loaded defaults
+        assert!(config_path.exists());
+        assert!(config.rm_block);
+        assert!(config.kill_block);
+        assert!(config.dd_block);
+    }
+
+    #[test]
+    fn test_load_parses_existing_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        fs::write(
+            &config_path,
+            "rm_block = false\nkill_block = true\ndd_block = false\n",
+        )
+        .unwrap();
+
+        let config = ConfigService::load(Some(&config_path)).unwrap();
+
+        assert!(!config.rm_block);
+        assert!(config.kill_block);
+        assert!(!config.dd_block);
+    }
+
+    #[test]
+    fn test_load_invalid_toml_returns_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("bad_config.toml");
+
+        fs::write(&config_path, "this is not valid toml [[[").unwrap();
+
+        let result = ConfigService::load(Some(&config_path));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_config_content_has_all_sections() {
+        let content = ConfigService::default_config_content();
+
+        assert!(content.contains("rm_block"));
+        assert!(content.contains("kill_block"));
+        assert!(content.contains("dd_block"));
+        assert!(content.contains("debug = false"));
+        assert!(content.contains("custom_filters"));
+        assert!(content.contains("extension_hooks"));
+        assert!(content.contains("stop_hooks"));
+        assert!(content.contains("hook_timeout"));
+    }
+}

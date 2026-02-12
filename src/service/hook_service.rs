@@ -146,6 +146,7 @@ impl HookService {
             HookEvent::AfterFileEdit => self.handle_after_file_edit(input),
             HookEvent::Stop => self.handle_stop(input),
             HookEvent::BeforePrompt => self.handle_before_prompt(input),
+            HookEvent::SubagentStart | HookEvent::SubagentStop => self.handle_subagent(input),
         }
     }
 
@@ -193,5 +194,181 @@ impl HookService {
 
         // BeforePrompt is currently a pass-through event
         Decision::allow()
+    }
+
+    /// Handle SubagentStart/SubagentStop events.
+    fn handle_subagent(&self, input: &HookInput) -> Decision {
+        info!(
+            "Subagent event received: {:?}, session_id={:?}",
+            input.event, input.session_id
+        );
+
+        // Execute through filter chain (SubagentFilter handles NanoBuddy notifications)
+        self.filter_chain.execute(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{BashInput, FileOperationInput, StopInput, SubagentInput, ToolInput};
+
+    fn make_service() -> HookService {
+        let config = Config::default();
+        HookService::new(config, Format::Claude, false)
+    }
+
+    fn make_bash_input(command: &str) -> HookInput {
+        HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(BashInput {
+                command: command.to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn test_process_allows_safe_command() {
+        let service = make_service();
+        let input = make_bash_input("ls -la");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_rm() {
+        let service = make_service();
+        let input = make_bash_input("rm -rf /tmp/foo");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_kill() {
+        let service = make_service();
+        let input = make_bash_input("kill -9 1234");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_dd() {
+        let service = make_service();
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_after_file_edit_write_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: Some("content".to_string()),
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_after_file_edit_read_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Read".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_stop_event_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(StopInput::default()),
+            session_id: Some("session-123".to_string()),
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_before_prompt_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::BeforePrompt,
+            tool_name: "BeforePrompt".to_string(),
+            tool_input: ToolInput::Other(serde_json::json!({})),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_subagent_start_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::SubagentStart,
+            tool_name: "SubagentStart".to_string(),
+            tool_input: ToolInput::Subagent(SubagentInput {
+                subagent_type: Some("explore".to_string()),
+                prompt: Some("Search the codebase".to_string()),
+                status: None,
+                duration: None,
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_subagent_stop_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::SubagentStop,
+            tool_name: "SubagentStop".to_string(),
+            tool_input: ToolInput::Subagent(SubagentInput {
+                subagent_type: Some("explore".to_string()),
+                prompt: None,
+                status: Some("completed".to_string()),
+                duration: Some(5000),
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_sudo_rm() {
+        let service = make_service();
+        let input = make_bash_input("sudo rm -rf /");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_piped_kill() {
+        let service = make_service();
+        let input = make_bash_input("ps aux | grep node | xargs kill");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
     }
 }

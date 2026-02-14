@@ -1,7 +1,7 @@
 //! Stop event hook filter implementation.
 
 use std::process::Output;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
@@ -41,6 +41,18 @@ impl StopHookFilter {
         let child = spawn_piped(program, args)
             .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
         run_with_timeout(child, timeout_secs, command)
+    }
+
+    /// Log stdout/stderr output from a stop hook command.
+    fn log_output(command: &str, output: &Output) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            info!("🛑 Stop hook [{}] stdout:\n{}", command, stdout.trim());
+        }
+        if !stderr.trim().is_empty() {
+            info!("🛑 Stop hook [{}] stderr:\n{}", command, stderr.trim());
+        }
     }
 
     /// Build a block reason from command output (stdout + stderr).
@@ -115,9 +127,12 @@ impl Filter for StopHookFilter {
                 std::thread::spawn(
                     move || match Self::execute_command(&command, timeout_secs) {
                         Ok(output) => {
+                            Self::log_output(&command, &output);
                             if !output.status.success() {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                warn!("🛑 Stop hook command failed: {}", stderr);
+                                warn!(
+                                    "🛑 Stop hook command failed (exit {}): {}",
+                                    output.status, command
+                                );
                             }
                         }
                         Err(e) => {
@@ -136,6 +151,7 @@ impl Filter for StopHookFilter {
                 std::thread::spawn(move || -> Option<String> {
                     match Self::execute_command(&command, timeout_secs) {
                         Ok(output) => {
+                            Self::log_output(&command, &output);
                             if output.status.success() {
                                 None
                             } else {

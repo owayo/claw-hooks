@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::domain::command::run_with_timeout;
@@ -181,10 +181,18 @@ impl ExtensionHookFilter {
         cmd.args(&parsed.args_after);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        let start = std::time::Instant::now();
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
-        let output = run_with_timeout(child, self.timeout_secs, command_template)?;
+        let result = run_with_timeout(child, self.timeout_secs, command_template);
+        let elapsed = start.elapsed();
+        info!(
+            "⏰️ Extension hook [{}] completed in {:.2}s",
+            command_template,
+            elapsed.as_secs_f64()
+        );
+        let output = result?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

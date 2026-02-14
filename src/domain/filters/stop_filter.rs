@@ -38,9 +38,17 @@ impl StopHookFilter {
 
         debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
+        let start = std::time::Instant::now();
         let child = spawn_piped(program, args)
             .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
-        run_with_timeout(child, timeout_secs, command)
+        let result = run_with_timeout(child, timeout_secs, command);
+        let elapsed = start.elapsed();
+        info!(
+            "⏰️ Stop hook [{}] completed in {:.2}s",
+            command,
+            elapsed.as_secs_f64()
+        );
+        result
     }
 
     /// Log stdout/stderr output from a stop hook command.

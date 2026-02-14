@@ -165,6 +165,10 @@ debug = false
 # [[stop_hooks]]
 # commands = ["biome check --write ."]
 # condition = { file_exists = "package.json" }
+
+# Auto commit & push (requires git-sc: https://github.com/owayo/git-smart-commit)
+# [[stop_hooks]]
+# commands = ["git-sc --all --yes --quiet"]
 "#
         .to_string()
     }

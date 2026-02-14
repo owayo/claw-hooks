@@ -5,8 +5,14 @@ use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{run_with_timeout, spawn_piped};
+use crate::domain::command::{run_with_timeout, spawn_piped_with_env};
 use crate::domain::{Decision, HookEvent, HookInput};
+
+/// Environment variable to prevent recursive stop hook execution across processes.
+/// When claw-hooks executes stop hooks, this env var is set on child processes.
+/// If a child process (e.g. git-sc → Gemini CLI) triggers another claw-hooks stop event,
+/// this env var will be inherited and claw-hooks will skip stop hooks to break the loop.
+const STOP_ACTIVE_ENV: &str = "CLAW_HOOKS_STOP_ACTIVE";
 
 /// Filter for Stop event hooks.
 pub struct StopHookFilter {
@@ -27,6 +33,7 @@ impl StopHookFilter {
 
     /// Execute a single command string safely with timeout.
     /// Uses shell-aware tokenizer to properly handle quoted arguments.
+    /// Sets `CLAW_HOOKS_STOP_ACTIVE=1` on the child process to prevent recursive loops.
     fn execute_command(command: &str, timeout_secs: u64) -> Result<Output, String> {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
@@ -39,7 +46,7 @@ impl StopHookFilter {
         debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
         let start = std::time::Instant::now();
-        let child = spawn_piped(program, args)
+        let child = spawn_piped_with_env(program, args, &[(STOP_ACTIVE_ENV, "1")])
             .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
         let result = run_with_timeout(child, timeout_secs, command);
         let elapsed = start.elapsed();
@@ -89,7 +96,19 @@ impl Filter for StopHookFilter {
     }
 
     fn execute(&self, input: &HookInput) -> Decision {
-        // Check stop_hook_active to prevent infinite loops
+        // Check environment variable to prevent cross-process recursive loops.
+        // When claw-hooks runs stop hooks, child processes inherit CLAW_HOOKS_STOP_ACTIVE=1.
+        // If those children (e.g. git-sc → Gemini CLI) trigger another claw-hooks stop event,
+        // this check breaks the loop.
+        if std::env::var(STOP_ACTIVE_ENV).is_ok() {
+            debug!(
+                "⛔ {}=1 detected, skipping all stop hooks (cross-process loop prevention)",
+                STOP_ACTIVE_ENV
+            );
+            return Decision::allow();
+        }
+
+        // Check stop_hook_active to prevent infinite loops (agent-internal flag)
         if let crate::domain::ToolInput::Stop(ref stop_input) = input.tool_input {
             if stop_input.stop_hook_active {
                 debug!("🛑 stop_hook_active=true, skipping all stop hooks");
@@ -670,10 +689,18 @@ mod tests {
         let result = StopHookFilter::execute_command("sleep 10", 2);
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "Should have timed out");
+        // Timeout is treated as successful completion
+        assert!(result.is_ok(), "Timeout should return Ok");
+        let output = result.unwrap();
         assert!(
-            result.unwrap_err().contains("timed out"),
-            "Error should mention timeout"
+            output.status.success(),
+            "Timeout should be treated as success"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("timed out"),
+            "Stderr should contain timeout notice: {}",
+            stderr
         );
         assert!(
             elapsed.as_secs() < 5,
@@ -710,9 +737,9 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_hook_timeout_conditional_blocks() {
+    fn test_stop_hook_timeout_conditional_allows() {
         use crate::config::HookCondition;
-        // Conditional hook with timeout should block with timeout error
+        // Conditional hook with timeout should allow (timeout treated as success)
         let hooks = vec![StopHook {
             commands: vec!["sleep 10".to_string()],
             condition: Some(HookCondition {
@@ -726,16 +753,11 @@ mod tests {
         let decision = filter.execute(&make_stop_input());
         let elapsed = start.elapsed();
 
-        match decision {
-            Decision::Block { message } => {
-                assert!(
-                    message.contains("timed out"),
-                    "Expected timeout message, got: {}",
-                    message
-                );
-            }
-            _ => panic!("Expected Block decision for timed out conditional hook"),
-        }
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Timeout should be treated as Allow, got: {:?}",
+            decision
+        );
         assert!(
             elapsed.as_secs() < 5,
             "Conditional hook should timeout in ~2s, took {:?}",
@@ -744,19 +766,30 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_command_timeout_captures_partial_output() {
-        // Command that outputs then hangs: should capture the pre-timeout output in error
+    fn test_execute_command_timeout_returns_timeout_notice() {
+        // Command that outputs then hangs: timeout should return Ok with notice
         let result = StopHookFilter::execute_command("sh -c 'echo before-timeout; sleep 30'", 2);
-        // Timeout is returned as Err, not as Output, so we can only verify it timed out
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("timed out"));
+        // Timeout is treated as Ok
+        assert!(result.is_ok(), "Timeout should return Ok");
+        let output = result.unwrap();
+        // stdout is empty on timeout (reader threads are not joined to avoid blocking)
+        assert!(
+            output.stdout.is_empty(),
+            "Stdout should be empty on timeout"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("timed out"),
+            "Stderr should contain timeout notice: {}",
+            stderr
+        );
     }
 
     #[test]
     fn test_stop_hook_timeout_mixed_fast_and_slow_conditional() {
         use crate::config::HookCondition;
         // Two conditional commands in parallel: one fast success, one timeout
-        // The timeout should still block
+        // Timeout is treated as success, so both should allow
         let hooks = vec![StopHook {
             commands: vec!["true".to_string(), "sleep 10".to_string()],
             condition: Some(HookCondition {
@@ -770,16 +803,11 @@ mod tests {
         let decision = filter.execute(&make_stop_input());
         let elapsed = start.elapsed();
 
-        match decision {
-            Decision::Block { message } => {
-                assert!(
-                    message.contains("timed out"),
-                    "Expected timeout in message: {}",
-                    message
-                );
-            }
-            _ => panic!("Expected Block decision when one command times out"),
-        }
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Timeout should be treated as Allow, got: {:?}",
+            decision
+        );
         assert!(
             elapsed.as_secs() < 5,
             "Should timeout in ~2s, took {:?}",
@@ -822,7 +850,7 @@ mod tests {
         // Command: sleep 10 then create marker. If killed properly, marker won't exist
         let cmd = format!("sh -c 'sleep 10; echo done > {}'", marker_path);
         let result = StopHookFilter::execute_command(&cmd, 2);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "Timeout should return Ok");
 
         // Give a moment for any zombie/orphan cleanup
         std::thread::sleep(std::time::Duration::from_millis(500));

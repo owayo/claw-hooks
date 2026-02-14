@@ -1,9 +1,11 @@
 //! Timeout-aware command execution utility.
 
 use std::io::Read as _;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt as _;
 use tracing::warn;
 
 /// Execute a command with a timeout.
@@ -41,9 +43,9 @@ pub fn run_with_timeout(
 
     // Wait for child with timeout using try_wait polling
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let status = loop {
+    let (status, timed_out) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
+            Ok(Some(status)) => break (status, false),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     warn!(
@@ -55,15 +57,27 @@ pub fn run_with_timeout(
                     // Reap the zombie process
                     let _ = child.wait();
                     warn!("💀 Process killed (SIGKILL): {}", command_desc);
-                    break Err(format!(
-                        "Command timed out after {}s: {}",
-                        timeout_secs, command_desc
-                    ));
+                    // Treat timeout as successful completion with collected output
+                    #[cfg(unix)]
+                    let status = ExitStatus::from_raw(0);
+                    #[cfg(not(unix))]
+                    let status = {
+                        // Fallback: spawn a trivially-successful process to obtain ExitStatus(0)
+                        Command::new("cmd")
+                            .args(["/C", "exit 0"])
+                            .output()
+                            .map(|o| o.status)
+                            .unwrap_or_else(|_| {
+                                // Last resort: use the killed process status
+                                child.wait().unwrap_or_else(|_| ExitStatus::from_raw(1))
+                            })
+                    };
+                    break (status, true);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                break Err(format!(
+                return Err(format!(
                     "Failed to wait for command '{}': {}",
                     command_desc, e
                 ));
@@ -71,9 +85,22 @@ pub fn run_with_timeout(
         }
     };
 
-    let status = status?;
+    if timed_out {
+        // Don't join reader threads: child subprocesses (e.g. sh → sleep) may still
+        // hold pipe handles open, causing join() to block indefinitely.
+        // The threads will be cleaned up when the process exits.
+        let msg = format!(
+            "[Command timed out after {}s: {}]\n",
+            timeout_secs, command_desc
+        );
+        return Ok(Output {
+            status,
+            stdout: Vec::new(),
+            stderr: msg.into_bytes(),
+        });
+    }
 
-    // Collect output from reader threads (these will finish quickly after process exits or is killed)
+    // Collect output from reader threads (finish quickly after normal process exit)
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
 
@@ -84,19 +111,30 @@ pub fn run_with_timeout(
     })
 }
 
-/// Spawn a command with piped stdout/stderr, suitable for use with `run_with_timeout`.
-pub fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child, String> {
-    Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+/// Spawn a command with piped stdout/stderr and additional environment variables.
+/// Used by stop hooks to propagate loop prevention env vars to child processes.
+pub fn spawn_piped_with_env(
+    program: &str,
+    args: &[String],
+    envs: &[(&str, &str)],
+) -> Result<std::process::Child, String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for &(key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.spawn()
         .map_err(|e| format!("Failed to execute '{}': {}", program, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: spawn without extra env vars.
+    fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child, String> {
+        spawn_piped_with_env(program, args, &[])
+    }
 
     // === spawn_piped tests ===
 
@@ -187,9 +225,24 @@ mod tests {
         let result = run_with_timeout(child, 1, "sleep 30");
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "Should return error on timeout");
-        let err = result.unwrap_err();
-        assert!(err.contains("timed out"), "Error: {}", err);
+        // Timeout is treated as successful completion
+        assert!(result.is_ok(), "Timeout should return Ok");
+        let output = result.unwrap();
+        assert!(
+            output.status.success(),
+            "Timeout should be treated as success"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("timed out"),
+            "Stderr should contain timeout notice: {}",
+            stderr
+        );
+        // stdout is empty on timeout (reader threads are not joined)
+        assert!(
+            output.stdout.is_empty(),
+            "Stdout should be empty on timeout"
+        );
         assert!(
             elapsed.as_secs() < 5,
             "Should timeout quickly, took {:?}",

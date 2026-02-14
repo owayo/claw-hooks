@@ -130,13 +130,13 @@ impl Filter for StopHookFilter {
                             Self::log_output(&command, &output);
                             if !output.status.success() {
                                 warn!(
-                                    "🛑 Stop hook command failed (exit {}): {}",
+                                    "⚠️ Stop hook command failed (exit {}): {}",
                                     output.status, command
                                 );
                             }
                         }
                         Err(e) => {
-                            warn!("🛑 Stop hook failed: {}", e);
+                            warn!("⚠️ Stop hook failed: {}", e);
                         }
                     },
                 )

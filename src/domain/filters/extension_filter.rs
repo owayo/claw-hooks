@@ -210,12 +210,12 @@ impl ExtensionHookFilter {
                 .join("\n");
             if detail.is_empty() {
                 warn!(
-                    "🪛 Extension hook command failed (exit code {}): {}",
+                    "⚠️ Extension hook command failed (exit code {}): {}",
                     exit_code, command_template
                 );
             } else {
                 warn!(
-                    "🪛 Extension hook command failed (exit code {}): {}\n{}",
+                    "⚠️ Extension hook command failed (exit code {}): {}\n{}",
                     exit_code, command_template, detail
                 );
             }

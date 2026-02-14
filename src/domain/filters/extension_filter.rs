@@ -198,7 +198,27 @@ impl ExtensionHookFilter {
             .join("\n");
 
         if !output.status.success() {
-            warn!("🪛 Extension hook command failed: {}", stderr);
+            let exit_code = output
+                .status
+                .code()
+                .map_or("signal".to_string(), |c| c.to_string());
+            let detail = [stderr.trim(), stdout.trim()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if detail.is_empty() {
+                warn!(
+                    "🪛 Extension hook command failed (exit code {}): {}",
+                    exit_code, command_template
+                );
+            } else {
+                warn!(
+                    "🪛 Extension hook command failed (exit code {}): {}\n{}",
+                    exit_code, command_template, detail
+                );
+            }
         }
 
         Ok(CommandResult {

@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt as _;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt as _;
 use tracing::warn;
 
 /// Execute a command with a timeout.
@@ -60,18 +62,8 @@ pub fn run_with_timeout(
                     // Treat timeout as successful completion with collected output
                     #[cfg(unix)]
                     let status = ExitStatus::from_raw(0);
-                    #[cfg(not(unix))]
-                    let status = {
-                        // Fallback: spawn a trivially-successful process to obtain ExitStatus(0)
-                        Command::new("cmd")
-                            .args(["/C", "exit 0"])
-                            .output()
-                            .map(|o| o.status)
-                            .unwrap_or_else(|_| {
-                                // Last resort: use the killed process status
-                                child.wait().unwrap_or_else(|_| ExitStatus::from_raw(1))
-                            })
-                    };
+                    #[cfg(windows)]
+                    let status = ExitStatus::from_raw(0);
                     break (status, true);
                 }
                 std::thread::sleep(Duration::from_millis(100));

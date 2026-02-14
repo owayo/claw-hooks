@@ -48,10 +48,10 @@ impl StopHookFilter {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stdout.trim().is_empty() {
-            info!("🛑 Stop hook [{}] stdout:\n{}", command, stdout.trim());
+            info!("Stop hook [{}] stdout:\n{}", command, stdout.trim());
         }
         if !stderr.trim().is_empty() {
-            info!("🛑 Stop hook [{}] stderr:\n{}", command, stderr.trim());
+            info!("Stop hook [{}] stderr:\n{}", command, stderr.trim());
         }
     }
 

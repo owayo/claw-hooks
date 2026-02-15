@@ -181,6 +181,19 @@ impl ExtensionHookFilter {
         cmd.args(&parsed.args_after);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        // Build the actual expanded command string for logging
+        let actual_command = {
+            let mut parts = vec![parsed.program.clone()];
+            parts.extend(parsed.args_before.iter().cloned());
+            if let Some(ref template) = parsed.inline_template {
+                parts.push(template.replace("{file}", &safe_path));
+            } else {
+                parts.push(safe_path.clone());
+            }
+            parts.extend(parsed.args_after.iter().cloned());
+            parts.join(" ")
+        };
+
         let start = std::time::Instant::now();
         let child = cmd
             .spawn()
@@ -189,7 +202,7 @@ impl ExtensionHookFilter {
         let elapsed = start.elapsed();
         info!(
             "⏰️ Extension hook [{}] completed in {:.2}s",
-            command_template,
+            actual_command,
             elapsed.as_secs_f64()
         );
         let output = result?;
@@ -219,18 +232,18 @@ impl ExtensionHookFilter {
             if detail.is_empty() {
                 warn!(
                     "⚠️ Extension hook command failed (exit code {}): {}",
-                    exit_code, command_template
+                    exit_code, actual_command
                 );
             } else {
                 warn!(
                     "⚠️ Extension hook command failed (exit code {}): {}\n{}",
-                    exit_code, command_template, detail
+                    exit_code, actual_command, detail
                 );
             }
         }
 
         Ok(CommandResult {
-            command: command_template.to_string(),
+            command: actual_command,
             success: output.status.success(),
             output: combined_output,
         })

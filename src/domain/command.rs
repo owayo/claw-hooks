@@ -110,8 +110,16 @@ pub fn spawn_piped_with_env(
     args: &[String],
     envs: &[(&str, &str)],
 ) -> Result<std::process::Child, String> {
-    let mut cmd = Command::new(program);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.arg("/c").arg(program).args(args);
+        c
+    } else {
+        let mut c = Command::new(program);
+        c.args(args);
+        c
+    };
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     for &(key, value) in envs {
         cmd.env(key, value);
     }

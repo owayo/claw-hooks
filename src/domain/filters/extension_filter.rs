@@ -166,7 +166,14 @@ impl ExtensionHookFilter {
         );
 
         // Build command with file path as a separate, properly escaped argument
-        let mut cmd = Command::new(&parsed.program);
+        // On Windows, use `cmd /c` to resolve .cmd/.bat wrappers (e.g. npx.cmd)
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.arg("/c").arg(&parsed.program);
+            c
+        } else {
+            Command::new(&parsed.program)
+        };
         cmd.args(&parsed.args_before);
 
         if let Some(ref template) = parsed.inline_template {

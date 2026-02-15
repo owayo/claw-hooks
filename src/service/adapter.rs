@@ -167,7 +167,9 @@ impl FormatAdapter {
                     .filter(|s| !s.is_empty())
                     .map(String::from);
                 crate::domain::SubagentInput {
-                    subagent_type: tool_input_type.or(root_agent_type),
+                    // root-level agent_type (human-readable name like "Explore") takes priority
+                    // over tool_input.subagent_type (may contain session ID/UUID)
+                    subagent_type: root_agent_type.or(tool_input_type),
                     prompt: val.get("prompt").and_then(|v| v.as_str()).map(String::from),
                     status: val.get("status").and_then(|v| v.as_str()).map(String::from),
                     duration: val.get("duration").and_then(|v| v.as_u64()),

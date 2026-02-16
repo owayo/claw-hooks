@@ -205,7 +205,7 @@ impl ExtensionHookFilter {
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
-        let result = run_with_timeout(child, self.timeout_secs, command_template);
+        let result = run_with_timeout(child, self.timeout_secs, &actual_command);
         let elapsed = start.elapsed();
         info!(
             "⏰️ Extension hook [{}] completed in {:.2}s",

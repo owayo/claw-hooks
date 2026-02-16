@@ -275,7 +275,7 @@ impl ExtensionHookFilter {
                 }
                 Err(e) => {
                     all_success = false;
-                    warn!("🪛 Extension hook failed: {}", e);
+                    warn!("❌ Extension hook failed: {}", e);
                     outputs.push(format!("[ERROR] {}", e));
                 }
             }

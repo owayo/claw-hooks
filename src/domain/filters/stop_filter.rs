@@ -163,7 +163,7 @@ impl Filter for StopHookFilter {
                             }
                         }
                         Err(e) => {
-                            warn!("⚠️ Stop hook failed: {}", e);
+                            warn!("❌ Stop hook failed: {}", e);
                         }
                     },
                 )

@@ -38,6 +38,7 @@
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
+- ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
 ## なぜ claw-hooks？
@@ -411,6 +412,10 @@ dd_block_message = "🚫 dd command blocked for safety."
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # デフォルト: config.tomlと同じディレクトリ
 
+# フックコマンドタイムアウト（秒）（デフォルト: 60）
+# このタイムアウトを超えたコマンドはkill（SIGKILL）されます
+# hook_timeout = 60
+
 # カスタムコマンドフィルター（正規表現対応）
 [[custom_filters]]
 command = "yarn"
@@ -458,7 +463,6 @@ message = "ユーザーに直接実行を依頼してください"
 # 条件付きStopフック（Stop時にプロジェクト全体のlintを実行）
 # プロジェクト構成ファイルの存在とツールの利用可能性を検出し、lint/typecheckを実行。
 # 失敗時はAIエージェントに結果を返し、エージェントが問題を修正します。
-# 配列内のすべてのコマンドが順次実行され、失敗結果がまとめて返されます。
 # conditionフィールド（AND条件）: file_exists, command_exists
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
@@ -476,6 +480,64 @@ condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 commands = ["biome check --write ."]
 condition = { file_exists = "package.json" }
 ```
+
+### プロジェクトごとの設定
+
+claw-hooksはデフォルトでグローバル設定ファイル（`~/.config/claw-hooks/config.toml`）を使用します。プロジェクトごとに動作をカスタマイズする方法は2つあります:
+
+**1. `--config` でプロジェクトローカルの設定を使用**
+
+プロジェクト内に設定ファイルを配置し、エージェントのプロジェクト設定から参照します:
+
+```toml
+# my-project/.claude/claw-hooks.toml
+rm_block = true
+kill_block = true
+dd_block = false  # このプロジェクトでは dd を許可
+
+[extension_hooks]
+".rs" = ["rustfmt {file}"]
+```
+
+```json
+// my-project/.claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }],
+    "PostToolUse": [{
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }]
+  }
+}
+```
+
+**2. 条件付きStopフックによるプロジェクト自動検出**
+
+`file_exists` 条件付きのStopフックは、作業ディレクトリに基づいてプロジェクトタイプを自動判定します。単一のグローバル設定で複数のプロジェクトタイプに対応できます:
+
+```toml
+# ~/.config/claw-hooks/config.toml
+
+# Rustプロジェクトのみで実行（Cargo.toml が存在する場合）
+[[stop_hooks]]
+commands = ["cargo clippy -- -D warnings"]
+condition = { file_exists = "Cargo.toml" }
+
+# TypeScriptプロジェクトのみで実行（tsconfig.json が存在する場合）
+[[stop_hooks]]
+commands = ["pnpm exec tsc --noEmit"]
+condition = { file_exists = "tsconfig.json" }
+```
+
+両方のアプローチを組み合わせることも可能です。グローバル設定で共通ルール（コマンドブロック、共通フィルター）を定義し、プロジェクトローカル設定でプロジェクト固有の拡張子フックやStopフックを設定できます。
 
 ### 条件付きStopフック（プロジェクト全体Lint）
 
@@ -511,6 +573,30 @@ condition = { file_exists = "package.json" }
 ```
 
 `condition` **なし**のフックはfire-and-forget（すべてのコマンドを並列実行、結果無視、常に許可）です。通知音や`notify-send`などの通知用フックに適しています。
+
+### Stopフックの環境変数
+
+claw-hooksはStopフックの子プロセスに以下の環境変数を渡します:
+
+| 変数名 | 説明 |
+|--------|------|
+| `CLAW_HOOKS_STOP_ACTIVE` | 常に `1` に設定。子プロセスが別のclaw-hooks Stopイベントをトリガーした際の再帰実行を防止します。 |
+| `CLAW_HOOKS_AGENT_MESSAGE` | AIエージェントが停止前に残した最後のメッセージ（利用可能な場合）。エージェントが何を作業していたかの情報を含みます。 |
+
+**`CLAW_HOOKS_AGENT_MESSAGE`** の取得元:
+- **Claude Code**: Stopイベントの `last_assistant_message` フィールド
+- **Windsurf**: `post_cascade_response` イベントの `response` フィールド
+- **Gemini CLI**: `AfterAgent` イベントの `prompt_response` フィールド
+- **Cursor**: 利用不可
+
+これはエージェントのコンテキストを活用できるツールに有用です。例えば、[git-sc](https://github.com/owayo/git-smart-commit)はこの情報を使ってより正確なコミットメッセージを生成します:
+
+```toml
+[[stop_hooks]]
+commands = ["git-sc --all --yes --quiet"]
+```
+
+git-scがStopフックとして実行されると、`CLAW_HOOKS_AGENT_MESSAGE` を読み取り、エージェントのコンテキストをAIプロンプトに含めます。これにより、単なるdiffの説明ではなく、変更の意図を反映したコミットメッセージが生成されます。
 
 ### カスタムフィルターの動作
 

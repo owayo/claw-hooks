@@ -144,6 +144,7 @@ impl FormatAdapter {
                     status: None,
                     loop_count: None,
                     response: None,
+                    agent_message: claude_input.last_assistant_message.clone(),
                     stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
                 }),
             )
@@ -315,6 +316,7 @@ impl FormatAdapter {
                         status: Some(status),
                         loop_count,
                         response: None,
+                        agent_message: None,
                         stop_hook_active: false,
                     }),
                     session_id: None,
@@ -445,6 +447,7 @@ impl FormatAdapter {
                     crate::domain::ToolInput::Stop(crate::domain::StopInput {
                         status: None,
                         loop_count: None,
+                        agent_message: response.clone(),
                         response,
                         stop_hook_active: false,
                     }),
@@ -523,6 +526,10 @@ struct ClaudeInput {
     #[serde(default)]
     #[allow(dead_code)]
     stop_hook_active: Option<bool>,
+
+    /// Agent's last assistant message (Stop event)
+    #[serde(default)]
+    last_assistant_message: Option<String>,
 }
 
 /// Claude Code Stop event output format.
@@ -876,6 +883,51 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert!(!stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_with_last_assistant_message() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"I've completed the refactoring task."}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(
+                stop.agent_message,
+                Some("I've completed the refactoring task.".to_string())
+            );
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_without_last_assistant_message() {
+        let adapter = FormatAdapter::new(Format::Claude);
+        let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(stop.agent_message.is_none());
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_windsurf_input_parsing_post_cascade_response_sets_agent_message() {
+        let adapter = FormatAdapter::new(Format::Windsurf);
+        let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"All tasks completed successfully."}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(
+                stop.agent_message,
+                Some("All tasks completed successfully.".to_string())
+            );
+            assert_eq!(stop.response, stop.agent_message);
         } else {
             panic!("Expected Stop tool input");
         }
@@ -1703,6 +1755,7 @@ impl FormatAdapter {
                     status: None,
                     loop_count: None,
                     response: None,
+                    agent_message: gemini_input.prompt_response.clone(),
                     stop_hook_active: gemini_input.stop_hook_active.unwrap_or(false),
                 }),
                 session_id: gemini_input.session_id,

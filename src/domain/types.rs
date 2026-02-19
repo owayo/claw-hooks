@@ -156,6 +156,10 @@ pub struct StopInput {
     #[serde(default)]
     pub response: Option<String>,
 
+    /// Agent's last message (Claude Code: last_assistant_message, Windsurf: response)
+    #[serde(default)]
+    pub agent_message: Option<String>,
+
     /// Whether stop hooks are already active (prevents infinite loops)
     #[serde(default)]
     pub stop_hook_active: bool,

@@ -481,6 +481,64 @@ commands = ["biome check --write ."]
 condition = { file_exists = "package.json" }
 ```
 
+### Per-Project Configuration
+
+claw-hooks uses a single global configuration file by default (`~/.config/claw-hooks/config.toml`). You can customize behavior per project in two ways:
+
+**1. Project-local config with `--config`**
+
+Place a config file in your project and reference it from the agent's project-level settings:
+
+```toml
+# my-project/.claude/claw-hooks.toml
+rm_block = true
+kill_block = true
+dd_block = false  # Allow dd in this project
+
+[extension_hooks]
+".rs" = ["rustfmt {file}"]
+```
+
+```json
+// my-project/.claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }],
+    "PostToolUse": [{
+      "matcher": "Write|Edit|MultiEdit",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }],
+    "Stop": [{
+      "matcher": "",
+      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
+    }]
+  }
+}
+```
+
+**2. Automatic project detection with conditional stop hooks**
+
+Stop hooks with `file_exists` conditions automatically adapt to the project type based on the working directory. A single global config can handle multiple project types:
+
+```toml
+# ~/.config/claw-hooks/config.toml
+
+# Runs only in Rust projects (where Cargo.toml exists)
+[[stop_hooks]]
+commands = ["cargo clippy -- -D warnings"]
+condition = { file_exists = "Cargo.toml" }
+
+# Runs only in TypeScript projects (where tsconfig.json exists)
+[[stop_hooks]]
+commands = ["pnpm exec tsc --noEmit"]
+condition = { file_exists = "tsconfig.json" }
+```
+
+Both approaches can be combined: use the global config for shared rules (command blocking, common filters) and project-local configs for project-specific extension hooks or stop hooks.
+
 ### Conditional Stop Hooks (Project-wide Lint)
 
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
@@ -515,6 +573,30 @@ condition = { file_exists = "package.json" }
 ```
 
 Hooks **without** `condition` are fire-and-forget (run all commands in parallel, ignore results, always allow). This is useful for notification-style hooks like sounds and `notify-send`.
+
+### Stop Hook Environment Variables
+
+claw-hooks passes the following environment variables to stop hook child processes:
+
+| Variable | Description |
+|----------|-------------|
+| `CLAW_HOOKS_STOP_ACTIVE` | Always set to `1`. Prevents recursive stop hook execution when a child process triggers another claw-hooks stop event. |
+| `CLAW_HOOKS_AGENT_MESSAGE` | The AI agent's last message before stopping (if available). Contains what the agent was working on. |
+
+**`CLAW_HOOKS_AGENT_MESSAGE`** is populated from:
+- **Claude Code**: `last_assistant_message` field in the Stop event
+- **Windsurf**: `response` field in the `post_cascade_response` event
+- **Gemini CLI**: `prompt_response` field in the `AfterAgent` event
+- **Cursor**: Not available
+
+This is useful for tools that benefit from knowing the agent's context. For example, [git-sc](https://github.com/owayo/git-smart-commit) uses this to generate more accurate commit messages:
+
+```toml
+[[stop_hooks]]
+commands = ["git-sc --all --yes --quiet"]
+```
+
+When git-sc runs as a stop hook, it reads `CLAW_HOOKS_AGENT_MESSAGE` and includes the agent's context in the AI prompt, resulting in commit messages that reflect the intent of the changes rather than just the raw diff.
 
 ### Custom Filter Behavior
 

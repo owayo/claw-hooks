@@ -31,10 +31,19 @@ impl StopHookFilter {
         }
     }
 
+    /// Environment variable to pass agent's last message to child processes.
+    /// This allows tools like git-sc to use the agent's context for better commit messages.
+    const AGENT_MESSAGE_ENV: &'static str = "CLAW_HOOKS_AGENT_MESSAGE";
+
     /// Execute a single command string safely with timeout.
     /// Uses shell-aware tokenizer to properly handle quoted arguments.
     /// Sets `CLAW_HOOKS_STOP_ACTIVE=1` on the child process to prevent recursive loops.
-    fn execute_command(command: &str, timeout_secs: u64) -> Result<Output, String> {
+    /// Optionally sets `CLAW_HOOKS_AGENT_MESSAGE` with the agent's last message.
+    fn execute_command(
+        command: &str,
+        timeout_secs: u64,
+        agent_message: Option<&str>,
+    ) -> Result<Output, String> {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             return Err("Empty command".to_string());
@@ -45,8 +54,13 @@ impl StopHookFilter {
 
         debug!("🛑 Executing stop hook: {} {:?}", program, args);
 
+        let mut envs: Vec<(&str, &str)> = vec![(STOP_ACTIVE_ENV, "1")];
+        if let Some(msg) = agent_message {
+            envs.push((Self::AGENT_MESSAGE_ENV, msg));
+        }
+
         let start = std::time::Instant::now();
-        let child = spawn_piped_with_env(program, args, &[(STOP_ACTIVE_ENV, "1")])
+        let child = spawn_piped_with_env(program, args, &envs)
             .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
         let result = run_with_timeout(child, timeout_secs, command);
         let elapsed = start.elapsed();
@@ -109,12 +123,17 @@ impl Filter for StopHookFilter {
         }
 
         // Check stop_hook_active to prevent infinite loops (agent-internal flag)
-        if let crate::domain::ToolInput::Stop(ref stop_input) = input.tool_input {
+        // Also extract agent_message for passing to child processes
+        let agent_message = if let crate::domain::ToolInput::Stop(ref stop_input) = input.tool_input
+        {
             if stop_input.stop_hook_active {
                 debug!("🛑 stop_hook_active=true, skipping all stop hooks");
                 return Decision::allow();
             }
-        }
+            stop_input.agent_message.clone()
+        } else {
+            None
+        };
 
         // NanoBuddy notification (before all stop hooks so it arrives first)
         if self.nano_buddy {
@@ -151,8 +170,9 @@ impl Filter for StopHookFilter {
         let unconditional_handles: Vec<_> = unconditional_commands
             .into_iter()
             .map(|command| {
-                std::thread::spawn(
-                    move || match Self::execute_command(&command, timeout_secs) {
+                let agent_msg = agent_message.clone();
+                std::thread::spawn(move || {
+                    match Self::execute_command(&command, timeout_secs, agent_msg.as_deref()) {
                         Ok(output) => {
                             Self::log_output(&command, &output);
                             if !output.status.success() {
@@ -165,8 +185,8 @@ impl Filter for StopHookFilter {
                         Err(e) => {
                             warn!("❌ Stop hook failed: {}", e);
                         }
-                    },
-                )
+                    }
+                })
             })
             .collect();
 
@@ -175,8 +195,9 @@ impl Filter for StopHookFilter {
         let conditional_handles: Vec<_> = conditional_commands
             .into_iter()
             .map(|command| {
+                let agent_msg = agent_message.clone();
                 std::thread::spawn(move || -> Option<String> {
-                    match Self::execute_command(&command, timeout_secs) {
+                    match Self::execute_command(&command, timeout_secs, agent_msg.as_deref()) {
                         Ok(output) => {
                             Self::log_output(&command, &output);
                             if output.status.success() {
@@ -287,12 +308,12 @@ mod tests {
 
     #[test]
     fn test_execute_command_empty_is_error() {
-        assert!(StopHookFilter::execute_command("   ", 60).is_err());
+        assert!(StopHookFilter::execute_command("   ", 60, None).is_err());
     }
 
     #[test]
     fn test_execute_command_with_quoted_args() {
-        assert!(StopHookFilter::execute_command("echo 'hello world'", 60).is_ok());
+        assert!(StopHookFilter::execute_command("echo 'hello world'", 60, None).is_ok());
     }
 
     #[test]
@@ -339,6 +360,7 @@ mod tests {
                 loop_count: None,
                 response: None,
                 stop_hook_active: true,
+                ..Default::default()
             }),
             session_id: None,
         };
@@ -363,6 +385,7 @@ mod tests {
                 loop_count: None,
                 response: None,
                 stop_hook_active: false,
+                ..Default::default()
             }),
             session_id: None,
         };
@@ -387,6 +410,7 @@ mod tests {
                 loop_count: None,
                 response: None,
                 stop_hook_active: false,
+                ..Default::default()
             }),
             session_id: None,
         };
@@ -406,6 +430,7 @@ mod tests {
                 loop_count: None,
                 response: None,
                 stop_hook_active: false,
+                ..Default::default()
             }),
             session_id: None,
         }
@@ -686,7 +711,7 @@ mod tests {
     fn test_execute_command_timeout_kills_process() {
         // sleep 10 should be killed after 2 second timeout
         let start = std::time::Instant::now();
-        let result = StopHookFilter::execute_command("sleep 10", 2);
+        let result = StopHookFilter::execute_command("sleep 10", 2, None);
         let elapsed = start.elapsed();
 
         // Timeout is treated as successful completion
@@ -711,7 +736,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_completes_before_timeout() {
-        let result = StopHookFilter::execute_command("echo hello", 60);
+        let result = StopHookFilter::execute_command("echo hello", 60, None);
         assert!(result.is_ok(), "Should complete before timeout");
     }
 
@@ -768,7 +793,8 @@ mod tests {
     #[test]
     fn test_execute_command_timeout_returns_timeout_notice() {
         // Command that outputs then hangs: timeout should return Ok with notice
-        let result = StopHookFilter::execute_command("sh -c 'echo before-timeout; sleep 30'", 2);
+        let result =
+            StopHookFilter::execute_command("sh -c 'echo before-timeout; sleep 30'", 2, None);
         // Timeout is treated as Ok
         assert!(result.is_ok(), "Timeout should return Ok");
         let output = result.unwrap();
@@ -849,7 +875,7 @@ mod tests {
 
         // Command: sleep 10 then create marker. If killed properly, marker won't exist
         let cmd = format!("sh -c 'sleep 10; echo done > {}'", marker_path);
-        let result = StopHookFilter::execute_command(&cmd, 2);
+        let result = StopHookFilter::execute_command(&cmd, 2, None);
         assert!(result.is_ok(), "Timeout should return Ok");
 
         // Give a moment for any zombie/orphan cleanup
@@ -881,6 +907,77 @@ mod tests {
             elapsed.as_secs() < 3,
             "1s command should complete before 3s timeout: {:?}",
             elapsed
+        );
+    }
+
+    // === Agent message propagation tests ===
+
+    #[test]
+    fn test_execute_command_passes_agent_message_env() {
+        // Verify CLAW_HOOKS_AGENT_MESSAGE is set when agent_message is provided
+        let result = StopHookFilter::execute_command(
+            "sh -c 'echo $CLAW_HOOKS_AGENT_MESSAGE'",
+            60,
+            Some("test agent message"),
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test agent message"),
+            "Expected agent message in stdout, got: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_execute_command_no_agent_message_env_when_none() {
+        // Verify CLAW_HOOKS_AGENT_MESSAGE is not set when agent_message is None
+        let result = StopHookFilter::execute_command(
+            "sh -c 'echo \"${CLAW_HOOKS_AGENT_MESSAGE:-unset}\"'",
+            60,
+            None,
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unset"),
+            "Expected 'unset' in stdout when no agent_message, got: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_propagates_agent_message_to_child() {
+        use crate::config::HookCondition;
+        // Conditional hook that echoes the agent message env var
+        let hooks = vec![StopHook {
+            commands: vec![
+                "sh -c 'test \"$CLAW_HOOKS_AGENT_MESSAGE\" = \"hello from agent\"'".to_string(),
+            ],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+
+        let stop_input = HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput {
+                agent_message: Some("hello from agent".to_string()),
+                ..Default::default()
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&stop_input);
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Expected Allow (env var should match), got: {:?}",
+            decision
         );
     }
 }

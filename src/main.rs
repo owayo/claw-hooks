@@ -49,6 +49,14 @@ fn main() -> Result<()> {
             config::validate(&config)?;
             if !cli.quiet {
                 eprintln!("Configuration is valid.");
+                // Show project config info if found
+                if let Some(project_path) = ConfigService::find_project_config() {
+                    eprintln!("Project config found: {}", project_path.display());
+                    match ConfigService::load_project_config(&project_path) {
+                        Ok(_) => eprintln!("Project config is valid."),
+                        Err(e) => eprintln!("Project config error: {}", e),
+                    }
+                }
             }
         }
         Commands::Version => {

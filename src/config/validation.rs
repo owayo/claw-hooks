@@ -2,8 +2,10 @@
 
 use anyhow::{bail, Result};
 use regex::Regex;
+use std::collections::BTreeMap;
 
-use super::Config;
+use super::types::ProjectConfig;
+use super::{Config, CustomFilter, StopHook};
 
 /// Validate configuration.
 pub fn validate(config: &Config) -> Result<()> {
@@ -15,8 +17,16 @@ pub fn validate(config: &Config) -> Result<()> {
         }
     }
 
-    // Validate custom filters
-    for (i, filter) in config.custom_filters.iter().enumerate() {
+    validate_custom_filters(&config.custom_filters)?;
+    validate_extension_hooks(&config.extension_hooks)?;
+    validate_stop_hooks(&config.stop_hooks)?;
+
+    Ok(())
+}
+
+/// Validate custom filter definitions.
+pub fn validate_custom_filters(filters: &[CustomFilter]) -> Result<()> {
+    for (i, filter) in filters.iter().enumerate() {
         if filter.command.is_empty() {
             bail!("custom_filters[{}]: command cannot be empty", i);
         }
@@ -35,9 +45,12 @@ pub fn validate(config: &Config) -> Result<()> {
             bail!("custom_filters[{}]: message cannot be empty", i);
         }
     }
+    Ok(())
+}
 
-    // Validate extension hooks (map format)
-    for (ext, commands) in &config.extension_hooks {
+/// Validate extension hook definitions.
+pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    for (ext, commands) in hooks {
         if !ext.starts_with('.') {
             bail!("extension_hooks: key '{}' must start with '.'", ext);
         }
@@ -61,9 +74,12 @@ pub fn validate(config: &Config) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
 
-    // Validate stop hooks
-    for (i, hook) in config.stop_hooks.iter().enumerate() {
+/// Validate stop hook definitions.
+pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
+    for (i, hook) in hooks.iter().enumerate() {
         if hook.commands.is_empty() {
             bail!("stop_hooks[{}]: commands cannot be empty", i);
         }
@@ -90,15 +106,28 @@ pub fn validate(config: &Config) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
 
+/// Validate a project-level configuration.
+/// Only validates fields that are `Some` (specified in the project config).
+pub fn validate_project(config: &ProjectConfig) -> Result<()> {
+    if let Some(ref filters) = config.custom_filters {
+        validate_custom_filters(filters)?;
+    }
+    if let Some(ref hooks) = config.extension_hooks {
+        validate_extension_hooks(hooks)?;
+    }
+    if let Some(ref hooks) = config.stop_hooks {
+        validate_stop_hooks(hooks)?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CustomFilter, HookCondition, StopHook};
-    use std::collections::BTreeMap;
+    use crate::config::{HookCondition, ProjectConfig};
     use std::path::PathBuf;
 
     fn default_config() -> Config {
@@ -308,5 +337,160 @@ mod tests {
             }),
         });
         assert!(validate(&config).is_ok());
+    }
+
+    // === Helper function tests ===
+
+    #[test]
+    fn test_validate_custom_filters_valid() {
+        let filters = vec![CustomFilter {
+            command: "npm".to_string(),
+            args: vec!["install".to_string()],
+            message: "Use pnpm".to_string(),
+        }];
+        assert!(validate_custom_filters(&filters).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_filters_empty_command() {
+        let filters = vec![CustomFilter {
+            command: "".to_string(),
+            args: vec![],
+            message: "msg".to_string(),
+        }];
+        assert!(validate_custom_filters(&filters).is_err());
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_valid() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        assert!(validate_extension_hooks(&hooks).is_ok());
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_missing_dot() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert("rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        assert!(validate_extension_hooks(&hooks).is_err());
+    }
+
+    #[test]
+    fn test_validate_stop_hooks_valid() {
+        let hooks = vec![StopHook {
+            commands: vec!["echo done".to_string()],
+            condition: None,
+        }];
+        assert!(validate_stop_hooks(&hooks).is_ok());
+    }
+
+    #[test]
+    fn test_validate_stop_hooks_empty_commands() {
+        let hooks = vec![StopHook {
+            commands: vec![],
+            condition: None,
+        }];
+        assert!(validate_stop_hooks(&hooks).is_err());
+    }
+
+    // === validate_project tests ===
+
+    #[test]
+    fn test_validate_project_empty() {
+        let pc = ProjectConfig::default();
+        assert!(validate_project(&pc).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_valid_custom_filters() {
+        let pc = ProjectConfig {
+            custom_filters: Some(vec![CustomFilter {
+                command: "yarn".to_string(),
+                args: vec![],
+                message: "Use pnpm".to_string(),
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_invalid_custom_filters() {
+        let pc = ProjectConfig {
+            custom_filters: Some(vec![CustomFilter {
+                command: "[".to_string(), // invalid regex
+                args: vec![],
+                message: "msg".to_string(),
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_err());
+    }
+
+    #[test]
+    fn test_validate_project_valid_extension_hooks() {
+        let pc = ProjectConfig {
+            extension_hooks: Some({
+                let mut m = BTreeMap::new();
+                m.insert(".ts".to_string(), vec!["biome check {file}".to_string()]);
+                m
+            }),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_invalid_extension_hooks() {
+        let pc = ProjectConfig {
+            extension_hooks: Some({
+                let mut m = BTreeMap::new();
+                m.insert("ts".to_string(), vec!["biome check {file}".to_string()]);
+                m
+            }),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_err());
+    }
+
+    #[test]
+    fn test_validate_project_valid_stop_hooks() {
+        let pc = ProjectConfig {
+            stop_hooks: Some(vec![StopHook {
+                commands: vec!["pnpm exec tsc --noEmit".to_string()],
+                condition: Some(HookCondition {
+                    file_exists: Some("tsconfig.json".to_string()),
+                    command_exists: None,
+                }),
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_invalid_stop_hooks() {
+        let pc = ProjectConfig {
+            stop_hooks: Some(vec![StopHook {
+                commands: vec!["".to_string()],
+                condition: None,
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_err());
+    }
+
+    #[test]
+    fn test_validate_project_skips_none_fields() {
+        // Only stop_hooks is set, custom_filters and extension_hooks are None
+        let pc = ProjectConfig {
+            rm_block: Some(false),
+            stop_hooks: Some(vec![StopHook {
+                commands: vec!["echo done".to_string()],
+                condition: None,
+            }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_ok());
     }
 }

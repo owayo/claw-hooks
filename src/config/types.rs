@@ -87,6 +87,73 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         validation::validate(self)
     }
+
+    /// Merge project-level configuration overrides into this config.
+    ///
+    /// - `Option<T>` が `Some` の場合のみ上書き/マージ
+    /// - `None` = 未指定 → グローバルを維持
+    /// - `Some(vec![])` = 明示的に空 → グローバルを空で上書き
+    /// - `stop_hooks` のみ `extend` でマージ（グローバル + プロジェクト両方を実行）
+    pub fn merge_project(&mut self, project: &ProjectConfig) {
+        if let Some(v) = project.rm_block {
+            self.rm_block = v;
+        }
+        if let Some(ref v) = project.rm_block_message {
+            self.rm_block_message = Some(v.clone());
+        }
+        if let Some(v) = project.kill_block {
+            self.kill_block = v;
+        }
+        if let Some(ref v) = project.kill_block_message {
+            self.kill_block_message = Some(v.clone());
+        }
+        if let Some(v) = project.dd_block {
+            self.dd_block = v;
+        }
+        if let Some(ref v) = project.dd_block_message {
+            self.dd_block_message = Some(v.clone());
+        }
+        if let Some(v) = project.hook_timeout {
+            self.hook_timeout = v;
+        }
+        if let Some(ref v) = project.custom_filters {
+            self.custom_filters = v.clone();
+        }
+        if let Some(ref v) = project.extension_hooks {
+            self.extension_hooks = v.clone();
+        }
+        if let Some(ref v) = project.stop_hooks {
+            self.stop_hooks.extend(v.clone());
+        }
+    }
+}
+
+/// Project-level configuration overrides.
+///
+/// All fields are `Option<T>` — `None` means "not specified" (keep global default).
+/// Placed at `.claw-hooks.toml` in the project root.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectConfig {
+    /// Override rm blocking
+    pub rm_block: Option<bool>,
+    /// Override rm block message
+    pub rm_block_message: Option<String>,
+    /// Override kill blocking
+    pub kill_block: Option<bool>,
+    /// Override kill block message
+    pub kill_block_message: Option<String>,
+    /// Override dd blocking
+    pub dd_block: Option<bool>,
+    /// Override dd block message
+    pub dd_block_message: Option<String>,
+    /// Override hook timeout
+    pub hook_timeout: Option<u64>,
+    /// Override custom filters (replaces global)
+    pub custom_filters: Option<Vec<CustomFilter>>,
+    /// Override extension hooks (replaces global)
+    pub extension_hooks: Option<BTreeMap<String, Vec<String>>>,
+    /// Additional stop hooks (merged with global)
+    pub stop_hooks: Option<Vec<StopHook>>,
 }
 
 /// Custom command filter configuration.
@@ -494,5 +561,188 @@ mod tests {
         // hook_timeout = 0 is technically valid (immediate timeout)
         let config: Config = toml::from_str("hook_timeout = 0").unwrap();
         assert_eq!(config.hook_timeout, 0);
+    }
+
+    // === ProjectConfig deserialization tests ===
+
+    #[test]
+    fn test_project_config_deserialize_empty() {
+        let pc: ProjectConfig = toml::from_str("").unwrap();
+        assert!(pc.rm_block.is_none());
+        assert!(pc.kill_block.is_none());
+        assert!(pc.dd_block.is_none());
+        assert!(pc.hook_timeout.is_none());
+        assert!(pc.custom_filters.is_none());
+        assert!(pc.extension_hooks.is_none());
+        assert!(pc.stop_hooks.is_none());
+    }
+
+    #[test]
+    fn test_project_config_deserialize_partial() {
+        let toml_str = r#"
+            rm_block = false
+            hook_timeout = 30
+        "#;
+        let pc: ProjectConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(pc.rm_block, Some(false));
+        assert_eq!(pc.hook_timeout, Some(30));
+        assert!(pc.kill_block.is_none());
+        assert!(pc.custom_filters.is_none());
+    }
+
+    #[test]
+    fn test_project_config_deserialize_with_stop_hooks() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["pnpm exec tsc --noEmit"]
+            condition = { file_exists = "tsconfig.json" }
+        "#;
+        let pc: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let hooks = pc.stop_hooks.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].commands, vec!["pnpm exec tsc --noEmit"]);
+    }
+
+    // === merge_project tests ===
+
+    #[test]
+    fn test_merge_project_none_keeps_global() {
+        let mut config = Config {
+            rm_block: true,
+            hook_timeout: 120,
+            ..Config::default()
+        };
+
+        let project = ProjectConfig::default(); // all None
+        config.merge_project(&project);
+
+        assert!(config.rm_block);
+        assert_eq!(config.hook_timeout, 120);
+    }
+
+    #[test]
+    fn test_merge_project_overrides_scalar() {
+        let mut config = Config::default();
+        assert!(config.rm_block); // default true
+
+        let project = ProjectConfig {
+            rm_block: Some(false),
+            hook_timeout: Some(30),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert!(!config.rm_block);
+        assert_eq!(config.hook_timeout, 30);
+    }
+
+    #[test]
+    fn test_merge_project_overrides_custom_filters() {
+        let mut config = Config::default();
+        config.custom_filters.push(CustomFilter {
+            command: "npm".to_string(),
+            args: vec![],
+            message: "global".to_string(),
+        });
+
+        let project = ProjectConfig {
+            custom_filters: Some(vec![CustomFilter {
+                command: "yarn".to_string(),
+                args: vec![],
+                message: "project".to_string(),
+            }]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        // custom_filters は上書き（グローバルが消える）
+        assert_eq!(config.custom_filters.len(), 1);
+        assert_eq!(config.custom_filters[0].command, "yarn");
+    }
+
+    #[test]
+    fn test_merge_project_empty_vec_clears_custom_filters() {
+        let mut config = Config::default();
+        config.custom_filters.push(CustomFilter {
+            command: "npm".to_string(),
+            args: vec![],
+            message: "msg".to_string(),
+        });
+
+        let project = ProjectConfig {
+            custom_filters: Some(vec![]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        // Some(vec![]) = 明示的に空で上書き
+        assert!(config.custom_filters.is_empty());
+    }
+
+    #[test]
+    fn test_merge_project_stop_hooks_extend() {
+        let mut config = Config::default();
+        config.stop_hooks.push(StopHook {
+            commands: vec!["global-cmd".to_string()],
+            condition: None,
+        });
+
+        let project = ProjectConfig {
+            stop_hooks: Some(vec![StopHook {
+                commands: vec!["project-cmd".to_string()],
+                condition: None,
+            }]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        // stop_hooks はマージ（両方残る）
+        assert_eq!(config.stop_hooks.len(), 2);
+        assert_eq!(config.stop_hooks[0].commands, vec!["global-cmd"]);
+        assert_eq!(config.stop_hooks[1].commands, vec!["project-cmd"]);
+    }
+
+    #[test]
+    fn test_merge_project_overrides_extension_hooks() {
+        let mut config = Config::default();
+        config
+            .extension_hooks
+            .insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
+
+        let project = ProjectConfig {
+            extension_hooks: Some({
+                let mut m = BTreeMap::new();
+                m.insert(".ts".to_string(), vec!["biome check {file}".to_string()]);
+                m
+            }),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        // extension_hooks は上書き
+        assert!(!config.extension_hooks.contains_key(".rs"));
+        assert!(config.extension_hooks.contains_key(".ts"));
+    }
+
+    #[test]
+    fn test_merge_project_overrides_block_messages() {
+        let mut config = Config::default();
+        assert!(config.rm_block_message.is_none());
+
+        let project = ProjectConfig {
+            rm_block_message: Some("Project rm message".to_string()),
+            kill_block_message: Some("Project kill message".to_string()),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(
+            config.rm_block_message,
+            Some("Project rm message".to_string())
+        );
+        assert_eq!(
+            config.kill_block_message,
+            Some("Project kill message".to_string())
+        );
     }
 }

@@ -39,6 +39,7 @@
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
+- 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
 ## Why claw-hooks?
@@ -483,11 +484,47 @@ condition = { file_exists = "package.json" }
 
 ### Per-Project Configuration
 
-claw-hooks uses a single global configuration file by default (`~/.config/claw-hooks/config.toml`). You can customize behavior per project in two ways:
+claw-hooks uses a global configuration file (`~/.config/claw-hooks/config.toml`) by default. You can customize behavior per project in three ways:
 
-**1. Project-local config with `--config`**
+**1. `.claw-hooks.toml` — Auto-detected project config (recommended)**
 
-Place a config file in your project and reference it from the agent's project-level settings:
+Place a `.claw-hooks.toml` in your project root. claw-hooks automatically detects it in the current working directory and merges it with the global config. No `--config` flag needed.
+
+```toml
+# my-project/.claw-hooks.toml
+
+# Override: disable dd blocking for this project
+dd_block = false
+
+# Override: project-specific extension hooks (replaces global)
+[extension_hooks]
+".rs" = ["rustfmt {file}"]
+".ts" = ["biome check {file}"]
+
+# Merge: additional stop hooks (added to global stop hooks)
+[[stop_hooks]]
+commands = ["pnpm exec tsc --noEmit"]
+condition = { file_exists = "tsconfig.json" }
+```
+
+**Merge rules:**
+
+| Field | Rule | Behavior |
+|-------|------|----------|
+| `extension_hooks` | **Replace** | Project definition completely replaces global |
+| `custom_filters` | **Replace** | Project definition completely replaces global |
+| `stop_hooks` | **Merge** | Both global and project hooks are executed |
+| `rm_block`, `kill_block`, `dd_block` | **Replace** | Project value takes precedence |
+| `*_block_message`, `hook_timeout` | **Replace** | Project value takes precedence |
+| `debug`, `log_path`, `nano_buddy` | **Global only** | Not allowed in project config |
+
+Omitted fields keep the global value. Setting an empty array (e.g., `custom_filters = []`) explicitly clears the global value.
+
+Validate with `claw-hooks check` — it reports if a project config was found and whether it's valid.
+
+**2. `--config` — Full config replacement**
+
+Use `--config` to specify a complete configuration file, replacing the global config entirely:
 
 ```toml
 # my-project/.claude/claw-hooks.toml
@@ -519,7 +556,7 @@ dd_block = false  # Allow dd in this project
 }
 ```
 
-**2. Automatic project detection with conditional stop hooks**
+**3. Conditional stop hooks — Automatic project detection**
 
 Stop hooks with `file_exists` conditions automatically adapt to the project type based on the working directory. A single global config can handle multiple project types:
 
@@ -537,7 +574,7 @@ commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 ```
 
-Both approaches can be combined: use the global config for shared rules (command blocking, common filters) and project-local configs for project-specific extension hooks or stop hooks.
+All three approaches can be combined: use the global config for shared rules, `.claw-hooks.toml` for project-specific overrides, and conditional stop hooks for automatic project-type detection.
 
 ### Conditional Stop Hooks (Project-wide Lint)
 

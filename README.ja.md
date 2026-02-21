@@ -39,6 +39,7 @@
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
+- 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
 ## なぜ claw-hooks？
@@ -483,11 +484,47 @@ condition = { file_exists = "package.json" }
 
 ### プロジェクトごとの設定
 
-claw-hooksはデフォルトでグローバル設定ファイル（`~/.config/claw-hooks/config.toml`）を使用します。プロジェクトごとに動作をカスタマイズする方法は2つあります:
+claw-hooksはデフォルトでグローバル設定ファイル（`~/.config/claw-hooks/config.toml`）を使用します。プロジェクトごとに動作をカスタマイズする方法は3つあります:
 
-**1. `--config` でプロジェクトローカルの設定を使用**
+**1. `.claw-hooks.toml` — 自動検出されるプロジェクト設定（推奨）**
 
-プロジェクト内に設定ファイルを配置し、エージェントのプロジェクト設定から参照します:
+プロジェクトルートに `.claw-hooks.toml` を配置するだけです。claw-hooksはカレントディレクトリ直下の `.claw-hooks.toml` を自動検出し、グローバル設定とマージします。`--config` フラグは不要です。
+
+```toml
+# my-project/.claw-hooks.toml
+
+# 上書き: このプロジェクトでは dd ブロックを無効化
+dd_block = false
+
+# 上書き: プロジェクト固有の拡張子フック（グローバルを完全置換）
+[extension_hooks]
+".rs" = ["rustfmt {file}"]
+".ts" = ["biome check {file}"]
+
+# マージ: 追加のStopフック（グローバルのStopフックに追加）
+[[stop_hooks]]
+commands = ["pnpm exec tsc --noEmit"]
+condition = { file_exists = "tsconfig.json" }
+```
+
+**マージルール:**
+
+| フィールド | ルール | 動作 |
+|-----------|--------|------|
+| `extension_hooks` | **上書き** | プロジェクトの定義がグローバルを完全置換 |
+| `custom_filters` | **上書き** | プロジェクトの定義がグローバルを完全置換 |
+| `stop_hooks` | **マージ** | グローバルとプロジェクトの両方が実行される |
+| `rm_block`, `kill_block`, `dd_block` | **上書き** | プロジェクトの値が優先 |
+| `*_block_message`, `hook_timeout` | **上書き** | プロジェクトの値が優先 |
+| `debug`, `log_path`, `nano_buddy` | **グローバル専用** | プロジェクト設定では使用不可 |
+
+省略されたフィールドはグローバルの値を維持します。空の配列（例: `custom_filters = []`）を設定すると、グローバルの値を明示的にクリアします。
+
+`claw-hooks check` で検証できます — プロジェクト設定が見つかったかどうかと、その有効性を報告します。
+
+**2. `--config` — 設定ファイルの完全置換**
+
+`--config` を使用して完全な設定ファイルを指定し、グローバル設定を完全に置き換えます:
 
 ```toml
 # my-project/.claude/claw-hooks.toml
@@ -519,7 +556,7 @@ dd_block = false  # このプロジェクトでは dd を許可
 }
 ```
 
-**2. 条件付きStopフックによるプロジェクト自動検出**
+**3. 条件付きStopフック — プロジェクト自動検出**
 
 `file_exists` 条件付きのStopフックは、作業ディレクトリに基づいてプロジェクトタイプを自動判定します。単一のグローバル設定で複数のプロジェクトタイプに対応できます:
 
@@ -537,7 +574,7 @@ commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
 ```
 
-両方のアプローチを組み合わせることも可能です。グローバル設定で共通ルール（コマンドブロック、共通フィルター）を定義し、プロジェクトローカル設定でプロジェクト固有の拡張子フックやStopフックを設定できます。
+3つのアプローチはすべて組み合わせ可能です。グローバル設定で共通ルールを定義し、`.claw-hooks.toml` でプロジェクト固有の上書きを行い、条件付きStopフックでプロジェクトタイプの自動検出を活用できます。
 
 ### 条件付きStopフック（プロジェクト全体Lint）
 

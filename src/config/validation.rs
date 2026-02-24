@@ -59,15 +59,40 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
             bail!("extension_hooks['{}']: commands cannot be empty", ext);
         }
 
-        // SECURITY: Ensure all commands contain {file} placeholder
+        // SECURITY: Ensure all commands contain exactly one {file} placeholder
         // This is required for safe argument handling
         for (j, cmd) in commands.iter().enumerate() {
             if cmd.is_empty() {
                 bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
             }
-            if !cmd.contains("{file}") {
+            let tokens = crate::domain::parse_shell_tokens(cmd);
+            if tokens.is_empty() {
+                bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
+            }
+
+            if tokens[0].contains("{file}") {
+                bail!(
+                    "extension_hooks['{}']: command[{}] cannot use {{file}} as executable",
+                    ext,
+                    j
+                );
+            }
+
+            let placeholder_count: usize = tokens
+                .iter()
+                .skip(1)
+                .map(|token| token.matches("{file}").count())
+                .sum();
+            if placeholder_count == 0 {
                 bail!(
                     "extension_hooks['{}']: command[{}] must contain {{file}} placeholder",
+                    ext,
+                    j
+                );
+            }
+            if placeholder_count != 1 {
+                bail!(
+                    "extension_hooks['{}']: command[{}] must contain exactly one {{file}} placeholder",
                     ext,
                     j
                 );
@@ -187,6 +212,24 @@ mod tests {
         let mut config = default_config();
         let mut hooks = BTreeMap::new();
         hooks.insert(".rs".to_string(), vec!["rustfmt".to_string()]);
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_extension_hook_multiple_placeholders() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["tool {file} {file}".to_string()]);
+        config.extension_hooks = hooks;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_extension_hook_placeholder_as_program() {
+        let mut config = default_config();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["{file} --write".to_string()]);
         config.extension_hooks = hooks;
         assert!(validate(&config).is_err());
     }
@@ -372,6 +415,23 @@ mod tests {
     fn test_validate_extension_hooks_missing_dot() {
         let mut hooks = BTreeMap::new();
         hooks.insert("rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        assert!(validate_extension_hooks(&hooks).is_err());
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_rejects_multiple_placeholders() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".rs".to_string(),
+            vec!["tool --in={file}:{file}".to_string()],
+        );
+        assert!(validate_extension_hooks(&hooks).is_err());
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_rejects_placeholder_as_program() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".rs".to_string(), vec!["{file} --flag".to_string()]);
         assert!(validate_extension_hooks(&hooks).is_err());
     }
 

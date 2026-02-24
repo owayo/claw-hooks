@@ -211,6 +211,8 @@ debug = false
 
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified
+# Each command template must contain exactly one {file}
+# File paths containing ../, <, or > are blocked for safety
 # [extension_hooks]
 # ".css" = ["biome format --write {file}", "biome lint --write {file}"]
 # ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]

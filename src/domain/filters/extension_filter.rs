@@ -1,7 +1,7 @@
 //! Extension-based hook filter implementation.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 use tracing::{debug, info, warn};
 
@@ -70,8 +70,11 @@ impl ExtensionHookFilter {
     /// Validate file path for security issues.
     /// Returns Ok(()) if path is safe, Err with message if dangerous.
     fn validate_file_path(file_path: &str) -> Result<(), String> {
-        // Prevent path traversal
-        if file_path.contains("..") {
+        // Prevent parent directory traversal segments like ../ or /a/../b
+        if Path::new(file_path)
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
             return Err("Path traversal detected".to_string());
         }
 
@@ -83,7 +86,7 @@ impl ExtensionHookFilter {
 
         // Prevent shell metacharacters that could cause injection
         // Note: We don't use shell, but some tools might interpret these
-        const DANGEROUS_CHARS: &[char] = &['`', '$', '|', '&', ';', '\n', '\r', '\0'];
+        const DANGEROUS_CHARS: &[char] = &['`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\0'];
         for c in DANGEROUS_CHARS {
             if file_path.contains(*c) {
                 return Err(format!("Path contains dangerous character: {:?}", c));
@@ -102,18 +105,26 @@ impl ExtensionHookFilter {
         }
 
         let program = parts[0].clone();
+        if program.contains("{file}") {
+            return Err("Command template cannot use {file} as executable".to_string());
+        }
+
         let mut args_before = Vec::new();
         let mut args_after = Vec::new();
         let mut found_placeholder = false;
+        let mut placeholder_count = 0usize;
         let mut inline_template: Option<String> = None;
 
         for part in parts.iter().skip(1) {
             if *part == "{file}" {
                 // Standalone {file} placeholder
                 found_placeholder = true;
+                placeholder_count += 1;
             } else if part.contains("{file}") {
                 // Inline placeholder like --file={file}
                 found_placeholder = true;
+                let count = part.matches("{file}").count();
+                placeholder_count += count;
                 inline_template = Some(part.clone());
             } else if found_placeholder {
                 args_after.push(part.clone());
@@ -122,8 +133,11 @@ impl ExtensionHookFilter {
             }
         }
 
-        if !found_placeholder {
+        if !found_placeholder || placeholder_count == 0 {
             return Err("Command template must contain {file} placeholder".to_string());
+        }
+        if placeholder_count != 1 {
+            return Err("Command template must contain exactly one {file} placeholder".to_string());
         }
 
         Ok(ParsedCommand {
@@ -570,6 +584,12 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_file_path_accepts_double_dot_in_filename() {
+        assert!(ExtensionHookFilter::validate_file_path("src/foo..bar.rs").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("/tmp/a..b.txt").is_ok());
+    }
+
+    #[test]
     fn test_validate_file_path_rejects_dash_prefix() {
         assert!(ExtensionHookFilter::validate_file_path("-rf").is_err());
         assert!(ExtensionHookFilter::validate_file_path("--help").is_err());
@@ -582,6 +602,8 @@ mod tests {
         assert!(ExtensionHookFilter::validate_file_path("file$HOME").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file|pipe").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file&bg").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file>out").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file<input").is_err());
     }
 
     #[test]
@@ -616,6 +638,17 @@ mod tests {
     fn test_parse_command_template_missing_placeholder_is_error() {
         assert!(ExtensionHookFilter::parse_command_template("gofmt -w").is_err());
         assert!(ExtensionHookFilter::parse_command_template("rustfmt").is_err());
+    }
+
+    #[test]
+    fn test_parse_command_template_multiple_placeholders_is_error() {
+        assert!(ExtensionHookFilter::parse_command_template("tool {file} {file}").is_err());
+        assert!(ExtensionHookFilter::parse_command_template("tool --in={file}:{file}").is_err());
+    }
+
+    #[test]
+    fn test_parse_command_template_placeholder_as_program_is_error() {
+        assert!(ExtensionHookFilter::parse_command_template("{file} --flag").is_err());
     }
 
     #[test]

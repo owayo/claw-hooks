@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{run_with_timeout, spawn_piped_with_env};
+use crate::domain::command::{run_with_timeout_tracked, spawn_piped_with_env, TimedOutput};
 use crate::domain::{Decision, HookEvent, HookInput};
 
 /// Environment variable to prevent recursive stop hook execution across processes.
@@ -39,11 +39,11 @@ impl StopHookFilter {
     /// Uses shell-aware tokenizer to properly handle quoted arguments.
     /// Sets `CLAW_HOOKS_STOP_ACTIVE=1` on the child process to prevent recursive loops.
     /// Optionally sets `CLAW_HOOKS_AGENT_MESSAGE` with the agent's last message.
-    fn execute_command(
+    fn execute_command_tracked(
         command: &str,
         timeout_secs: u64,
         agent_message: Option<&str>,
-    ) -> Result<Output, String> {
+    ) -> Result<TimedOutput, String> {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             return Err("Empty command".to_string());
@@ -62,7 +62,7 @@ impl StopHookFilter {
         let start = std::time::Instant::now();
         let child = spawn_piped_with_env(program, args, &envs)
             .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
-        let result = run_with_timeout(child, timeout_secs, command);
+        let result = run_with_timeout_tracked(child, timeout_secs, command);
         let elapsed = start.elapsed();
         info!(
             "⏰️ Stop hook [{}] completed in {:.2}s",
@@ -70,6 +70,16 @@ impl StopHookFilter {
             elapsed.as_secs_f64()
         );
         result
+    }
+
+    /// Execute a single stop hook command and return captured process output.
+    #[cfg(test)]
+    fn execute_command(
+        command: &str,
+        timeout_secs: u64,
+        agent_message: Option<&str>,
+    ) -> Result<Output, String> {
+        Self::execute_command_tracked(command, timeout_secs, agent_message).map(|r| r.output)
     }
 
     /// Log stdout/stderr output from a stop hook command.
@@ -172,13 +182,17 @@ impl Filter for StopHookFilter {
             .map(|command| {
                 let agent_msg = agent_message.clone();
                 std::thread::spawn(move || {
-                    match Self::execute_command(&command, timeout_secs, agent_msg.as_deref()) {
-                        Ok(output) => {
-                            Self::log_output(&command, &output);
-                            if !output.status.success() {
+                    match Self::execute_command_tracked(
+                        &command,
+                        timeout_secs,
+                        agent_msg.as_deref(),
+                    ) {
+                        Ok(result) => {
+                            Self::log_output(&command, &result.output);
+                            if !result.output.status.success() && !result.timed_out {
                                 warn!(
                                     "⚠️ Stop hook command failed (exit {}): {}",
-                                    output.status, command
+                                    result.output.status, command
                                 );
                             }
                         }
@@ -197,13 +211,17 @@ impl Filter for StopHookFilter {
             .map(|command| {
                 let agent_msg = agent_message.clone();
                 std::thread::spawn(move || -> Option<String> {
-                    match Self::execute_command(&command, timeout_secs, agent_msg.as_deref()) {
-                        Ok(output) => {
-                            Self::log_output(&command, &output);
-                            if output.status.success() {
+                    match Self::execute_command_tracked(
+                        &command,
+                        timeout_secs,
+                        agent_msg.as_deref(),
+                    ) {
+                        Ok(result) => {
+                            Self::log_output(&command, &result.output);
+                            if result.output.status.success() || result.timed_out {
                                 None
                             } else {
-                                Some(Self::build_reason(&command, &output))
+                                Some(Self::build_reason(&command, &result.output))
                             }
                         }
                         Err(e) => Some(e),
@@ -491,6 +509,32 @@ mod tests {
     }
 
     #[test]
+    fn test_conditional_hook_fake_timeout_message_with_exit_124_blocks() {
+        use crate::config::HookCondition;
+        let hooks = vec![StopHook {
+            commands: vec![
+                "sh -c 'echo \"[Command timed out after 2s: fake]\" >&2; exit 124'".to_string(),
+            ],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("timed out after 2s: fake"),
+                    "Expected fake timeout stderr in message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision for fake timeout output"),
+        }
+    }
+
+    #[test]
     fn test_conditional_hook_command_not_found_blocks() {
         use crate::config::HookCondition;
         let hooks = vec![StopHook {
@@ -711,16 +755,14 @@ mod tests {
     fn test_execute_command_timeout_kills_process() {
         // sleep 10 should be killed after 2 second timeout
         let start = std::time::Instant::now();
-        let result = StopHookFilter::execute_command("sleep 10", 2, None);
+        let result = StopHookFilter::execute_command_tracked("sleep 10", 2, None);
         let elapsed = start.elapsed();
 
-        // Timeout is treated as successful completion
+        // Timeout should return explicit timeout output
         assert!(result.is_ok(), "Timeout should return Ok");
-        let output = result.unwrap();
-        assert!(
-            output.status.success(),
-            "Timeout should be treated as success"
-        );
+        let result = result.unwrap();
+        assert!(result.timed_out, "Output should indicate timeout result");
+        let output = result.output;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("timed out"),
@@ -793,11 +835,16 @@ mod tests {
     #[test]
     fn test_execute_command_timeout_returns_timeout_notice() {
         // Command that outputs then hangs: timeout should return Ok with notice
-        let result =
-            StopHookFilter::execute_command("sh -c 'echo before-timeout; sleep 30'", 2, None);
+        let result = StopHookFilter::execute_command_tracked(
+            "sh -c 'echo before-timeout; sleep 30'",
+            2,
+            None,
+        );
         // Timeout is treated as Ok
         assert!(result.is_ok(), "Timeout should return Ok");
-        let output = result.unwrap();
+        let result = result.unwrap();
+        assert!(result.timed_out, "Expected tracked timeout output");
+        let output = result.output;
         // stdout is empty on timeout (reader threads are not joined to avoid blocking)
         assert!(
             output.stdout.is_empty(),
@@ -875,8 +922,9 @@ mod tests {
 
         // Command: sleep 10 then create marker. If killed properly, marker won't exist
         let cmd = format!("sh -c 'sleep 10; echo done > {}'", marker_path);
-        let result = StopHookFilter::execute_command(&cmd, 2, None);
+        let result = StopHookFilter::execute_command_tracked(&cmd, 2, None);
         assert!(result.is_ok(), "Timeout should return Ok");
+        assert!(result.unwrap().timed_out, "Expected timeout kill");
 
         // Give a moment for any zombie/orphan cleanup
         std::thread::sleep(std::time::Duration::from_millis(500));

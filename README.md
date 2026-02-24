@@ -178,6 +178,11 @@ rm_block_message = "🚫 Use safe-rm instead"
 ".tsx" = ["biome check {file}"]
 ```
 
+Rules:
+- Each extension hook command template must contain exactly one `{file}` placeholder.
+- Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
+- Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
+
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
@@ -446,6 +451,9 @@ message = "Ask the user to run this command manually"
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
 # Output (stdout/stderr) is passed to AI agent as additionalContext (Claude Code only)
+# Each command template must contain exactly one {file}
+# Parent-directory traversal paths (../) are rejected for safety
+# Shell redirection metacharacters (<, >) in file paths are rejected for safety
 [extension_hooks]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]
 ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
@@ -579,6 +587,7 @@ All three approaches can be combined: use the global config for shared rules, `.
 ### Conditional Stop Hooks (Project-wide Lint)
 
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
+**Timeout handling:** When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
 
 **Condition fields** (AND logic — all specified conditions must be true):
 

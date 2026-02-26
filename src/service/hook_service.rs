@@ -371,4 +371,91 @@ mod tests {
         let decision = service.process(&input);
         assert!(matches!(decision, Decision::Block { .. }));
     }
+
+    #[test]
+    fn test_process_with_custom_filter() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "yarn".to_string(),
+            args: vec![],
+            message: "Use pnpm instead".to_string(),
+        });
+        let service = HookService::new(config, Format::Claude, false);
+
+        let input = make_bash_input("yarn install");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_custom_filter_allows_non_matching() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "yarn".to_string(),
+            args: vec![],
+            message: "Use pnpm instead".to_string(),
+        });
+        let service = HookService::new(config, Format::Claude, false);
+
+        let input = make_bash_input("pnpm install");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_with_disabled_rm_block() {
+        let config = Config {
+            rm_block: false,
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+        let input = make_bash_input("rm file.txt");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_after_file_edit_non_write_tool_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Grep".to_string(),
+            tool_input: ToolInput::Other(serde_json::json!({"pattern": "test"})),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_after_file_edit_edit_tool_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Edit".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: Some("new content".to_string()),
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_after_file_edit_multi_edit_tool_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
 }

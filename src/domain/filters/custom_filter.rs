@@ -402,4 +402,97 @@ mod tests {
         assert!(filter.matches("bash -c 'npm install'"));
         assert!(filter.matches("sh -c \"npm install\""));
     }
+
+    // === strip_quoted_content edge cases ===
+
+    #[test]
+    fn test_strip_quoted_content_nested_quotes() {
+        // Single quotes inside double quotes: inner content stripped
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo "it's fine""#);
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_escaped_chars() {
+        // \" is an escaped quote, not a real quote, so "hello" remains visible
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo \"hello\""#);
+        assert_eq!(result, "echo hello");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_empty_quotes() {
+        let result = CustomCommandFilter::strip_quoted_content("echo '' \"\"");
+        assert_eq!(result, "echo  ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_no_quotes() {
+        let result = CustomCommandFilter::strip_quoted_content("ls -la /tmp");
+        assert_eq!(result, "ls -la /tmp");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_backslash_at_end() {
+        // Backslash at end of string (no char to escape)
+        let result = CustomCommandFilter::strip_quoted_content("echo \\");
+        assert_eq!(result, "echo ");
+    }
+
+    // === Priority and Filter trait tests ===
+
+    #[test]
+    fn test_custom_filter_priority() {
+        let filter = CustomCommandFilter::new("test", "msg".to_string()).unwrap();
+        assert_eq!(filter.priority(), 50);
+    }
+
+    #[test]
+    fn test_custom_filter_does_not_apply_to_non_bash_tool() {
+        let filter = CustomCommandFilter::new("npm", "msg".to_string()).unwrap();
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/npm.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_custom_filter_does_not_apply_to_after_file_edit() {
+        let filter = CustomCommandFilter::new("npm", "msg".to_string()).unwrap();
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "npm install".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_custom_filter_execute_returns_block_with_message() {
+        let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "npm install".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        match filter.execute(&input) {
+            Decision::Block { message } => {
+                assert_eq!(message, "Use pnpm instead");
+            }
+            _ => panic!("Expected Block"),
+        }
+    }
 }

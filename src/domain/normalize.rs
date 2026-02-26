@@ -311,4 +311,73 @@ mod tests {
             "src/App.tsx:10:5 error\ntests/index.test.tsx:20:3 warning"
         );
     }
+
+    // === Additional edge case tests ===
+
+    #[test]
+    fn test_common_directory_prefix_empty_input() {
+        let paths: Vec<&str> = vec![];
+        assert_eq!(common_directory_prefix(&paths), "");
+    }
+
+    #[test]
+    fn test_common_directory_prefix_single_path() {
+        let paths = vec!["/a/b/c/file.rs"];
+        // Single path: last_slash tracks up to last '/' before end of iteration
+        assert_eq!(common_directory_prefix(&paths), "/a/b/c/");
+    }
+
+    #[test]
+    fn test_common_directory_prefix_identical_paths() {
+        let paths = vec!["/a/b/c/file.rs", "/a/b/c/file.rs"];
+        assert_eq!(common_directory_prefix(&paths), "/a/b/c/");
+    }
+
+    #[test]
+    fn test_common_directory_prefix_root_only() {
+        let paths = vec!["/foo", "/bar"];
+        assert_eq!(common_directory_prefix(&paths), "/");
+    }
+
+    #[test]
+    fn test_extract_absolute_paths_no_paths() {
+        let paths = extract_absolute_paths("no paths here");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_extract_absolute_paths_shallow_path_excluded() {
+        // Path with only 1 slash is excluded (needs >= 2)
+        let paths = extract_absolute_paths("/file:10");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_multiple_sequences() {
+        let input = "\x1b[1m\x1b[31merror\x1b[0m: \x1b[33mwarning\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "error: warning");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_incomplete_sequence() {
+        // ESC without '[' following
+        let input = "text\x1bXmore";
+        let result = strip_ansi_codes(input);
+        // ESC consumed, 'X' is not a CSI, so 'X' is lost and 'more' remains
+        assert_eq!(result, "textmore");
+    }
+
+    #[test]
+    fn test_normalize_only_blank_lines() {
+        let input = "\n\n\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_normalize_leading_blank_lines_suppressed() {
+        let input = "\n\nerror: foo";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "error: foo");
+    }
 }

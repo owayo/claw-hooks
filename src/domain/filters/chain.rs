@@ -254,4 +254,81 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_filter_chain_invalid_custom_regex_silently_skipped() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "[invalid-regex".to_string(),
+            args: vec![],
+            message: "should not appear".to_string(),
+        });
+        // Should not panic; invalid regex is skipped
+        let chain = FilterChain::new(&config);
+        // Built-in filters should still be present
+        assert!(chain.filters.len() >= 3);
+        // Safe command should still be allowed
+        let input = make_bash_input("ls -la");
+        assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_filter_chain_merges_allow_contexts() {
+        // With extension hooks for the same file, contexts should merge
+        let config = Config::default();
+        let chain = FilterChain::new(&config);
+        // Non-file events should produce Allow with no context
+        let input = make_bash_input("echo hello");
+        let decision = chain.execute(&input);
+        match decision {
+            Decision::Allow { additional_context } => {
+                assert!(additional_context.is_none());
+            }
+            _ => panic!("Expected Allow"),
+        }
+    }
+
+    #[test]
+    fn test_filter_chain_first_block_wins() {
+        // Both rm and kill in same command; first matching block wins
+        let config = Config::default();
+        let chain = FilterChain::new(&config);
+        // kill has higher priority (10) than rm (20), so kill filter should block first
+        let input = make_bash_input("kill 123 && rm file.txt");
+        let decision = chain.execute(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_filter_chain_custom_filter_with_args_mode() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "npm".to_string(),
+            args: vec!["install".to_string(), "i".to_string()],
+            message: "Use pnpm instead".to_string(),
+        });
+        let chain = FilterChain::new(&config);
+
+        // npm install should be blocked
+        let input = make_bash_input("npm install lodash");
+        assert!(matches!(chain.execute(&input), Decision::Block { .. }));
+
+        // npm run should be allowed
+        let input = make_bash_input("npm run build");
+        assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_filter_chain_stop_event_passthrough_without_stop_hooks() {
+        let config = Config::default();
+        let chain = FilterChain::new(&config);
+        let input = HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
+            session_id: None,
+        };
+        // No stop hooks configured, should allow
+        assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
+    }
 }

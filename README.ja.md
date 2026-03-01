@@ -594,7 +594,7 @@ condition = { file_exists = "tsconfig.json" }
 | フィールド | 説明 |
 |-----------|------|
 | `file_exists` | 作業ディレクトリにこのファイルが存在する場合のみ実行 |
-| `command_exists` | このコマンドがPATH上に存在する場合のみ実行 |
+| `command_exists` | このコマンドがPATH上に存在する場合のみ実行（Windows の `PATHEXT` を考慮。`./tool` や `/usr/bin/tool` のような明示パスも判定可能） |
 
 ```toml
 # Rust: Cargo.toml がある場合に clippy と fmt check を実行

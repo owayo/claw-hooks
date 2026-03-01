@@ -164,19 +164,65 @@ impl ShellParser {
                 for pipe_part in part.split('|') {
                     let cmd = pipe_part.trim();
                     if !cmd.is_empty() {
-                        // Extract full command string (not just command name)
-                        let (cmd_name, args) = self.extract_command_with_args_fallback(cmd);
-                        if !cmd_name.is_empty() {
-                            let full_cmd = if args.is_empty() {
-                                cmd_name
-                            } else {
-                                format!("{} {}", cmd_name, args.join(" "))
-                            };
-                            command_strings.push(full_cmd);
-                        }
+                        command_strings
+                            .extend(self.extract_command_strings_from_segment_fallback(cmd));
                     }
                 }
             }
+        }
+
+        command_strings
+    }
+
+    /// Extract full command strings from a single segment (fallback).
+    fn extract_command_strings_from_segment_fallback(&self, segment: &str) -> Vec<String> {
+        let mut command_strings = Vec::new();
+        let trimmed = segment.trim();
+
+        if trimmed.is_empty() {
+            return command_strings;
+        }
+
+        if let Some(inner) = Self::unwrap_subshell(trimmed) {
+            return self.extract_command_strings_fallback(inner);
+        }
+
+        let tokens = parse_shell_tokens(trimmed);
+        let Some((cmd_name, args)) = Self::parse_effective_command(&tokens) else {
+            return command_strings;
+        };
+
+        let full_cmd = if args.is_empty() {
+            cmd_name.clone()
+        } else {
+            format!("{} {}", cmd_name, args.join(" "))
+        };
+        command_strings.push(full_cmd);
+
+        // Handle shell -c "command"
+        if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
+                command_strings.extend(self.extract_command_strings_fallback(&shell_cmd));
+            }
+        }
+
+        // Handle xargs target command
+        if cmd_name == "xargs" {
+            let xargs_args: Vec<_> = args.iter().filter(|a| !a.starts_with('-')).collect();
+            if !xargs_args.is_empty() {
+                command_strings.push(
+                    xargs_args
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+        }
+
+        // Handle command substitutions in arguments.
+        for nested in Self::extract_nested_command_fragments(trimmed) {
+            command_strings.extend(self.extract_command_strings_fallback(&nested));
         }
 
         command_strings
@@ -293,7 +339,6 @@ impl ShellParser {
     }
 
     /// Extract command from shell -c arguments
-    #[cfg(feature = "ast-parser")]
     fn extract_shell_c_from_args(args: &[String]) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
             if arg == "-c" && i + 1 < args.len() {
@@ -412,6 +457,233 @@ impl ShellParser {
         Self::FLAGS_WITH_ARGS.contains(&flag)
     }
 
+    /// Returns true for shell-style env assignments (e.g., KEY=value).
+    fn is_env_assignment_token(token: &str) -> bool {
+        let Some((name, _value)) = token.split_once('=') else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first == '_' || first.is_ascii_alphabetic()) {
+            return false;
+        }
+        chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    }
+
+    /// Parse the effective command from a tokenized segment,
+    /// skipping leading environment assignments.
+    fn parse_effective_command(tokens: &[String]) -> Option<(String, Vec<String>)> {
+        if tokens.is_empty() {
+            return None;
+        }
+
+        let start = tokens
+            .iter()
+            .position(|token| !Self::is_env_assignment_token(token))?;
+
+        Some((tokens[start].clone(), tokens[start + 1..].to_vec()))
+    }
+
+    /// If the segment is exactly wrapped by a single top-level `( ... )`, return inner text.
+    fn unwrap_subshell(segment: &str) -> Option<&str> {
+        let trimmed = segment.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return None;
+        }
+
+        let last_index = trimmed.char_indices().last()?.0;
+        let mut depth = 0usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escape = false;
+
+        for (idx, ch) in trimmed.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+
+            if ch == '\\' && !in_single {
+                escape = true;
+                continue;
+            }
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if in_single || in_double {
+                continue;
+            }
+
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    depth -= 1;
+                    // Outer-most pair must close at the final character.
+                    if depth == 0 && idx != last_index {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if depth == 0 {
+            Some(&trimmed[1..trimmed.len() - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Extract nested command fragments from command substitutions ($(...), `...`).
+    fn extract_nested_command_fragments(segment: &str) -> Vec<String> {
+        let chars: Vec<char> = segment.chars().collect();
+        let len = chars.len();
+        let mut fragments = Vec::new();
+        let mut i = 0usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escape = false;
+
+        while i < len {
+            let ch = chars[i];
+
+            if escape {
+                escape = false;
+                i += 1;
+                continue;
+            }
+
+            if ch == '\\' && !in_single {
+                escape = true;
+                i += 1;
+                continue;
+            }
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                i += 1;
+                continue;
+            }
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                i += 1;
+                continue;
+            }
+
+            // $(...)
+            if !in_single && ch == '$' && i + 1 < len && chars[i + 1] == '(' {
+                let start = i + 2;
+                let mut j = start;
+                let mut depth = 1usize;
+                let mut sub_in_single = false;
+                let mut sub_in_double = false;
+                let mut sub_escape = false;
+
+                while j < len {
+                    let sub = chars[j];
+
+                    if sub_escape {
+                        sub_escape = false;
+                        j += 1;
+                        continue;
+                    }
+
+                    if sub == '\\' && !sub_in_single {
+                        sub_escape = true;
+                        j += 1;
+                        continue;
+                    }
+                    if sub == '\'' && !sub_in_double {
+                        sub_in_single = !sub_in_single;
+                        j += 1;
+                        continue;
+                    }
+                    if sub == '"' && !sub_in_single {
+                        sub_in_double = !sub_in_double;
+                        j += 1;
+                        continue;
+                    }
+                    if sub_in_single || sub_in_double {
+                        j += 1;
+                        continue;
+                    }
+
+                    if sub == '(' {
+                        depth += 1;
+                    } else if sub == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            let inner: String = chars[start..j].iter().collect();
+                            if !inner.trim().is_empty() {
+                                fragments.push(inner);
+                            }
+                            i = j + 1;
+                            break;
+                        }
+                    }
+
+                    j += 1;
+                }
+
+                if depth == 0 {
+                    continue;
+                }
+            }
+
+            // `...`
+            if !in_single && ch == '`' {
+                let start = i + 1;
+                let mut j = start;
+                let mut sub_escape = false;
+                let mut found = false;
+
+                while j < len {
+                    let sub = chars[j];
+                    if sub_escape {
+                        sub_escape = false;
+                        j += 1;
+                        continue;
+                    }
+                    if sub == '\\' {
+                        sub_escape = true;
+                        j += 1;
+                        continue;
+                    }
+                    if sub == '`' {
+                        let inner: String = chars[start..j].iter().collect();
+                        if !inner.trim().is_empty() {
+                            fragments.push(inner);
+                        }
+                        i = j + 1;
+                        found = true;
+                        break;
+                    }
+                    j += 1;
+                }
+
+                if found {
+                    continue;
+                }
+            }
+
+            i += 1;
+        }
+
+        fragments
+    }
+
     /// Fallback parser using string manipulation
     fn extract_commands_fallback(&self, command: &str) -> Vec<String> {
         let mut commands = Vec::new();
@@ -433,11 +705,20 @@ impl ShellParser {
     /// Extract commands from a single segment (fallback)
     fn extract_commands_from_segment_fallback(&self, segment: &str) -> Vec<String> {
         let mut commands = Vec::new();
-        let (cmd, args) = self.extract_command_with_args_fallback(segment);
+        let trimmed = segment.trim();
 
-        if cmd.is_empty() {
+        if trimmed.is_empty() {
             return commands;
         }
+
+        if let Some(inner) = Self::unwrap_subshell(trimmed) {
+            return self.extract_commands_fallback(inner);
+        }
+
+        let tokens = parse_shell_tokens(trimmed);
+        let Some((cmd, args)) = Self::parse_effective_command(&tokens) else {
+            return commands;
+        };
 
         commands.push(cmd.clone());
 
@@ -490,6 +771,11 @@ impl ShellParser {
             }
         }
 
+        // Handle command substitutions in arguments (e.g., echo $(rm -rf /tmp)).
+        for nested in Self::extract_nested_command_fragments(trimmed) {
+            commands.extend(self.extract_commands_fallback(&nested));
+        }
+
         commands
     }
 
@@ -497,24 +783,49 @@ impl ShellParser {
     fn split_by_logical_ops(s: &str) -> Vec<&str> {
         let mut result = Vec::new();
         let mut current_start = 0;
-        let chars: Vec<char> = s.chars().collect();
-        let len = chars.len();
-        let mut i = 0;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escape_next = false;
+        let mut paren_depth = 0usize;
+        let mut chars = s.char_indices().peekable();
 
-        while i < len {
-            if i + 1 < len {
-                let two_chars: String = chars[i..=i + 1].iter().collect();
-                if two_chars == "&&" || two_chars == "||" {
-                    let part = &s[current_start..i];
-                    if !part.trim().is_empty() {
-                        result.push(part.trim());
-                    }
-                    current_start = i + 2;
-                    i += 2;
-                    continue;
-                }
+        while let Some((idx, c)) = chars.next() {
+            if escape_next {
+                escape_next = false;
+                continue;
             }
-            i += 1;
+
+            match c {
+                '\\' if !in_single_quote => {
+                    escape_next = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                '(' if !in_single_quote && !in_double_quote => {
+                    paren_depth += 1;
+                }
+                ')' if !in_single_quote && !in_double_quote => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                }
+                '&' | '|' if !in_single_quote && !in_double_quote && paren_depth == 0 => {
+                    if let Some(&(next_idx, next_c)) = chars.peek() {
+                        if next_c == c {
+                            let part = &s[current_start..idx];
+                            if !part.trim().is_empty() {
+                                result.push(part.trim());
+                            }
+                            // Consume the second operator char and move start after it.
+                            let _ = chars.next();
+                            current_start = next_idx + next_c.len_utf8();
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         let remaining = &s[current_start..];
@@ -688,6 +999,27 @@ mod tests {
         let (cmd, args) = parser.extract_command_with_args("echo 'hello world'");
         assert_eq!(cmd, "echo");
         assert_eq!(args, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_extract_commands_with_env_assignment_prefix() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("NODE_ENV=prod npm install");
+        assert!(commands.contains(&"npm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_strings_with_bash_c_subshell() {
+        let mut parser = ShellParser::new();
+        let command_strings = parser.extract_command_strings("bash -c 'npm install'");
+        assert!(command_strings.iter().any(|s| s == "npm install"));
+    }
+
+    #[test]
+    fn test_extract_command_strings_from_command_substitution() {
+        let mut parser = ShellParser::new();
+        let command_strings = parser.extract_command_strings("echo $(npm install)");
+        assert!(command_strings.iter().any(|s| s == "npm install"));
     }
 
     // === Wrapper and subshell detection tests ===

@@ -594,7 +594,7 @@ Stop hooks with a `condition` field run lint/typecheck commands based on the pro
 | Field | Description |
 |-------|-------------|
 | `file_exists` | Run only when this file exists in the working directory |
-| `command_exists` | Run only when this command is available in PATH |
+| `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
 
 ```toml
 # Rust: run clippy and fmt check when Cargo.toml exists

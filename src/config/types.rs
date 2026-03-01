@@ -224,9 +224,61 @@ impl HookCondition {
 
     /// Check if a command exists in PATH.
     fn command_in_path(cmd: &str) -> bool {
-        std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file()))
-            .unwrap_or(false)
+        if cmd.is_empty() {
+            return false;
+        }
+
+        let command_path = Path::new(cmd);
+        // Explicit paths ("./tool", "/usr/bin/tool", "dir\\tool.exe") are checked directly.
+        if command_path.components().count() > 1 || command_path.is_absolute() {
+            return command_path.is_file();
+        }
+
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+
+        #[cfg(windows)]
+        {
+            // Windows resolves commands using PATHEXT when extension is omitted.
+            let has_extension = command_path.extension().is_some();
+            let pathext = std::env::var_os("PATHEXT")
+                .map(|v| {
+                    v.to_string_lossy()
+                        .split(';')
+                        .map(|ext| ext.trim().to_ascii_lowercase())
+                        .filter(|ext| !ext.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    vec![
+                        ".com".to_string(),
+                        ".exe".to_string(),
+                        ".bat".to_string(),
+                        ".cmd".to_string(),
+                    ]
+                });
+
+            for dir in std::env::split_paths(&path) {
+                let base = dir.join(cmd);
+                if base.is_file() {
+                    return true;
+                }
+                if !has_extension {
+                    for ext in &pathext {
+                        if dir.join(format!("{}{}", cmd, ext)).is_file() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        #[cfg(not(windows))]
+        {
+            std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
+        }
     }
 }
 

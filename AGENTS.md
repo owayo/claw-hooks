@@ -14,7 +14,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 ## Key Features
 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
-2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`)
+2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands
 3. **Custom Filters**: Regex-based and argument-based command filtering
 4. **Extension Hooks**: Auto-format/lint on file save with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
@@ -91,7 +91,7 @@ cargo run -- version     # Show version
 1. **Layered Architecture**: config → service → domain separation
 2. **Filter Chain Pattern**: Priority-based extensible filter pipeline
 3. **Adapter Pattern**: Convert agent-specific JSON to internal types
-4. **tree-sitter for AST**: Accurate shell command parsing with fallback string parser
+4. **tree-sitter for AST**: Accurate shell command parsing with robust fallback string parser for non-AST builds
 5. **Fail-Closed Security**: Block commands when input parsing fails
 
 ## Testing Guidelines

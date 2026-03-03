@@ -10,7 +10,7 @@ mod macos {
     const SUBAGENT_START_NOTIFICATION: &str = "owayo.nanobuddy.subagent.start";
     const SUBAGENT_STOP_NOTIFICATION: &str = "owayo.nanobuddy.subagent.stop";
 
-    extern "C" {
+    unsafe extern "C" {
         fn notify_register_check(name: *const i8, out_token: *mut c_int) -> u32;
         fn notify_set_state(token: c_int, state: u64) -> u32;
         fn notify_post(name: *const i8) -> u32;
@@ -20,7 +20,7 @@ mod macos {
     type CFNotificationCenterRef = *const std::ffi::c_void;
     type CFStringRef = *const std::ffi::c_void;
 
-    extern "C" {
+    unsafe extern "C" {
         fn CFNotificationCenterGetDistributedCenter() -> CFNotificationCenterRef;
         fn CFNotificationCenterPostNotification(
             center: CFNotificationCenterRef,
@@ -44,13 +44,15 @@ mod macos {
     /// Create a CFString from a Rust string slice. Returns null on failure.
     /// Caller must CFRelease non-null results.
     unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
-        CFStringCreateWithBytes(
-            std::ptr::null(),
-            s.as_ptr(),
-            s.len() as isize,
-            K_CF_STRING_ENCODING_UTF8,
-            false,
-        )
+        unsafe {
+            CFStringCreateWithBytes(
+                std::ptr::null(),
+                s.as_ptr(),
+                s.len() as isize,
+                K_CF_STRING_ENCODING_UTF8,
+                false,
+            )
+        }
     }
 
     /// Post a DistributedNotification with the given name and object string.

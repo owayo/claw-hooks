@@ -1,8 +1,8 @@
 [package]
 name = "claw-hooks"
 version = "26.3.100"
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
+rust-version = "1.85"
 authors = ["owayo <yoheiowa@gmail.com>"]
 description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI"
 license = "MIT"

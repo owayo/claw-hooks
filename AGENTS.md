@@ -7,14 +7,14 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.75)
-- **Version**: 26.2.112
+- **Version**: 26.3.100
 - **Purpose**: Block dangerous commands, run formatters/linters on file save, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI
 
 ## Key Features
 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
-2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands
+2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands and wrapper options (e.g., `sudo -n`, `command rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
 4. **Extension Hooks**: Auto-format/lint on file save with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)

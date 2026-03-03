@@ -33,7 +33,7 @@
 - ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, bash -c, pipes)
+- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `command rm`, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
@@ -186,8 +186,8 @@ Rules:
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `cd /tmp && rm`, commands in pipes
-- ✅ Handles wrappers and subshells (sudo, bash -c, xargs)
+- ✅ Detects `sudo rm`, `sudo -n rm`, `command rm`, `cd /tmp && rm`, commands in pipes
+- ✅ Handles wrappers and subshells (sudo, command, bash -c, xargs)
 - ✅ Single binary, no Python/jq dependencies
 
 Configure once:

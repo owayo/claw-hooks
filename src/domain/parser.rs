@@ -6,9 +6,10 @@
 #[cfg(feature = "ast-parser")]
 use tree_sitter::{Node, Parser};
 
-/// Wrappers that execute another command
+/// 実コマンドを実行するラッパーコマンド
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
+    "command",
 ];
 
 /// Shells that can execute command strings via -c flag
@@ -228,23 +229,23 @@ impl ShellParser {
         command_strings
     }
 
-    /// Extract commands from AST node recursively
+    /// ASTノードを再帰的に走査してコマンドを抽出する
     #[cfg(feature = "ast-parser")]
     fn extract_commands_from_node(&mut self, node: Node, source: &str, commands: &mut Vec<String>) {
         match node.kind() {
             "command" | "simple_command" => {
-                // Find the command_name child
+                // command_name の子ノードを取得
                 if let Some(cmd_name) = self.get_command_name(node, source) {
                     if !cmd_name.is_empty() {
                         commands.push(cmd_name.clone());
                     }
 
-                    // Get arguments for further processing
+                    // 後続解析のため引数を取得
                     let args = self.get_command_arguments(node, source);
 
-                    // Handle command wrappers at AST level (sudo, env, etc.)
+                    // ASTレベルでラッパーコマンドを展開（sudo, env, command など）
                     if COMMAND_WRAPPERS.contains(&cmd_name.as_str()) {
-                        self.process_wrapper_args(&args, commands);
+                        self.process_wrapper_args(&cmd_name, &args, commands);
                     }
 
                     // Handle shell -c "command" at AST level
@@ -392,10 +393,10 @@ impl ShellParser {
         None
     }
 
-    /// Process wrapper arguments to find the actual command
-    /// Recursively handles nested wrappers (e.g., sudo bash -c 'rm')
+    /// ラッパー引数を処理して実行対象コマンドを見つける
+    /// 入れ子ラッパーも再帰的に処理する（例: sudo bash -c 'rm'）
     #[cfg(feature = "ast-parser")]
-    fn process_wrapper_args(&mut self, args: &[String], commands: &mut Vec<String>) {
+    fn process_wrapper_args(&mut self, wrapper: &str, args: &[String], commands: &mut Vec<String>) {
         let mut skip_next = false;
         for (i, arg) in args.iter().enumerate() {
             if skip_next {
@@ -403,23 +404,23 @@ impl ShellParser {
                 continue;
             }
             if arg.starts_with('-') {
-                if Self::flag_takes_arg(arg) {
+                if Self::wrapper_flag_takes_arg(wrapper, arg) {
                     skip_next = true;
                 }
                 continue;
             }
-            if arg.contains('=') {
+            if wrapper == "env" && Self::is_env_assignment_token(arg) {
                 continue;
             }
-            // Found the actual command
+            // 実行されるコマンドを検出
             if !commands.contains(arg) {
                 commands.push(arg.clone());
             }
 
-            // Get remaining arguments after this command
+            // このコマンド以降の残り引数
             let remaining_args: Vec<String> = args[i + 1..].to_vec();
 
-            // If the found command is a shell, check for -c argument
+            // shell -c の場合は内側のコマンドを抽出
             if SHELL_COMMANDS.contains(&arg.as_str()) {
                 if let Some(shell_cmd) = Self::extract_shell_c_from_args(&remaining_args) {
                     let nested = self.extract_commands(&shell_cmd);
@@ -431,30 +432,39 @@ impl ShellParser {
                 }
             }
 
-            // If the found command is also a wrapper, process its remaining args
+            // 次のコマンドもラッパーなら再帰的に処理
             if COMMAND_WRAPPERS.contains(&arg.as_str()) {
-                self.process_wrapper_args(&remaining_args, commands);
+                self.process_wrapper_args(arg, &remaining_args, commands);
             }
 
             break;
         }
     }
 
-    /// Flags that take an argument (value) for common wrappers
-    const FLAGS_WITH_ARGS: &[&str] = &[
-        // sudo flags
-        "-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U", // env flags
-        "-S", // timeout flags
-        "-k", "-s", // nice/ionice flags
-        "-n", "-c",
+    /// ラッパーごとに「値を取る」ことが確定している短縮フラグ
+    const SUDO_FLAGS_WITH_ARGS: &[&str] = &[
+        "-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U",
     ];
+    const ENV_FLAGS_WITH_ARGS: &[&str] = &["-u", "-C", "-S"];
+    const TIMEOUT_FLAGS_WITH_ARGS: &[&str] = &["-k", "-s"];
+    const NICE_FLAGS_WITH_ARGS: &[&str] = &["-n"];
+    const IONICE_FLAGS_WITH_ARGS: &[&str] = &["-c", "-n"];
+    const DOAS_FLAGS_WITH_ARGS: &[&str] = &["-u"];
 
-    /// Check if a flag takes an argument
-    fn flag_takes_arg(flag: &str) -> bool {
+    /// 指定ラッパー上で、フラグが値を取るかを判定する
+    fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
         if flag.contains('=') {
             return false;
         }
-        Self::FLAGS_WITH_ARGS.contains(&flag)
+        match wrapper {
+            "sudo" => Self::SUDO_FLAGS_WITH_ARGS.contains(&flag),
+            "env" => Self::ENV_FLAGS_WITH_ARGS.contains(&flag),
+            "timeout" => Self::TIMEOUT_FLAGS_WITH_ARGS.contains(&flag),
+            "nice" => Self::NICE_FLAGS_WITH_ARGS.contains(&flag),
+            "ionice" => Self::IONICE_FLAGS_WITH_ARGS.contains(&flag),
+            "doas" => Self::DOAS_FLAGS_WITH_ARGS.contains(&flag),
+            _ => false,
+        }
     }
 
     /// Returns true for shell-style env assignments (e.g., KEY=value).
@@ -722,7 +732,7 @@ impl ShellParser {
 
         commands.push(cmd.clone());
 
-        // Handle command wrappers
+        // ラッパーコマンドを展開
         if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
             let mut skip_next = false;
             for (i, arg) in args.iter().enumerate() {
@@ -731,12 +741,12 @@ impl ShellParser {
                     continue;
                 }
                 if arg.starts_with('-') {
-                    if Self::flag_takes_arg(arg) {
+                    if Self::wrapper_flag_takes_arg(&cmd, arg) {
                         skip_next = true;
                     }
                     continue;
                 }
-                if cmd == "env" && arg.contains('=') {
+                if cmd == "env" && Self::is_env_assignment_token(arg) {
                     continue;
                 }
                 commands.push(arg.clone());
@@ -1036,6 +1046,21 @@ mod tests {
     fn test_extract_sudo_with_flags() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("sudo -u root rm -rf /tmp/test");
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_sudo_with_non_interactive_flag() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sudo -n rm -rf /tmp/test");
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_command_wrapper() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("command rm -rf /tmp/test");
+        assert!(commands.contains(&"command".to_string()));
         assert!(commands.contains(&"rm".to_string()));
     }
 

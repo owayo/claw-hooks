@@ -978,7 +978,7 @@ fn test_gemini_empty_input_is_fail_closed() {
     );
 }
 
-// === Wrapper and Subshell Detection Tests ===
+// === ラッパー・サブシェル検出テスト ===
 
 #[test]
 fn test_block_sudo_rm() {
@@ -986,6 +986,32 @@ fn test_block_sudo_rm() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(exit_code, 2, "sudo rm should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_sudo_non_interactive_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo -n rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "sudo -n rm should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_command_wrapper_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"command rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "command rm should be blocked");
     assert!(
         stdout.contains(r#""decision":"block""#),
         "Output should indicate block: {}",

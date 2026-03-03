@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{run_with_timeout_tracked, spawn_piped_with_env, TimedOutput};
+use crate::domain::command::{TimedOutput, run_with_timeout_tracked, spawn_piped_with_env};
 use crate::domain::{Decision, HookEvent, HookInput};
 
 /// Environment variable to prevent recursive stop hook execution across processes.

@@ -867,7 +867,7 @@ Gemini CLIはブロックを含むすべての決定に対してexit code `0`を
 
 ### 前提条件
 
-- Rust 1.75+
+- Rust 1.85+
 - Cargo
 
 ### ビルド

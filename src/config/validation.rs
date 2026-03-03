@@ -1,6 +1,6 @@
 //! Configuration validation.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use regex::Regex;
 use std::collections::BTreeMap;
 

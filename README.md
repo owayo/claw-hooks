@@ -867,7 +867,7 @@ Gemini CLI expects exit code `0` for all decisions, including blocks. The `decis
 
 ### Prerequisites
 
-- Rust 1.75+
+- Rust 1.85+
 - Cargo
 
 ### Build

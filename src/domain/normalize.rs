@@ -226,8 +226,7 @@ mod tests {
     #[test]
     fn test_strip_common_path_prefix_multiple_files() {
         // Same directory → prefix includes /src/
-        let input =
-            "/Users/owa/GitHub/project/src/main.rs:10 error\n/Users/owa/GitHub/project/src/lib.rs:20 warning";
+        let input = "/Users/owa/GitHub/project/src/main.rs:10 error\n/Users/owa/GitHub/project/src/lib.rs:20 warning";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, "main.rs:10 error\nlib.rs:20 warning");
     }

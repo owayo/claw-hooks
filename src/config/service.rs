@@ -1,12 +1,12 @@
 //! Configuration service for loading and generating config files.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::types::{default_log_path_for_config_dir, ProjectConfig};
-use super::validation;
 use super::Config;
+use super::types::{ProjectConfig, default_log_path_for_config_dir};
+use super::validation;
 
 /// Project-level configuration file name.
 const PROJECT_CONFIG_NAME: &str = ".claw-hooks.toml";

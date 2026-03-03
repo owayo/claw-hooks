@@ -5,10 +5,10 @@ use logroller::{LogRollerBuilder, Rotation, RotationAge, TimeZone};
 use std::fs;
 use std::path::Path;
 use time::macros::format_description;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 

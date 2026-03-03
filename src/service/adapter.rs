@@ -5,12 +5,12 @@
 //! - Cursor
 //! - Windsurf (Cascade)
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::Format;
-use crate::domain::{normalize_lint_output, Decision, HookEvent, HookInput};
+use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output};
 
 /// Adapter for converting between format-specific I/O and internal types.
 pub struct FormatAdapter {

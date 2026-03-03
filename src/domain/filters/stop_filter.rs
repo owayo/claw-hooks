@@ -152,96 +152,92 @@ impl Filter for StopHookFilter {
         }
 
         let cwd = std::env::current_dir().unwrap_or_default();
+        let timeout_secs = self.timeout_secs;
 
-        // Phase 1: Evaluate conditions and collect commands to execute
-        let mut unconditional_commands: Vec<String> = Vec::new();
-        let mut conditional_commands: Vec<String> = Vec::new();
+        // Collect hooks that pass their condition check, tagged with report flag
+        struct QualifiedCommand {
+            command: String,
+            report: bool,
+        }
+
+        // Group commands by stage (ascending order)
+        let mut stage_map: std::collections::BTreeMap<u8, Vec<QualifiedCommand>> =
+            std::collections::BTreeMap::new();
 
         for hook in &self.hooks {
-            match &hook.condition {
-                None => {
-                    unconditional_commands.extend(hook.commands.iter().cloned());
+            if let Some(ref condition) = hook.condition {
+                if !condition.is_satisfied(&cwd) {
+                    debug!("Stop hook condition not met, skipping: {:?}", hook.commands);
+                    continue;
                 }
-                Some(condition) => {
-                    if condition.is_satisfied(&cwd) {
-                        debug!("Stop hook condition met, queuing: {:?}", hook.commands);
-                        conditional_commands.extend(hook.commands.iter().cloned());
-                    } else {
-                        debug!("Stop hook condition not met, skipping: {:?}", hook.commands);
-                    }
-                }
+                debug!("Stop hook condition met, queuing: {:?}", hook.commands);
+            }
+
+            let stage = hook.stage_value();
+            let report = hook.should_report();
+            let entry = stage_map.entry(stage).or_default();
+            for cmd in &hook.commands {
+                entry.push(QualifiedCommand {
+                    command: cmd.clone(),
+                    report,
+                });
             }
         }
 
-        // Phase 2: Run unconditional commands in parallel.
-        // Unconditional hooks never block the decision, but we still wait for completion
-        // so they are not dropped by process::exit in HookService::run().
-        let timeout_secs = self.timeout_secs;
-        let unconditional_handles: Vec<_> = unconditional_commands
-            .into_iter()
-            .map(|command| {
-                let agent_msg = agent_message.clone();
-                std::thread::spawn(move || {
-                    match Self::execute_command_tracked(
-                        &command,
-                        timeout_secs,
-                        agent_msg.as_deref(),
-                    ) {
-                        Ok(result) => {
-                            Self::log_output(&command, &result.output);
-                            if !result.output.status.success() && !result.timed_out {
-                                warn!(
-                                    "⚠️ Stop hook command failed (exit {}): {}",
-                                    result.output.status, command
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!("❌ Stop hook failed: {}", e);
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        // Phase 3: Execute conditional commands in parallel, wait for all results
+        // Execute stages sequentially (1 → 5), commands within each stage in parallel
         let mut failures: Vec<String> = Vec::new();
-        let conditional_handles: Vec<_> = conditional_commands
-            .into_iter()
-            .map(|command| {
-                let agent_msg = agent_message.clone();
-                std::thread::spawn(move || -> Option<String> {
-                    match Self::execute_command_tracked(
-                        &command,
-                        timeout_secs,
-                        agent_msg.as_deref(),
-                    ) {
-                        Ok(result) => {
-                            Self::log_output(&command, &result.output);
-                            if result.output.status.success() || result.timed_out {
-                                None
-                            } else {
-                                Some(Self::build_reason(&command, &result.output))
+
+        for (stage, commands) in &stage_map {
+            debug!("▶ Executing stop hook stage {}", stage);
+
+            let handles: Vec<_> = commands
+                .iter()
+                .map(|qc| {
+                    let command = qc.command.clone();
+                    let report = qc.report;
+                    let agent_msg = agent_message.clone();
+                    std::thread::spawn(move || -> (bool, Option<String>) {
+                        match Self::execute_command_tracked(
+                            &command,
+                            timeout_secs,
+                            agent_msg.as_deref(),
+                        ) {
+                            Ok(result) => {
+                                Self::log_output(&command, &result.output);
+                                if result.output.status.success() || result.timed_out {
+                                    (report, None)
+                                } else if report {
+                                    (report, Some(Self::build_reason(&command, &result.output)))
+                                } else {
+                                    warn!(
+                                        "⚠️ Stop hook command failed (exit {}): {}",
+                                        result.output.status, command
+                                    );
+                                    (report, None)
+                                }
+                            }
+                            Err(e) => {
+                                if report {
+                                    (report, Some(e))
+                                } else {
+                                    warn!("❌ Stop hook failed: {}", e);
+                                    (report, None)
+                                }
                             }
                         }
-                        Err(e) => Some(e),
-                    }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for handle in conditional_handles {
-            match handle.join() {
-                Ok(Some(reason)) => failures.push(reason),
-                Ok(None) => {}
-                Err(_) => failures.push("Stop hook thread panicked".to_string()),
-            }
-        }
-
-        // Unconditional hook failures are intentionally ignored (warn only), but panic is logged.
-        for handle in unconditional_handles {
-            if handle.join().is_err() {
-                warn!("🛑 Unconditional stop hook thread panicked");
+            for handle in handles {
+                match handle.join() {
+                    Ok((_, Some(reason))) => failures.push(reason),
+                    Ok((_, None)) => {}
+                    Err(_) => {
+                        warn!("🛑 Stop hook thread panicked");
+                        failures.push("Stop hook thread panicked".to_string());
+                    }
+                }
             }
         }
 
@@ -269,6 +265,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo done".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -287,6 +285,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo done".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -308,6 +308,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo done".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -340,6 +342,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["nonexistent-command-xyz-abc-123".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -367,6 +371,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo should-not-run".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -392,6 +398,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo running".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -417,6 +425,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["nonexistent-command-xyz".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -463,6 +473,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("nonexistent-file-xyz-abc.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -478,6 +492,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -493,6 +511,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -519,6 +541,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
         let decision = filter.execute(&make_stop_input());
@@ -543,6 +569,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -560,6 +590,10 @@ mod tests {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
+
+                stage: None,
+
+                report: None,
             },
             StopHook {
                 commands: vec!["sh -c 'echo second-error >&2; exit 1'".to_string()],
@@ -567,6 +601,10 @@ mod tests {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
+
+                stage: None,
+
+                report: None,
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -595,6 +633,8 @@ mod tests {
             StopHook {
                 commands: vec!["echo unconditional".to_string()],
                 condition: None,
+                stage: None,
+                report: None,
             },
             StopHook {
                 commands: vec!["true".to_string()],
@@ -602,6 +642,10 @@ mod tests {
                     command_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
+
+                stage: None,
+
+                report: None,
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -620,6 +664,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -644,6 +692,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -662,6 +714,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -690,6 +746,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -719,6 +779,8 @@ mod tests {
                 "echo third".to_string(),
             ],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -736,6 +798,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec![format!("sh -c 'sleep 0.1; echo done > {}'", marker_path)],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -788,6 +852,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["sleep 10".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -813,6 +879,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -869,6 +939,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -894,6 +968,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo fast".to_string(), "sleep 10".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -943,6 +1019,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["sleep 1".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 3);
 
@@ -1008,6 +1086,10 @@ mod tests {
                 command_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -1027,5 +1109,186 @@ mod tests {
             "Expected Allow (env var should match), got: {:?}",
             decision
         );
+    }
+
+    // === Stage ordering tests ===
+
+    #[test]
+    fn test_stage_ordering_lower_stage_runs_first() {
+        use crate::config::HookCondition;
+        // Stage 1 creates a marker file, Stage 3 checks for it.
+        // If stage ordering works, marker will exist when stage 3 runs.
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-stage-order-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        let hooks = vec![
+            StopHook {
+                commands: vec![format!("sh -c 'echo done > {}'", marker_path)],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(1),
+                report: None,
+            },
+            StopHook {
+                commands: vec![format!(
+                    "sh -c 'test -f {} || (echo stage-order-failed >&2; exit 1)'",
+                    marker_path
+                )],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(3),
+                report: Some(true),
+            },
+        ];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Stage 3 should see marker from stage 1, got: {:?}",
+            decision
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+
+    // === Report behavior tests ===
+
+    #[test]
+    fn test_report_false_ignores_failure() {
+        use crate::config::HookCondition;
+        // Hook with report=false should not block even on failure
+        let hooks = vec![StopHook {
+            commands: vec!["sh -c 'echo report-off-error >&2; exit 1'".to_string()],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+            stage: None,
+            report: Some(false),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "report=false should not block, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_report_true_without_condition_blocks_on_failure() {
+        // Hook without condition but report=true should block on failure
+        let hooks = vec![StopHook {
+            commands: vec!["sh -c 'echo explicit-report-error >&2; exit 1'".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(true),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("explicit-report-error"),
+                    "Expected error in message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision for report=true hook failure"),
+        }
+    }
+
+    #[test]
+    fn test_default_report_no_condition_allows_on_failure() {
+        // Hook without condition and without explicit report (defaults to false)
+        let hooks = vec![StopHook {
+            commands: vec!["sh -c 'echo no-report-error >&2; exit 1'".to_string()],
+            condition: None,
+            stage: None,
+            report: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "No condition + no report should default to fire-and-forget, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_default_report_with_condition_blocks_on_failure() {
+        use crate::config::HookCondition;
+        // Hook with condition and without explicit report (defaults to true)
+        let hooks = vec![StopHook {
+            commands: vec!["sh -c 'echo default-report-error >&2; exit 1'".to_string()],
+            condition: Some(HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+            stage: None,
+            report: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("default-report-error"),
+                    "Expected error in message, got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision for conditional hook"),
+        }
+    }
+
+    #[test]
+    fn test_mixed_stages_and_reports() {
+        use crate::config::HookCondition;
+        // Stage 1: report=false (fire-and-forget)
+        // Stage 3: report=true (should block)
+        let hooks = vec![
+            StopHook {
+                commands: vec!["sh -c 'echo stage1-error >&2; exit 1'".to_string()],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(1),
+                report: Some(false),
+            },
+            StopHook {
+                commands: vec!["sh -c 'echo stage3-error >&2; exit 1'".to_string()],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(3),
+                report: Some(true),
+            },
+        ];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("stage3-error"),
+                    "Expected stage3-error in message, got: {}",
+                    message
+                );
+                assert!(
+                    !message.contains("stage1-error"),
+                    "Should not contain stage1-error (report=false), got: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision"),
+        }
     }
 }

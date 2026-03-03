@@ -222,7 +222,9 @@ debug = false
 
 # Stop hooks
 # Execute commands when the agent loop ends (notifications, sounds, cleanup)
-# All commands in the array are executed in parallel.
+# Commands in the same stage run in parallel; stages run sequentially (1→5).
+# stage: 1-5 (default: 5) — lower stages run first
+# report: true/false (default: true if condition is set, false otherwise)
 # [[stop_hooks]]
 # commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 
@@ -232,15 +234,16 @@ debug = false
 # Conditional stop hooks (project-wide lint on stop)
 # Detects project type and runs lint/typecheck.
 # On failure, the result is returned to the AI agent so it can fix the issues.
-# All commands are executed in parallel; failures are collected and returned.
 # condition fields (AND logic): file_exists, command_exists
 # [[stop_hooks]]
 # commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 # condition = { file_exists = "Cargo.toml" }
+# stage = 3
 
 # [[stop_hooks]]
 # commands = ["pnpm exec tsc --noEmit"]
 # condition = { file_exists = "tsconfig.json" }
+# stage = 3
 
 # [[stop_hooks]]
 # commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]

@@ -589,6 +589,15 @@ condition = { file_exists = "tsconfig.json" }
 `condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。`commands`配列内のすべてのコマンドは**並列実行**されます。失敗したコマンドの出力はすべて収集され、AIエージェントにブロック理由としてまとめて返されます。
 **タイムアウトの扱い:** `hook_timeout` を超えたコマンドは claw-hooks がプロセスを強制終了（SIGKILL）し、タイムアウト通知をログに記録しますが、ブロック理由には含めません。これはセッション終了がタイムアウトで止まることを防ぐためです。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）は引き続きブロック対象です。
 
+**Stopフックのフィールド:**
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|-----------|------|
+| `commands` | `string[]` | (必須) | 実行するコマンド（同じstage内で並列実行） |
+| `condition` | `object` | (なし) | 実行条件（AND条件: `file_exists`, `command_exists`） |
+| `stage` | `1-5` | `5` | 実行順序。小さいstageが先に実行される。同じstage内のフックは並列実行。 |
+| `report` | `bool` | (自動) | 結果をAIエージェントに返すかどうか。デフォルト: `condition`ありなら`true`、なしなら`false`。 |
+
 **conditionフィールド**（AND条件 — 指定されたすべての条件が真である必要があります）:
 
 | フィールド | 説明 |
@@ -597,15 +606,35 @@ condition = { file_exists = "tsconfig.json" }
 | `command_exists` | このコマンドがPATH上に存在する場合のみ実行（Windows の `PATHEXT` を考慮。`./tool` や `/usr/bin/tool` のような明示パスも判定可能） |
 
 ```toml
-# Rust: Cargo.toml がある場合に clippy と fmt check を実行
+# ステージベースの実行: 分析 → lint → コミット
+[[stop_hooks]]
+commands = ["astro-sight impact --dir . --git"]
+stage = 1        # 最初に実行
+report = true    # 結果をAIに返す
+
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
+stage = 3
+# report 未指定 → condition あり → true（デフォルト）
 
-# TypeScript: tsconfig.json がある場合に tsc を実行
 [[stop_hooks]]
 commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
+stage = 3
+
+[[stop_hooks]]
+commands = ["git-sc --all --yes --quiet"]
+# stage 未指定 → 5（最後）
+# report 未指定 → condition なし → false（fire-and-forget）
+```
+
+**ステージの実行順序:** ステージは1から5の順に逐次実行されます。同じステージ内のすべてのフックは並列実行されます。あるステージの全フックが完了してから次のステージに進みます。
+
+**レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、失敗はログに記録されますがブロックしません（fire-and-forget）。
+
+```toml
+# その他の例:
 
 # Python: pyproject.toml があり ruff がインストール済みの場合に ruff format/check を実行
 [[stop_hooks]]
@@ -617,8 +646,6 @@ condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 commands = ["biome check --write ."]
 condition = { file_exists = "package.json" }
 ```
-
-`condition` **なし**のフックはfire-and-forget（すべてのコマンドを並列実行、結果無視、常に許可）です。通知音や`notify-send`などの通知用フックに適しています。
 
 ### Stopフックの環境変数
 

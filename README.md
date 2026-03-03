@@ -589,6 +589,15 @@ All three approaches can be combined: use the global config for shared rules, `.
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
 **Timeout handling:** When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
 
+**Stop hook fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `commands` | `string[]` | (required) | Commands to execute (in parallel within the same stage) |
+| `condition` | `object` | (none) | Execution condition (AND logic: `file_exists`, `command_exists`) |
+| `stage` | `1-5` | `5` | Execution order. Lower stages run first. Hooks in the same stage run in parallel. |
+| `report` | `bool` | (auto) | Whether to report results to the AI agent. Default: `true` if `condition` is set, `false` otherwise. |
+
 **Condition fields** (AND logic — all specified conditions must be true):
 
 | Field | Description |
@@ -597,15 +606,35 @@ Stop hooks with a `condition` field run lint/typecheck commands based on the pro
 | `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
 
 ```toml
-# Rust: run clippy and fmt check when Cargo.toml exists
+# Stage-based execution: analysis → lint → commit
+[[stop_hooks]]
+commands = ["astro-sight impact --dir . --git"]
+stage = 1        # Run first
+report = true    # Return results to AI
+
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
+stage = 3
+# report not set → condition present → true (default)
 
-# TypeScript: run tsc when tsconfig.json exists
 [[stop_hooks]]
 commands = ["pnpm exec tsc --noEmit"]
 condition = { file_exists = "tsconfig.json" }
+stage = 3
+
+[[stop_hooks]]
+commands = ["git-sc --all --yes --quiet"]
+# stage not set → 5 (last)
+# report not set → no condition → false (fire-and-forget)
+```
+
+**Stage execution order:** Stages are executed sequentially from 1 to 5. All hooks in the same stage run in parallel. A stage completes before the next one begins.
+
+**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), failures are logged but do not block — fire-and-forget style.
+
+```toml
+# More examples:
 
 # Python: run ruff format/check when pyproject.toml exists and ruff is installed
 [[stop_hooks]]
@@ -617,8 +646,6 @@ condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
 commands = ["biome check --write ."]
 condition = { file_exists = "package.json" }
 ```
-
-Hooks **without** `condition` are fire-and-forget (run all commands in parallel, ignore results, always allow). This is useful for notification-style hooks like sounds and `notify-send`.
 
 ### Stop Hook Environment Variables
 

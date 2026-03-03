@@ -114,6 +114,17 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
             }
         }
 
+        // Validate stage range (1-5)
+        if let Some(stage) = hook.stage {
+            if !(1..=5).contains(&stage) {
+                bail!(
+                    "stop_hooks[{}]: stage must be between 1 and 5, got {}",
+                    i,
+                    stage
+                );
+            }
+        }
+
         // Validate condition if present
         if let Some(ref condition) = hook.condition {
             if let Some(ref file_exists) = condition.file_exists {
@@ -249,6 +260,8 @@ mod tests {
         config.stop_hooks.push(StopHook {
             commands: vec!["".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_err());
     }
@@ -290,6 +303,8 @@ mod tests {
         config.stop_hooks.push(StopHook {
             commands: vec!["notify-send 'Done'".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_ok());
     }
@@ -303,6 +318,8 @@ mod tests {
                 file_exists: Some("".to_string()),
                 command_exists: None,
             }),
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_err());
     }
@@ -316,6 +333,8 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
             }),
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_ok());
     }
@@ -329,6 +348,10 @@ mod tests {
                 file_exists: None,
                 command_exists: Some("".to_string()),
             }),
+
+            stage: None,
+
+            report: None,
         });
         assert!(validate(&config).is_err());
     }
@@ -342,6 +365,8 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: Some("cargo".to_string()),
             }),
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_ok());
     }
@@ -352,6 +377,8 @@ mod tests {
         config.stop_hooks.push(StopHook {
             commands: vec!["echo done".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_ok());
     }
@@ -362,6 +389,8 @@ mod tests {
         config.stop_hooks.push(StopHook {
             commands: vec![],
             condition: None,
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_err());
     }
@@ -378,6 +407,8 @@ mod tests {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
             }),
+            stage: None,
+            report: None,
         });
         assert!(validate(&config).is_ok());
     }
@@ -440,6 +471,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec!["echo done".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
     }
@@ -449,6 +482,8 @@ mod tests {
         let hooks = vec![StopHook {
             commands: vec![],
             condition: None,
+            stage: None,
+            report: None,
         }];
         assert!(validate_stop_hooks(&hooks).is_err());
     }
@@ -522,6 +557,8 @@ mod tests {
                     file_exists: Some("tsconfig.json".to_string()),
                     command_exists: None,
                 }),
+                stage: None,
+                report: None,
             }]),
             ..Default::default()
         };
@@ -534,6 +571,8 @@ mod tests {
             stop_hooks: Some(vec![StopHook {
                 commands: vec!["".to_string()],
                 condition: None,
+                stage: None,
+                report: None,
             }]),
             ..Default::default()
         };
@@ -548,9 +587,68 @@ mod tests {
             stop_hooks: Some(vec![StopHook {
                 commands: vec!["echo done".to_string()],
                 condition: None,
+                stage: None,
+                report: None,
             }]),
             ..Default::default()
         };
         assert!(validate_project(&pc).is_ok());
+    }
+
+    // === Stage validation tests ===
+
+    #[test]
+    fn test_validate_stop_hooks_stage_valid_range() {
+        for stage in 1..=5 {
+            let hooks = vec![StopHook {
+                commands: vec!["echo test".to_string()],
+                condition: None,
+                stage: Some(stage),
+                report: None,
+            }];
+            assert!(
+                validate_stop_hooks(&hooks).is_ok(),
+                "Stage {} should be valid",
+                stage
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_stop_hooks_stage_zero_rejected() {
+        let hooks = vec![StopHook {
+            commands: vec!["echo test".to_string()],
+            condition: None,
+            stage: Some(0),
+            report: None,
+        }];
+        let err = validate_stop_hooks(&hooks).unwrap_err();
+        assert!(
+            err.to_string().contains("stage must be between 1 and 5"),
+            "Error message should mention stage range: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_stop_hooks_stage_six_rejected() {
+        let hooks = vec![StopHook {
+            commands: vec!["echo test".to_string()],
+            condition: None,
+            stage: Some(6),
+            report: None,
+        }];
+        assert!(validate_stop_hooks(&hooks).is_err());
+    }
+
+    #[test]
+    fn test_validate_stop_hooks_stage_none_accepted() {
+        let hooks = vec![StopHook {
+            commands: vec!["echo test".to_string()],
+            condition: None,
+            stage: None,
+            report: None,
+        }];
+        assert!(validate_stop_hooks(&hooks).is_ok());
     }
 }

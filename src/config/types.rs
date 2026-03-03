@@ -288,6 +288,8 @@ impl HookCondition {
 /// [[stop_hooks]]
 /// commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 /// condition = { file_exists = "Cargo.toml" }
+/// stage = 3
+/// report = true
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopHook {
@@ -297,6 +299,30 @@ pub struct StopHook {
     /// Optional condition for execution
     #[serde(default)]
     pub condition: Option<HookCondition>,
+
+    /// Execution stage (1-5, lower runs first, default: 5)
+    /// Hooks with lower stage values execute before higher ones.
+    /// Hooks in the same stage execute in parallel.
+    #[serde(default)]
+    pub stage: Option<u8>,
+
+    /// Whether to report results back to the AI agent.
+    /// If not specified: true when `condition` is set, false otherwise.
+    #[serde(default)]
+    pub report: Option<bool>,
+}
+
+impl StopHook {
+    /// Get the effective stage value (defaults to 5 if not specified).
+    pub fn stage_value(&self) -> u8 {
+        self.stage.unwrap_or(5)
+    }
+
+    /// Determine whether this hook's results should be reported to the AI agent.
+    /// Explicit `report` value takes precedence; otherwise defaults based on `condition`.
+    pub fn should_report(&self) -> bool {
+        self.report.unwrap_or(self.condition.is_some())
+    }
 }
 
 /// Get default log path (relative to config directory).
@@ -737,12 +763,16 @@ mod tests {
         config.stop_hooks.push(StopHook {
             commands: vec!["global-cmd".to_string()],
             condition: None,
+            stage: None,
+            report: None,
         });
 
         let project = ProjectConfig {
             stop_hooks: Some(vec![StopHook {
                 commands: vec!["project-cmd".to_string()],
                 condition: None,
+                stage: None,
+                report: None,
             }]),
             ..Default::default()
         };
@@ -796,5 +826,134 @@ mod tests {
             config.kill_block_message,
             Some("Project kill message".to_string())
         );
+    }
+
+    // === StopHook stage/report tests ===
+
+    #[test]
+    fn test_stop_hook_stage_default_value() {
+        let hook = StopHook {
+            commands: vec!["echo test".to_string()],
+            condition: None,
+            stage: None,
+            report: None,
+        };
+        assert_eq!(hook.stage_value(), 5);
+    }
+
+    #[test]
+    fn test_stop_hook_stage_explicit_value() {
+        let hook = StopHook {
+            commands: vec!["echo test".to_string()],
+            condition: None,
+            stage: Some(1),
+            report: None,
+        };
+        assert_eq!(hook.stage_value(), 1);
+    }
+
+    #[test]
+    fn test_stop_hook_should_report_defaults_true_with_condition() {
+        let hook = StopHook {
+            commands: vec!["cargo clippy".to_string()],
+            condition: Some(HookCondition {
+                file_exists: Some("Cargo.toml".to_string()),
+                command_exists: None,
+            }),
+            stage: None,
+            report: None,
+        };
+        assert!(hook.should_report());
+    }
+
+    #[test]
+    fn test_stop_hook_should_report_defaults_false_without_condition() {
+        let hook = StopHook {
+            commands: vec!["echo done".to_string()],
+            condition: None,
+            stage: None,
+            report: None,
+        };
+        assert!(!hook.should_report());
+    }
+
+    #[test]
+    fn test_stop_hook_should_report_explicit_true_overrides() {
+        let hook = StopHook {
+            commands: vec!["echo done".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(true),
+        };
+        assert!(hook.should_report());
+    }
+
+    #[test]
+    fn test_stop_hook_should_report_explicit_false_overrides() {
+        let hook = StopHook {
+            commands: vec!["cargo clippy".to_string()],
+            condition: Some(HookCondition {
+                file_exists: Some("Cargo.toml".to_string()),
+                command_exists: None,
+            }),
+            stage: None,
+            report: Some(false),
+        };
+        assert!(!hook.should_report());
+    }
+
+    #[test]
+    fn test_stop_hook_with_stage_deserializes() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["cargo clippy"]
+            stage = 1
+            report = true
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(wrapper.stop_hooks[0].stage, Some(1));
+        assert_eq!(wrapper.stop_hooks[0].report, Some(true));
+    }
+
+    #[test]
+    fn test_stop_hook_without_stage_defaults_none() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["echo done"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(wrapper.stop_hooks[0].stage, None);
+        assert_eq!(wrapper.stop_hooks[0].stage_value(), 5);
+        assert_eq!(wrapper.stop_hooks[0].report, None);
+        assert!(!wrapper.stop_hooks[0].should_report());
+    }
+
+    #[test]
+    fn test_stop_hook_with_condition_and_no_report_defaults_report_true() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["cargo clippy"]
+            condition = { file_exists = "Cargo.toml" }
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
+        assert!(wrapper.stop_hooks[0].should_report());
     }
 }

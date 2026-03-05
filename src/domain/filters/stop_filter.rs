@@ -84,12 +84,16 @@ impl StopHookFilter {
 
     /// fire-and-forget でコマンドを起動する（report=false 用）。
     /// stdout/stderr はパイプ接続され、バックグラウンドスレッドでログに記録される。
-    /// 親スレッドはコマンドの完了を待たない。
-    fn execute_command_detached(command: &str, agent_message: Option<&str>) {
+    /// 決定には影響しないが、ログ出力のためスレッドハンドルを返す。
+    fn execute_command_detached(
+        command: &str,
+        timeout_secs: u64,
+        agent_message: Option<&str>,
+    ) -> Option<std::thread::JoinHandle<()>> {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             warn!("Empty command for detached execution");
-            return;
+            return None;
         }
 
         let program = &parts[0];
@@ -108,8 +112,8 @@ impl StopHookFilter {
         match spawn_piped_with_env(program, args, &envs) {
             Ok(child) => {
                 let command_owned = command.to_string();
-                std::thread::spawn(move || {
-                    match run_with_timeout_tracked(child, 300, &command_owned) {
+                Some(std::thread::spawn(move || {
+                    match run_with_timeout_tracked(child, timeout_secs, &command_owned) {
                         Ok(result) => {
                             Self::log_output(&command_owned, &result.output);
                         }
@@ -120,13 +124,14 @@ impl StopHookFilter {
                             );
                         }
                     }
-                });
+                }))
             }
             Err(e) => {
                 warn!(
                     "❌ Failed to spawn fire-and-forget stop hook '{}': {}",
                     command, e
                 );
+                None
             }
         }
     }
@@ -235,6 +240,7 @@ impl Filter for StopHookFilter {
 
         // ステージを順番に実行（1 → 5）、各ステージ内のコマンドは並列実行
         let mut failures: Vec<String> = Vec::new();
+        let mut detached_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
         for (stage, commands) in &stage_map {
             debug!("▶ Executing stop hook stage {}", stage);
@@ -243,8 +249,14 @@ impl Filter for StopHookFilter {
 
             for qc in commands {
                 if !qc.report {
-                    // fire-and-forget: デタッチ起動（Stdio::null、スレッド不要）
-                    Self::execute_command_detached(&qc.command, agent_message.as_deref());
+                    // fire-and-forget: 決定には影響しないが、ログ出力のため後で join
+                    if let Some(handle) = Self::execute_command_detached(
+                        &qc.command,
+                        timeout_secs,
+                        agent_message.as_deref(),
+                    ) {
+                        detached_handles.push(handle);
+                    }
                     continue;
                 }
 
@@ -281,6 +293,11 @@ impl Filter for StopHookFilter {
                     }
                 }
             }
+        }
+
+        // fire-and-forget スレッドのログ出力を待つ（決定には影響しない）
+        for handle in detached_handles {
+            let _ = handle.join();
         }
 
         if failures.is_empty() {
@@ -830,16 +847,32 @@ mod tests {
     }
 
     #[test]
-    fn test_non_report_hook_is_fire_and_forget() {
-        // Non-report hooks are fire-and-forget: execute() returns immediately
-        // without waiting for them to complete.
+    fn test_non_report_hook_does_not_affect_decision() {
+        // Non-report hooks: 失敗しても決定には影響しない（Allow を返す）。
+        // ログ出力のためプロセス完了は待つが、決定はブロックしない。
         let hooks = vec![StopHook {
-            commands: vec!["sleep 10".to_string()],
+            commands: vec!["sh -c 'echo non-report-output >&2; exit 1'".to_string()],
             condition: None,
             stage: None,
             report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
+
+        let decision = filter.execute(&make_stop_input());
+
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_non_report_hook_respects_timeout() {
+        // Non-report hooks もタイムアウトで強制終了される
+        let hooks = vec![StopHook {
+            commands: vec!["sleep 30".to_string()],
+            condition: None,
+            stage: None,
+            report: None,
+        }];
+        let filter = StopHookFilter::new(hooks, false, 2);
 
         let start = std::time::Instant::now();
         let decision = filter.execute(&make_stop_input());
@@ -847,8 +880,8 @@ mod tests {
 
         assert!(matches!(decision, Decision::Allow { .. }));
         assert!(
-            elapsed.as_secs() < 3,
-            "non-report hook should not block: took {:?}",
+            elapsed.as_secs() < 5,
+            "non-report hook should be killed by timeout: took {:?}",
             elapsed
         );
     }
@@ -1286,6 +1319,59 @@ mod tests {
             }
             _ => panic!("Expected Block decision for conditional hook"),
         }
+    }
+
+    #[test]
+    fn test_fire_and_forget_background_thread_completes() {
+        // fire-and-forget (report=false) でバックグラウンドスレッドが実際に完了し、
+        // 出力をキャプチャしていることをマーカーファイルで間接的に検証する。
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-ff-complete-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        let hooks = vec![StopHook {
+            commands: vec![format!(
+                "sh -c 'echo ff-output; echo done > {}'",
+                marker_path
+            )],
+            condition: None,
+            stage: None,
+            report: Some(false),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(matches!(decision, Decision::Allow { .. }));
+
+        // バックグラウンドスレッドの完了を待つ（最大5秒）
+        for _ in 0..50 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(
+            marker.exists(),
+            "Background thread should have completed and created marker file"
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn test_fire_and_forget_spawn_failure_does_not_panic() {
+        // 存在しないコマンドの spawn 失敗でパニックしない
+        let hooks = vec![StopHook {
+            commands: vec!["nonexistent-command-xyz-ff-test".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(false),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "Spawn failure should not cause panic or block"
+        );
     }
 
     #[test]

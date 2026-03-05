@@ -61,36 +61,13 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
             if cmd.is_empty() {
                 bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
             }
-            let tokens = crate::domain::parse_shell_tokens(cmd);
-            if tokens.is_empty() {
-                bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
-            }
-
-            if tokens[0].contains("{file}") {
+            if let Err(e) = crate::domain::filters::ExtensionHookFilter::parse_command_template(cmd)
+            {
                 bail!(
-                    "extension_hooks['{}']: command[{}] cannot use {{file}} as executable",
+                    "extension_hooks['{}']: command[{}] {}",
                     ext,
-                    j
-                );
-            }
-
-            let placeholder_count: usize = tokens
-                .iter()
-                .skip(1)
-                .map(|token| token.matches("{file}").count())
-                .sum();
-            if placeholder_count == 0 {
-                bail!(
-                    "extension_hooks['{}']: command[{}] must contain {{file}} placeholder",
-                    ext,
-                    j
-                );
-            }
-            if placeholder_count != 1 {
-                bail!(
-                    "extension_hooks['{}']: command[{}] must contain exactly one {{file}} placeholder",
-                    ext,
-                    j
+                    j,
+                    e.to_lowercase()
                 );
             }
         }

@@ -181,56 +181,36 @@ impl StopHookFilter {
         }
         reason.trim().to_string()
     }
-}
 
-impl Filter for StopHookFilter {
-    fn applies_to(&self, input: &HookInput) -> bool {
-        // Stop イベントにのみ適用
-        input.event == HookEvent::Stop
-    }
-
-    fn execute(&self, input: &HookInput) -> Decision {
-        // クロスプロセス再帰ループ防止のため環境変数をチェック。
-        // claw-hooks がストップフックを実行すると、子プロセスは CLAW_HOOKS_STOP_ACTIVE=1 を継承する。
-        // その子プロセス（例: git-sc → Gemini CLI）が別の claw-hooks ストップイベントを
-        // トリガーした場合、このチェックでループを中断する。
+    /// ループ防止チェック。環境変数と stop_hook_active フラグを確認する。
+    fn check_loop_prevention(input: &HookInput) -> LoopCheck {
+        // クロスプロセス再帰ループ防止
         if std::env::var(STOP_ACTIVE_ENV).is_ok() {
             debug!(
                 "⛔ {}=1 detected, skipping all stop hooks (cross-process loop prevention)",
                 STOP_ACTIVE_ENV
             );
-            return Decision::allow();
+            return LoopCheck::Skip;
         }
 
-        // 無限ループ防止のため stop_hook_active をチェック（エージェント内部フラグ）
-        // また、子プロセスに渡すための agent_message を抽出
+        // エージェント内部フラグによるループ防止 + agent_message 抽出
         let agent_message = if let crate::domain::ToolInput::Stop(ref stop_input) = input.tool_input
         {
             if stop_input.stop_hook_active {
                 debug!("🛑 stop_hook_active=true, skipping all stop hooks");
-                return Decision::allow();
+                return LoopCheck::Skip;
             }
             stop_input.agent_message.clone()
         } else {
             None
         };
 
-        // NanoBuddy 通知（全ストップフックの前に実行し、最初に到着させる）
-        if self.nano_buddy {
-            debug!("🐱 NanoBuddy stop notification");
-            crate::notify::nano_buddy::notify_stop_hook();
-        }
+        LoopCheck::Continue(agent_message)
+    }
 
+    /// 条件チェックを通過したフックをステージ別にグループ化して収集する。
+    fn collect_qualified_commands(&self) -> std::collections::BTreeMap<u8, Vec<QualifiedCommand>> {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let timeout_secs = self.timeout_secs;
-
-        // 条件チェックを通過したフックを report フラグ付きで収集
-        struct QualifiedCommand {
-            command: String,
-            report: bool,
-        }
-
-        // コマンドをステージごとにグループ化（昇順）
         let mut stage_map: std::collections::BTreeMap<u8, Vec<QualifiedCommand>> =
             std::collections::BTreeMap::new();
 
@@ -254,58 +234,105 @@ impl Filter for StopHookFilter {
             }
         }
 
+        stage_map
+    }
+
+    /// 単一ステージ内のコマンドを並列実行し、失敗を収集する。
+    fn execute_stage(
+        stage: u8,
+        commands: &[QualifiedCommand],
+        timeout_secs: u64,
+        agent_message: Option<&str>,
+        failures: &mut Vec<String>,
+    ) {
+        debug!("▶ Executing stop hook stage {}", stage);
+
+        let mut report_handles = Vec::new();
+
+        for qc in commands {
+            if !qc.report {
+                Self::execute_command_detached(&qc.command, timeout_secs, agent_message);
+                continue;
+            }
+
+            let command = qc.command.clone();
+            let agent_msg = agent_message.map(|s| s.to_string());
+            let handle = std::thread::spawn(move || -> Option<String> {
+                match Self::execute_command_tracked(&command, timeout_secs, agent_msg.as_deref()) {
+                    Ok(result) => {
+                        Self::log_output(&command, &result.output);
+                        if result.output.status.success() || result.timed_out {
+                            None
+                        } else {
+                            Some(Self::build_reason(&command, &result.output))
+                        }
+                    }
+                    Err(e) => Some(e),
+                }
+            });
+
+            report_handles.push(handle);
+        }
+
+        for handle in report_handles {
+            match handle.join() {
+                Ok(Some(reason)) => failures.push(reason),
+                Ok(None) => {}
+                Err(_) => {
+                    warn!("🛑 Stop hook thread panicked");
+                    failures.push("Stop hook thread panicked".to_string());
+                }
+            }
+        }
+    }
+}
+
+/// ループ防止チェックの結果。
+enum LoopCheck {
+    /// ストップフックをスキップする。
+    Skip,
+    /// 続行する（オプションの agent_message 付き）。
+    Continue(Option<String>),
+}
+
+/// 条件チェックを通過したコマンドと report フラグ。
+struct QualifiedCommand {
+    command: String,
+    report: bool,
+}
+
+impl Filter for StopHookFilter {
+    fn applies_to(&self, input: &HookInput) -> bool {
+        // Stop イベントにのみ適用
+        input.event == HookEvent::Stop
+    }
+
+    fn execute(&self, input: &HookInput) -> Decision {
+        // ループ防止チェック
+        let agent_message = match Self::check_loop_prevention(input) {
+            LoopCheck::Skip => return Decision::allow(),
+            LoopCheck::Continue(msg) => msg,
+        };
+
+        // NanoBuddy 通知（全ストップフックの前に実行し、最初に到着させる）
+        if self.nano_buddy {
+            debug!("🐱 NanoBuddy stop notification");
+            crate::notify::nano_buddy::notify_stop_hook();
+        }
+
+        // 条件チェックを通過したコマンドをステージ別に収集
+        let stage_map = self.collect_qualified_commands();
+
         // ステージを順番に実行（1 → 5）、各ステージ内のコマンドは並列実行
         let mut failures: Vec<String> = Vec::new();
-
         for (stage, commands) in &stage_map {
-            debug!("▶ Executing stop hook stage {}", stage);
-
-            let mut report_handles = Vec::new();
-
-            for qc in commands {
-                if !qc.report {
-                    // fire-and-forget: 決定には影響しないが、ログ出力のため後で join
-                    Self::execute_command_detached(
-                        &qc.command,
-                        timeout_secs,
-                        agent_message.as_deref(),
-                    );
-                    continue;
-                }
-
-                let command = qc.command.clone();
-                let agent_msg = agent_message.clone();
-                let handle = std::thread::spawn(move || -> Option<String> {
-                    match Self::execute_command_tracked(
-                        &command,
-                        timeout_secs,
-                        agent_msg.as_deref(),
-                    ) {
-                        Ok(result) => {
-                            Self::log_output(&command, &result.output);
-                            if result.output.status.success() || result.timed_out {
-                                None
-                            } else {
-                                Some(Self::build_reason(&command, &result.output))
-                            }
-                        }
-                        Err(e) => Some(e),
-                    }
-                });
-
-                report_handles.push(handle);
-            }
-
-            for handle in report_handles {
-                match handle.join() {
-                    Ok(Some(reason)) => failures.push(reason),
-                    Ok(None) => {}
-                    Err(_) => {
-                        warn!("🛑 Stop hook thread panicked");
-                        failures.push("Stop hook thread panicked".to_string());
-                    }
-                }
-            }
+            Self::execute_stage(
+                *stage,
+                commands,
+                self.timeout_secs,
+                agent_message.as_deref(),
+                &mut failures,
+            );
         }
 
         if failures.is_empty() {

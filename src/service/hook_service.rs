@@ -215,23 +215,12 @@ impl HookService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BashInput, FileOperationInput, StopInput, SubagentInput, ToolInput};
+    use crate::domain::test_helpers::make_bash_input;
+    use crate::domain::{FileOperationInput, StopInput, SubagentInput, ToolInput};
 
     fn make_service() -> HookService {
         let config = Config::default();
         HookService::new(config, Format::Claude, false)
-    }
-
-    fn make_bash_input(command: &str) -> HookInput {
-        HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(BashInput {
-                command: command.to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        }
     }
 
     #[test]

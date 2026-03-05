@@ -197,14 +197,8 @@ fn test_stop_event() {
 
 #[test]
 fn test_init_command_creates_config() {
-    use std::env;
-    use std::fs;
-
-    // Create a temporary directory for the test
-    let temp_dir = env::temp_dir().join(format!("claw-hooks-test-{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-
-    let config_path = temp_dir.join("claw-hooks.toml");
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("claw-hooks.toml");
 
     let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
         .arg("init")
@@ -216,7 +210,7 @@ fn test_init_command_creates_config() {
     assert!(output.status.success(), "init command should succeed");
     assert!(config_path.exists(), "Config file should be created");
 
-    let content = fs::read_to_string(&config_path).expect("Failed to read config");
+    let content = std::fs::read_to_string(&config_path).expect("Failed to read config");
     assert!(
         content.contains("kill_block"),
         "Config should contain kill_block"
@@ -225,9 +219,6 @@ fn test_init_command_creates_config() {
         content.contains("rm_block"),
         "Config should contain rm_block"
     );
-
-    // Cleanup
-    fs::remove_dir_all(&temp_dir).ok();
 }
 
 #[test]
@@ -505,24 +496,10 @@ fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (Str
 }
 
 /// Create a test config file with custom filters.
-fn create_custom_filter_config() -> std::path::PathBuf {
-    use std::env;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Use a unique directory for each test to avoid conflicts when running in parallel
-    let unique_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let temp_dir = env::temp_dir().join(format!(
-        "claw-hooks-custom-filter-test-{}-{}",
-        std::process::id(),
-        unique_id
-    ));
-    fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-
-    let config_path = temp_dir.join("config.toml");
+/// Returns (config_path, _temp_dir) - keep _temp_dir alive for RAII cleanup.
+fn create_custom_filter_config() -> (std::path::PathBuf, tempfile::TempDir) {
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("config.toml");
     let config_content = r#"
 # Disable default filters for isolated testing
 rm_block = false
@@ -534,15 +511,15 @@ command = "yarn"
 message = "Use pnpm instead of yarn"
 "#;
 
-    fs::write(&config_path, config_content).expect("Failed to write config");
-    config_path
+    std::fs::write(&config_path, config_content).expect("Failed to write config");
+    (config_path, temp_dir)
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_after_semicolon() {
     // Test: echo "install"; yarn install
     // yarn is a command after semicolon, should be blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"install\"; yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -557,16 +534,13 @@ fn test_custom_filter_blocks_yarn_after_semicolon() {
         "Block message should suggest pnpm: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_allows_yarn_in_quotes() {
     // Test: echo "not yarn install"; pnpm install
     // yarn is inside quotes (argument), pnpm is the actual command, should be allowed
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"not yarn install\"; pnpm install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -579,16 +553,13 @@ fn test_custom_filter_allows_yarn_in_quotes() {
         "Output should indicate approve: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_direct_yarn_command() {
     // Test: yarn install
     // Direct yarn command should be blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -598,16 +569,13 @@ fn test_custom_filter_blocks_direct_yarn_command() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_chained_commands() {
     // Test: cd project && yarn add react
     // yarn after && should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd project && yarn add react"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -617,16 +585,13 @@ fn test_custom_filter_blocks_yarn_in_chained_commands() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_after_pipe() {
     // Test: cat package.json | yarn install
     // yarn after pipe should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -636,16 +601,13 @@ fn test_custom_filter_blocks_yarn_after_pipe() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_sh_c() {
     // Test: sh -c "yarn install"
     // yarn inside sh -c should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sh -c \"yarn install\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -655,16 +617,13 @@ fn test_custom_filter_blocks_yarn_in_sh_c() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_bash_c() {
     // Test: bash -c "yarn add react"
     // yarn inside bash -c should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c \"yarn add react\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -674,16 +633,13 @@ fn test_custom_filter_blocks_yarn_in_bash_c() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_subshell() {
     // Test: (cd project && yarn install)
     // yarn in subshell should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"(cd project && yarn install)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -693,16 +649,13 @@ fn test_custom_filter_blocks_yarn_in_subshell() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_command_substitution() {
     // Test: echo $(yarn --version)
     // yarn in command substitution should be detected and blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo $(yarn --version)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -715,16 +668,13 @@ fn test_custom_filter_blocks_yarn_in_command_substitution() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_allows_yarn_string_in_pipe() {
     // Test: echo "yarn" | grep yarn
     // yarn is just a string argument, not a command, should be allowed
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"yarn\" | grep yarn"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -734,16 +684,13 @@ fn test_custom_filter_allows_yarn_string_in_pipe() {
         "Output should indicate approve: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
     // Test: cat package.json | jq '.dependencies' | yarn install
     // yarn at end of complex pipeline should be blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | jq '.dependencies' | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -753,16 +700,13 @@ fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 #[test]
 fn test_custom_filter_blocks_yarn_with_env_prefix() {
     // Test: NODE_ENV=production yarn build
     // yarn with environment variable prefix should be blocked
-    let config_path = create_custom_filter_config();
+    let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"NODE_ENV=production yarn build"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
@@ -772,9 +716,6 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
         "Output should indicate block: {}",
         stdout
     );
-
-    // Cleanup
-    std::fs::remove_dir_all(config_path.parent().unwrap()).ok();
 }
 
 // === Gemini CLI Format Tests ===

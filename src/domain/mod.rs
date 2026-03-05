@@ -7,19 +7,16 @@
 //! - ローテーション付きロガー
 
 pub mod command;
-mod error;
 pub mod filters;
 pub mod logger;
 pub mod normalize;
 pub mod parser;
+#[cfg(test)]
+pub mod test_helpers;
 mod types;
 
 pub use filters::FilterChain;
 pub use types::{Decision, HookEvent, HookInput, ToolInput};
-
-// 将来の利用やライブラリ API 向けに未使用を許容
-#[allow(unused)]
-pub use error::ClawError;
 
 #[allow(unused)]
 pub use types::{BashInput, FileOperationInput, HookOutput, StopInput, SubagentInput};

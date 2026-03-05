@@ -11,7 +11,7 @@ use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// パース済みコマンドテンプレートの結果。
-struct ParsedCommand {
+pub(crate) struct ParsedCommand {
     /// 実行するコマンド/プログラム
     program: String,
     /// ファイルプレースホルダーの前の引数
@@ -98,7 +98,7 @@ impl ExtensionHookFilter {
 
     /// コマンドテンプレートをパースして構造化された結果を返す。
     /// --file={file} のようなインラインパターンを含む {file} プレースホルダーを安全に処理する。
-    fn parse_command_template(template: &str) -> Result<ParsedCommand, String> {
+    pub(crate) fn parse_command_template(template: &str) -> Result<ParsedCommand, String> {
         let parts = crate::domain::parse_shell_tokens(template);
         if parts.is_empty() {
             return Err("Empty command template".to_string());

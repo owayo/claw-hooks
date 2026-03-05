@@ -5,8 +5,8 @@ use crate::domain::Decision;
 use crate::domain::HookInput;
 
 use super::{
-    CustomCommandFilter, DdFilter, ExtensionHookFilter, Filter, KillFilter, RmFilter,
-    StopHookFilter, SubagentFilter,
+    CustomCommandFilter, ExtensionHookFilter, Filter, StopHookFilter, SubagentFilter,
+    new_dd_filter, new_kill_filter, new_rm_filter,
 };
 
 /// フック入力を処理するフィルターチェーン。
@@ -20,15 +20,15 @@ impl FilterChain {
         let mut filters: Vec<Box<dyn Filter>> = Vec::new();
 
         // 組み込みフィルターを追加
-        filters.push(Box::new(KillFilter::new(
+        filters.push(Box::new(new_kill_filter(
             config.kill_block,
             config.kill_block_message.clone(),
         )));
-        filters.push(Box::new(DdFilter::new(
+        filters.push(Box::new(new_dd_filter(
             config.dd_block,
             config.dd_block_message.clone(),
         )));
-        filters.push(Box::new(RmFilter::new(
+        filters.push(Box::new(new_rm_filter(
             config.rm_block,
             config.rm_block_message.clone(),
         )));
@@ -120,19 +120,8 @@ impl FilterChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BashInput, HookEvent, HookInput, ToolInput};
-
-    fn make_bash_input(command: &str) -> HookInput {
-        HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(BashInput {
-                command: command.to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        }
-    }
+    use crate::domain::test_helpers::make_bash_input;
+    use crate::domain::{HookEvent, HookInput, ToolInput};
 
     #[test]
     fn test_filter_chain_allows_safe_command() {

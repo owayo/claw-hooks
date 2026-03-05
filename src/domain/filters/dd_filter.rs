@@ -1,98 +1,69 @@
 //! dd コマンドフィルターの実装。
 
-use super::Filter;
-use crate::domain::parser::ShellParser;
-use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
+use super::builtin_filter::BuiltinCommandFilter;
 
 /// dd ブロック時のデフォルトメッセージ。
 const DEFAULT_DD_MESSAGE: &str = "🚫 dd command is blocked for safety. Use cp or rsync for file operations. If you need dd specifically, use safe-dd or request explicit permission.";
 
-/// dd コマンドをブロックするフィルター。
-pub struct DdFilter {
-    enabled: bool,
-    message: String,
-}
+/// dd コマンドパターン
+const DD_COMMANDS: &[&str] = &[
+    "dd", // Unix ディスクダンプコマンド
+];
 
-impl DdFilter {
-    /// カスタムメッセージ付きの新しい DdFilter を作成する。
-    pub fn new(enabled: bool, custom_message: Option<String>) -> Self {
-        Self {
-            enabled,
-            message: custom_message.unwrap_or_else(|| DEFAULT_DD_MESSAGE.to_string()),
-        }
-    }
-
-    /// dd コマンドパターン
-    const DD_COMMANDS: &'static [&'static str] = &[
-        "dd", // Unix ディスクダンプコマンド
-    ];
-
-    /// コマンド文字列に dd コマンドが含まれるか判定する。
-    fn contains_dd_command(command: &str) -> bool {
-        let mut parser = ShellParser::new();
-        let commands = parser.extract_commands(command);
-
-        commands
-            .iter()
-            .any(|cmd| Self::DD_COMMANDS.contains(&cmd.as_str()))
-    }
-}
-
-impl Filter for DdFilter {
-    fn applies_to(&self, input: &HookInput) -> bool {
-        if !self.enabled {
-            return false;
-        }
-
-        // BeforeCommand イベントの Bash ツールにのみ適用
-        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
-            return false;
-        }
-
-        if let ToolInput::Bash(bash) = &input.tool_input {
-            return Self::contains_dd_command(&bash.command);
-        }
-
-        false
-    }
-
-    fn execute(&self, _input: &HookInput) -> Decision {
-        Decision::Block {
-            message: self.message.clone(),
-        }
-    }
-
-    fn priority(&self) -> u32 {
-        15 // 高優先度（kill(10) と rm(20) の間）
-    }
+/// dd コマンドをブロックするフィルターを作成する。
+pub fn new_dd_filter(enabled: bool, custom_message: Option<String>) -> BuiltinCommandFilter {
+    BuiltinCommandFilter::new(
+        enabled,
+        custom_message,
+        DEFAULT_DD_MESSAGE,
+        DD_COMMANDS,
+        15,
+        None,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::filters::Filter;
+    use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
+
+    fn make_filter(enabled: bool, msg: Option<String>) -> BuiltinCommandFilter {
+        new_dd_filter(enabled, msg)
+    }
+
+    fn contains_dd_command(command: &str) -> bool {
+        let filter = make_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: command.to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        filter.applies_to(&input)
+    }
 
     #[test]
     fn test_contains_dd_command() {
         // Simple dd commands
-        assert!(DdFilter::contains_dd_command("dd if=/dev/zero of=/dev/sda"));
-        assert!(DdFilter::contains_dd_command(
-            "dd if=input.img of=output.img bs=4M"
-        ));
-        assert!(!DdFilter::contains_dd_command("ls -la"));
-        assert!(!DdFilter::contains_dd_command("echo dd"));
+        assert!(contains_dd_command("dd if=/dev/zero of=/dev/sda"));
+        assert!(contains_dd_command("dd if=input.img of=output.img bs=4M"));
+        assert!(!contains_dd_command("ls -la"));
+        assert!(!contains_dd_command("echo dd"));
 
         // Piped commands
-        assert!(DdFilter::contains_dd_command("cat file | dd of=output.img"));
+        assert!(contains_dd_command("cat file | dd of=output.img"));
 
         // Chained commands
-        assert!(DdFilter::contains_dd_command(
-            "sync && dd if=/dev/sda of=backup.img"
-        ));
+        assert!(contains_dd_command("sync && dd if=/dev/sda of=backup.img"));
     }
 
     #[test]
     fn test_applies_to_before_command_bash_dd() {
-        let filter = DdFilter::new(true, None);
+        let filter = make_filter(true, None);
 
         let input = HookInput {
             event: HookEvent::BeforeCommand,
@@ -109,7 +80,7 @@ mod tests {
 
     #[test]
     fn test_does_not_apply_when_disabled() {
-        let filter = DdFilter::new(false, None);
+        let filter = make_filter(false, None);
 
         let input = HookInput {
             event: HookEvent::BeforeCommand,
@@ -126,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_does_not_apply_to_after_file_edit() {
-        let filter = DdFilter::new(true, None);
+        let filter = make_filter(true, None);
 
         let input = HookInput {
             event: HookEvent::AfterFileEdit,
@@ -143,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_execute_returns_block() {
-        let filter = DdFilter::new(true, Some("Custom dd block message".to_string()));
+        let filter = make_filter(true, Some("Custom dd block message".to_string()));
 
         let input = HookInput {
             event: HookEvent::BeforeCommand,
@@ -168,35 +139,25 @@ mod tests {
 
     #[test]
     fn test_contains_dd_command_with_sudo_wrapper() {
-        assert!(DdFilter::contains_dd_command(
-            "sudo dd if=/dev/zero of=/dev/sda"
-        ));
-        assert!(DdFilter::contains_dd_command(
+        assert!(contains_dd_command("sudo dd if=/dev/zero of=/dev/sda"));
+        assert!(contains_dd_command(
             "sudo -u root dd if=/dev/zero of=/dev/sda"
         ));
     }
 
     #[test]
     fn test_contains_dd_command_with_bash_c_subshell() {
-        assert!(DdFilter::contains_dd_command(
-            "bash -c 'dd if=/dev/zero of=/dev/sda'"
-        ));
-        assert!(DdFilter::contains_dd_command(
-            "sh -c \"dd if=/dev/zero of=/dev/sda\""
-        ));
+        assert!(contains_dd_command("bash -c 'dd if=/dev/zero of=/dev/sda'"));
+        assert!(contains_dd_command("sh -c \"dd if=/dev/zero of=/dev/sda\""));
     }
 
     #[test]
     fn test_contains_dd_command_in_command_substitution() {
-        assert!(DdFilter::contains_dd_command(
-            "echo $(dd if=/dev/zero of=/dev/sda)"
-        ));
+        assert!(contains_dd_command("echo $(dd if=/dev/zero of=/dev/sda)"));
     }
 
     #[test]
     fn test_contains_dd_command_in_subshell() {
-        assert!(DdFilter::contains_dd_command(
-            "(cd /dev && dd if=zero of=sda)"
-        ));
+        assert!(contains_dd_command("(cd /dev && dd if=zero of=sda)"));
     }
 }

@@ -77,6 +77,27 @@ pub struct HookInput {
     pub session_id: Option<String>,
 }
 
+impl HookInput {
+    /// Bash コマンド入力からコマンド文字列を取得する。
+    pub fn bash_command(&self) -> Option<&str> {
+        if let ToolInput::Bash(bash) = &self.tool_input {
+            Some(&bash.command)
+        } else {
+            None
+        }
+    }
+
+    /// ファイル操作入力からファイルパスを取得する。
+    #[allow(dead_code)]
+    pub fn file_path(&self) -> Option<&str> {
+        if let ToolInput::File(file) = &self.tool_input {
+            Some(&file.file_path)
+        } else {
+            None
+        }
+    }
+}
+
 /// ツール固有の入力バリアント。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]

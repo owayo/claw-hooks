@@ -1,5 +1,6 @@
 //! コマンドフィルタリングシステム。
 
+pub mod builtin_filter;
 mod chain;
 mod custom_filter;
 mod dd_filter;
@@ -12,10 +13,10 @@ mod subagent_filter;
 
 pub use chain::FilterChain;
 pub use custom_filter::CustomCommandFilter;
-pub use dd_filter::DdFilter;
+pub use dd_filter::new_dd_filter;
 pub use extension_filter::ExtensionHookFilter;
 pub use filter_trait::Filter;
-pub use kill_filter::KillFilter;
-pub use rm_filter::RmFilter;
+pub use kill_filter::new_kill_filter;
+pub use rm_filter::new_rm_filter;
 pub use stop_filter::{StopHookFilter, drain_pending_handles};
 pub use subagent_filter::SubagentFilter;

@@ -131,6 +131,10 @@ impl HookService {
             stdout.flush()?; // パイプのためexit前にフラッシュ
         }
 
+        // fire-and-forget スレッド（report=false の stop hooks）のログ出力完了を待つ。
+        // Decision は既に出力済みなので、エージェント側の応答時間には影響しない。
+        crate::domain::filters::drain_pending_handles();
+
         process::exit(exit_code);
     }
 

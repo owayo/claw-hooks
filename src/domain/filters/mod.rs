@@ -17,5 +17,5 @@ pub use extension_filter::ExtensionHookFilter;
 pub use filter_trait::Filter;
 pub use kill_filter::KillFilter;
 pub use rm_filter::RmFilter;
-pub use stop_filter::StopHookFilter;
+pub use stop_filter::{StopHookFilter, drain_pending_handles};
 pub use subagent_filter::SubagentFilter;

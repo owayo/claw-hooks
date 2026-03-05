@@ -1,12 +1,32 @@
 //! Stop イベントフックフィルターの実装。
 
+use std::cell::RefCell;
 use std::process::Output;
+use std::thread::JoinHandle;
+
 use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
 use crate::domain::command::{TimedOutput, run_with_timeout_tracked, spawn_piped_with_env};
 use crate::domain::{Decision, HookEvent, HookInput};
+
+thread_local! {
+    /// fire-and-forget スレッドのハンドルを一時保存する。
+    /// Decision 返却後、プロセス終了前に join してログ出力を完了させる。
+    static PENDING_HANDLES: RefCell<Vec<JoinHandle<()>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// fire-and-forget スレッドのハンドルを取り出して join する。
+/// Decision を stdout に出力した後、process::exit の前に呼び出す。
+pub fn drain_pending_handles() {
+    PENDING_HANDLES.with(|cell| {
+        let handles = cell.borrow_mut().drain(..).collect::<Vec<_>>();
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
+}
 
 /// プロセス間の再帰的な Stop フック実行を防止する環境変数。
 /// claw-hooks が Stop フックを実行する際、子プロセスにこの環境変数を設定する。
@@ -108,7 +128,7 @@ impl StopHookFilter {
         match spawn_piped_with_env(program, args, &envs) {
             Ok(child) => {
                 let command_owned = command.to_string();
-                std::thread::spawn(move || {
+                let handle = std::thread::spawn(move || {
                     match run_with_timeout_tracked(child, timeout_secs, &command_owned) {
                         Ok(result) => {
                             Self::log_output(&command_owned, &result.output);
@@ -121,6 +141,7 @@ impl StopHookFilter {
                         }
                     }
                 });
+                PENDING_HANDLES.with(|cell| cell.borrow_mut().push(handle));
             }
             Err(e) => {
                 warn!(
@@ -1330,18 +1351,50 @@ mod tests {
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
 
-        // バックグラウンドスレッドの完了を待つ（最大5秒）
-        for _ in 0..50 {
-            if marker.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        // drain_pending_handles で確実にスレッド完了を待つ
+        drain_pending_handles();
+
         assert!(
             marker.exists(),
             "Background thread should have completed and created marker file"
         );
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn test_drain_pending_handles_waits_for_completion() {
+        // drain_pending_handles が呼ばれるまでスレッドが PENDING_HANDLES に保持され、
+        // drain 後に確実に完了していることを検証する。
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-drain-test-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        let hooks = vec![StopHook {
+            commands: vec![format!("sh -c 'sleep 1; echo done > {}'", marker_path)],
+            condition: None,
+            stage: None,
+            report: Some(false),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+        assert!(matches!(decision, Decision::Allow { .. }));
+
+        // Decision 返却直後はまだマーカーファイルが存在しない可能性がある
+        // drain_pending_handles で確実に待つ
+        drain_pending_handles();
+
+        assert!(
+            marker.exists(),
+            "drain_pending_handles should wait for thread completion"
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn test_drain_pending_handles_empty_is_noop() {
+        // PENDING_HANDLES が空の場合でもパニックしない
+        drain_pending_handles();
     }
 
     #[test]

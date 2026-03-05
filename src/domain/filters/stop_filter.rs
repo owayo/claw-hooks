@@ -5,9 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{
-    TimedOutput, run_with_timeout_tracked, spawn_detached_with_env, spawn_piped_with_env,
-};
+use crate::domain::command::{TimedOutput, run_with_timeout_tracked, spawn_piped_with_env};
 use crate::domain::{Decision, HookEvent, HookInput};
 
 /// プロセス間の再帰的な Stop フック実行を防止する環境変数。
@@ -84,8 +82,9 @@ impl StopHookFilter {
         Self::execute_command_tracked(command, timeout_secs, agent_message).map(|r| r.output)
     }
 
-    /// fire-and-forget でコマンドをデタッチ起動する（report=false 用）。
-    /// stdout/stderr は /dev/null に接続され、親プロセス終了後も子プロセスは存続する。
+    /// fire-and-forget でコマンドを起動する（report=false 用）。
+    /// stdout/stderr はパイプ接続され、バックグラウンドスレッドでログに記録される。
+    /// 親スレッドはコマンドの完了を待たない。
     fn execute_command_detached(command: &str, agent_message: Option<&str>) {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
@@ -106,8 +105,29 @@ impl StopHookFilter {
             envs.push((Self::AGENT_MESSAGE_ENV, msg));
         }
 
-        if let Err(e) = spawn_detached_with_env(program, args, &envs) {
-            warn!("❌ Failed to spawn detached stop hook '{}': {}", command, e);
+        match spawn_piped_with_env(program, args, &envs) {
+            Ok(child) => {
+                let command_owned = command.to_string();
+                std::thread::spawn(move || {
+                    match run_with_timeout_tracked(child, 300, &command_owned) {
+                        Ok(result) => {
+                            Self::log_output(&command_owned, &result.output);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "❌ Fire-and-forget stop hook '{}' failed: {}",
+                                command_owned, e
+                            );
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                warn!(
+                    "❌ Failed to spawn fire-and-forget stop hook '{}': {}",
+                    command, e
+                );
+            }
         }
     }
 

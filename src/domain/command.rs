@@ -147,32 +147,6 @@ pub fn run_with_timeout(
     run_with_timeout_tracked(child, timeout_secs, command_desc).map(|result| result.output)
 }
 
-/// stdout/stderrを `/dev/null` に接続し、追加の環境変数でコマンドをデタッチ起動する。
-/// fire-and-forget のストップフック用。親プロセス終了後も子プロセスは孤立プロセスとして存続する。
-pub fn spawn_detached_with_env(
-    program: &str,
-    args: &[String],
-    envs: &[(&str, &str)],
-) -> Result<(), String> {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.arg("/c").arg(program).args(args);
-        c
-    } else {
-        let mut c = Command::new(program);
-        c.args(args);
-        c
-    };
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    for &(key, value) in envs {
-        cmd.env(key, value);
-    }
-    cmd.spawn()
-        .map_err(|e| format!("Failed to execute '{}': {}", program, e))?;
-    // Child をドロップ — 子プロセスは OS によりデタッチされる
-    Ok(())
-}
-
 /// パイプ接続されたstdout/stderrと追加の環境変数でコマンドを起動する。
 /// ストップフックがループ防止用の環境変数を子プロセスに伝播するために使用。
 pub fn spawn_piped_with_env(

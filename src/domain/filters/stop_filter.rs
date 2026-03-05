@@ -84,16 +84,12 @@ impl StopHookFilter {
 
     /// fire-and-forget でコマンドを起動する（report=false 用）。
     /// stdout/stderr はパイプ接続され、バックグラウンドスレッドでログに記録される。
-    /// 決定には影響しないが、ログ出力のためスレッドハンドルを返す。
-    fn execute_command_detached(
-        command: &str,
-        timeout_secs: u64,
-        agent_message: Option<&str>,
-    ) -> Option<std::thread::JoinHandle<()>> {
+    /// 決定には影響せず、スレッドは完全にデタッチされる。
+    fn execute_command_detached(command: &str, timeout_secs: u64, agent_message: Option<&str>) {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             warn!("Empty command for detached execution");
-            return None;
+            return;
         }
 
         let program = &parts[0];
@@ -112,7 +108,7 @@ impl StopHookFilter {
         match spawn_piped_with_env(program, args, &envs) {
             Ok(child) => {
                 let command_owned = command.to_string();
-                Some(std::thread::spawn(move || {
+                std::thread::spawn(move || {
                     match run_with_timeout_tracked(child, timeout_secs, &command_owned) {
                         Ok(result) => {
                             Self::log_output(&command_owned, &result.output);
@@ -124,14 +120,13 @@ impl StopHookFilter {
                             );
                         }
                     }
-                }))
+                });
             }
             Err(e) => {
                 warn!(
                     "❌ Failed to spawn fire-and-forget stop hook '{}': {}",
                     command, e
                 );
-                None
             }
         }
     }
@@ -240,7 +235,6 @@ impl Filter for StopHookFilter {
 
         // ステージを順番に実行（1 → 5）、各ステージ内のコマンドは並列実行
         let mut failures: Vec<String> = Vec::new();
-        let mut detached_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
         for (stage, commands) in &stage_map {
             debug!("▶ Executing stop hook stage {}", stage);
@@ -250,13 +244,11 @@ impl Filter for StopHookFilter {
             for qc in commands {
                 if !qc.report {
                     // fire-and-forget: 決定には影響しないが、ログ出力のため後で join
-                    if let Some(handle) = Self::execute_command_detached(
+                    Self::execute_command_detached(
                         &qc.command,
                         timeout_secs,
                         agent_message.as_deref(),
-                    ) {
-                        detached_handles.push(handle);
-                    }
+                    );
                     continue;
                 }
 
@@ -293,11 +285,6 @@ impl Filter for StopHookFilter {
                     }
                 }
             }
-        }
-
-        // fire-and-forget スレッドのログ出力を待つ（決定には影響しない）
-        for handle in detached_handles {
-            let _ = handle.join();
         }
 
         if failures.is_empty() {

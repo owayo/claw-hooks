@@ -190,49 +190,54 @@ impl Filter for StopHookFilter {
         for (stage, commands) in &stage_map {
             debug!("▶ Executing stop hook stage {}", stage);
 
-            let handles: Vec<_> = commands
-                .iter()
-                .map(|qc| {
-                    let command = qc.command.clone();
-                    let report = qc.report;
-                    let agent_msg = agent_message.clone();
-                    std::thread::spawn(move || -> (bool, Option<String>) {
-                        match Self::execute_command_tracked(
-                            &command,
-                            timeout_secs,
-                            agent_msg.as_deref(),
-                        ) {
-                            Ok(result) => {
-                                Self::log_output(&command, &result.output);
-                                if result.output.status.success() || result.timed_out {
-                                    (report, None)
-                                } else if report {
-                                    (report, Some(Self::build_reason(&command, &result.output)))
-                                } else {
-                                    warn!(
-                                        "⚠️ Stop hook command failed (exit {}): {}",
-                                        result.output.status, command
-                                    );
-                                    (report, None)
-                                }
-                            }
-                            Err(e) => {
-                                if report {
-                                    (report, Some(e))
-                                } else {
-                                    warn!("❌ Stop hook failed: {}", e);
-                                    (report, None)
-                                }
+            let mut report_handles = Vec::new();
+
+            for qc in commands {
+                let command = qc.command.clone();
+                let report = qc.report;
+                let agent_msg = agent_message.clone();
+                let handle = std::thread::spawn(move || -> Option<String> {
+                    match Self::execute_command_tracked(
+                        &command,
+                        timeout_secs,
+                        agent_msg.as_deref(),
+                    ) {
+                        Ok(result) => {
+                            Self::log_output(&command, &result.output);
+                            if result.output.status.success() || result.timed_out {
+                                None
+                            } else if report {
+                                Some(Self::build_reason(&command, &result.output))
+                            } else {
+                                warn!(
+                                    "⚠️ Stop hook command failed (exit {}): {}",
+                                    result.output.status, command
+                                );
+                                None
                             }
                         }
-                    })
-                })
-                .collect();
+                        Err(e) => {
+                            if report {
+                                Some(e)
+                            } else {
+                                warn!("❌ Stop hook failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                });
 
-            for handle in handles {
+                if report {
+                    report_handles.push(handle);
+                }
+                // Non-report: thread runs detached (fire-and-forget).
+                // Child processes survive process::exit() as orphaned OS processes.
+            }
+
+            for handle in report_handles {
                 match handle.join() {
-                    Ok((_, Some(reason))) => failures.push(reason),
-                    Ok((_, None)) => {}
+                    Ok(Some(reason)) => failures.push(reason),
+                    Ok(None) => {}
                     Err(_) => {
                         warn!("🛑 Stop hook thread panicked");
                         failures.push("Stop hook thread panicked".to_string());
@@ -788,29 +793,27 @@ mod tests {
     }
 
     #[test]
-    fn test_unconditional_hook_is_completed_before_execute_returns() {
-        let marker =
-            std::env::temp_dir().join(format!("claw-hooks-stop-marker-{}", std::process::id()));
-        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
-
-        let _ = std::fs::remove_file(&marker);
-
+    fn test_non_report_hook_is_fire_and_forget() {
+        // Non-report hooks are fire-and-forget: execute() returns immediately
+        // without waiting for them to complete.
         let hooks = vec![StopHook {
-            commands: vec![format!("sh -c 'sleep 0.1; echo done > {}'", marker_path)],
+            commands: vec!["sleep 10".to_string()],
             condition: None,
             stage: None,
             report: None,
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
+        let start = std::time::Instant::now();
         let decision = filter.execute(&make_stop_input());
+        let elapsed = start.elapsed();
+
         assert!(matches!(decision, Decision::Allow { .. }));
         assert!(
-            marker.exists(),
-            "unconditional hook should complete before execute() returns"
+            elapsed.as_secs() < 3,
+            "non-report hook should not block: took {:?}",
+            elapsed
         );
-
-        let _ = std::fs::remove_file(marker);
     }
 
     // === Timeout tests ===

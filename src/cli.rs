@@ -1,9 +1,9 @@
-//! CLI argument parsing and command definitions.
+//! CLI引数パースとコマンド定義。
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI
+/// Claude Code, Cursor, Windsurf, Gemini CLI 向けAIコーディングエージェントフックシステム
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
@@ -16,56 +16,56 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Path to configuration file
+    /// 設定ファイルのパス
     #[arg(long, short = 'c', global = true)]
     pub config: Option<PathBuf>,
 
-    /// Enable debug logging
+    /// デバッグログを有効化
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// Suppress non-essential output
+    /// 非必須の出力を抑制
     #[arg(long, short = 'q', global = true)]
     pub quiet: bool,
 }
 
-/// Input/output format for different AI coding agents
+/// AIコーディングエージェントごとの入出力フォーマット
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
-    /// Claude Code format (default)
+    /// Claude Code フォーマット（デフォルト）
     #[default]
     Claude,
-    /// Cursor format
+    /// Cursor フォーマット
     Cursor,
-    /// Windsurf (Cascade) format
+    /// Windsurf (Cascade) フォーマット
     Windsurf,
-    /// Gemini CLI format
+    /// Gemini CLI フォーマット
     Gemini,
 }
 
-/// Available subcommands
+/// 利用可能なサブコマンド
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Process hook events from stdin (alias: run)
+    /// stdin からフックイベントを処理（エイリアス: run）
     #[command(alias = "run")]
     Hook {
-        /// Input/output format for different AI coding agents
+        /// AIコーディングエージェントごとの入出力フォーマット
         #[arg(long, short = 'f', default_value = "claude")]
         format: Format,
 
-        /// Trace mode: output raw input to stderr for debugging
+        /// トレースモード: デバッグ用に生の入力を stderr に出力
         #[arg(long, short = 't')]
         trace: bool,
     },
-    /// Generate default configuration file
+    /// デフォルト設定ファイルを生成
     Init {
-        /// Path where to create the configuration file
+        /// 設定ファイルの作成先パス
         #[arg(long, short = 'p')]
         path: Option<PathBuf>,
     },
-    /// Validate configuration file
+    /// 設定ファイルを検証
     Check,
-    /// Display version information
+    /// バージョン情報を表示
     Version,
 }
 

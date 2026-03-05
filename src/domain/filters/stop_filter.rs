@@ -1,20 +1,22 @@
-//! Stop event hook filter implementation.
+//! Stop イベントフックフィルターの実装。
 
 use std::process::Output;
 use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{TimedOutput, run_with_timeout_tracked, spawn_piped_with_env};
+use crate::domain::command::{
+    TimedOutput, run_with_timeout_tracked, spawn_detached_with_env, spawn_piped_with_env,
+};
 use crate::domain::{Decision, HookEvent, HookInput};
 
-/// Environment variable to prevent recursive stop hook execution across processes.
-/// When claw-hooks executes stop hooks, this env var is set on child processes.
-/// If a child process (e.g. git-sc → Gemini CLI) triggers another claw-hooks stop event,
-/// this env var will be inherited and claw-hooks will skip stop hooks to break the loop.
+/// プロセス間の再帰的な Stop フック実行を防止する環境変数。
+/// claw-hooks が Stop フックを実行する際、子プロセスにこの環境変数を設定する。
+/// 子プロセス（例: git-sc → Gemini CLI）が別の claw-hooks Stop イベントをトリガーした場合、
+/// この環境変数が継承され、Stop フックをスキップしてループを断ち切る。
 const STOP_ACTIVE_ENV: &str = "CLAW_HOOKS_STOP_ACTIVE";
 
-/// Filter for Stop event hooks.
+/// Stop イベントフックのフィルター。
 pub struct StopHookFilter {
     hooks: Vec<StopHook>,
     nano_buddy: bool,
@@ -22,7 +24,7 @@ pub struct StopHookFilter {
 }
 
 impl StopHookFilter {
-    /// Create a new StopHookFilter.
+    /// 新しい StopHookFilter を作成する。
     pub fn new(hooks: Vec<StopHook>, nano_buddy: bool, timeout_secs: u64) -> Self {
         Self {
             hooks,
@@ -31,14 +33,14 @@ impl StopHookFilter {
         }
     }
 
-    /// Environment variable to pass agent's last message to child processes.
-    /// This allows tools like git-sc to use the agent's context for better commit messages.
+    /// エージェントの最後のメッセージを子プロセスに渡す環境変数。
+    /// git-sc などのツールがエージェントのコンテキストを使用してコミットメッセージを生成できるようにする。
     const AGENT_MESSAGE_ENV: &'static str = "CLAW_HOOKS_AGENT_MESSAGE";
 
-    /// Execute a single command string safely with timeout.
-    /// Uses shell-aware tokenizer to properly handle quoted arguments.
-    /// Sets `CLAW_HOOKS_STOP_ACTIVE=1` on the child process to prevent recursive loops.
-    /// Optionally sets `CLAW_HOOKS_AGENT_MESSAGE` with the agent's last message.
+    /// タイムアウト付きで単一コマンド文字列を安全に実行する。
+    /// シェル対応のトークナイザーでクォートされた引数を適切に処理する。
+    /// 再帰ループ防止のため子プロセスに `CLAW_HOOKS_STOP_ACTIVE=1` を設定する。
+    /// 必要に応じて `CLAW_HOOKS_AGENT_MESSAGE` にエージェントの最後のメッセージを設定する。
     fn execute_command_tracked(
         command: &str,
         timeout_secs: u64,
@@ -72,7 +74,7 @@ impl StopHookFilter {
         result
     }
 
-    /// Execute a single stop hook command and return captured process output.
+    /// 単一のストップフックコマンドを実行し、キャプチャしたプロセス出力を返す。
     #[cfg(test)]
     fn execute_command(
         command: &str,
@@ -82,7 +84,34 @@ impl StopHookFilter {
         Self::execute_command_tracked(command, timeout_secs, agent_message).map(|r| r.output)
     }
 
-    /// Log stdout/stderr output from a stop hook command.
+    /// fire-and-forget でコマンドをデタッチ起動する（report=false 用）。
+    /// stdout/stderr は /dev/null に接続され、親プロセス終了後も子プロセスは存続する。
+    fn execute_command_detached(command: &str, agent_message: Option<&str>) {
+        let parts = crate::domain::parse_shell_tokens(command);
+        if parts.is_empty() {
+            warn!("Empty command for detached execution");
+            return;
+        }
+
+        let program = &parts[0];
+        let args = &parts[1..];
+
+        debug!(
+            "🚀 Executing stop hook (fire-and-forget): {} {:?}",
+            program, args
+        );
+
+        let mut envs: Vec<(&str, &str)> = vec![(STOP_ACTIVE_ENV, "1")];
+        if let Some(msg) = agent_message {
+            envs.push((Self::AGENT_MESSAGE_ENV, msg));
+        }
+
+        if let Err(e) = spawn_detached_with_env(program, args, &envs) {
+            warn!("❌ Failed to spawn detached stop hook '{}': {}", command, e);
+        }
+    }
+
+    /// ストップフックコマンドの stdout/stderr 出力をログに記録する。
     fn log_output(command: &str, output: &Output) {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -94,7 +123,7 @@ impl StopHookFilter {
         }
     }
 
-    /// Build a block reason from command output (stdout + stderr).
+    /// コマンド出力（stdout + stderr）からブロック理由を構築する。
     fn build_reason(command: &str, output: &Output) -> String {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -115,15 +144,15 @@ impl StopHookFilter {
 
 impl Filter for StopHookFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // Applies only to Stop events
+        // Stop イベントにのみ適用
         input.event == HookEvent::Stop
     }
 
     fn execute(&self, input: &HookInput) -> Decision {
-        // Check environment variable to prevent cross-process recursive loops.
-        // When claw-hooks runs stop hooks, child processes inherit CLAW_HOOKS_STOP_ACTIVE=1.
-        // If those children (e.g. git-sc → Gemini CLI) trigger another claw-hooks stop event,
-        // this check breaks the loop.
+        // クロスプロセス再帰ループ防止のため環境変数をチェック。
+        // claw-hooks がストップフックを実行すると、子プロセスは CLAW_HOOKS_STOP_ACTIVE=1 を継承する。
+        // その子プロセス（例: git-sc → Gemini CLI）が別の claw-hooks ストップイベントを
+        // トリガーした場合、このチェックでループを中断する。
         if std::env::var(STOP_ACTIVE_ENV).is_ok() {
             debug!(
                 "⛔ {}=1 detected, skipping all stop hooks (cross-process loop prevention)",
@@ -132,8 +161,8 @@ impl Filter for StopHookFilter {
             return Decision::allow();
         }
 
-        // Check stop_hook_active to prevent infinite loops (agent-internal flag)
-        // Also extract agent_message for passing to child processes
+        // 無限ループ防止のため stop_hook_active をチェック（エージェント内部フラグ）
+        // また、子プロセスに渡すための agent_message を抽出
         let agent_message = if let crate::domain::ToolInput::Stop(ref stop_input) = input.tool_input
         {
             if stop_input.stop_hook_active {
@@ -145,7 +174,7 @@ impl Filter for StopHookFilter {
             None
         };
 
-        // NanoBuddy notification (before all stop hooks so it arrives first)
+        // NanoBuddy 通知（全ストップフックの前に実行し、最初に到着させる）
         if self.nano_buddy {
             debug!("🐱 NanoBuddy stop notification");
             crate::notify::nano_buddy::notify_stop_hook();
@@ -154,13 +183,13 @@ impl Filter for StopHookFilter {
         let cwd = std::env::current_dir().unwrap_or_default();
         let timeout_secs = self.timeout_secs;
 
-        // Collect hooks that pass their condition check, tagged with report flag
+        // 条件チェックを通過したフックを report フラグ付きで収集
         struct QualifiedCommand {
             command: String,
             report: bool,
         }
 
-        // Group commands by stage (ascending order)
+        // コマンドをステージごとにグループ化（昇順）
         let mut stage_map: std::collections::BTreeMap<u8, Vec<QualifiedCommand>> =
             std::collections::BTreeMap::new();
 
@@ -184,7 +213,7 @@ impl Filter for StopHookFilter {
             }
         }
 
-        // Execute stages sequentially (1 → 5), commands within each stage in parallel
+        // ステージを順番に実行（1 → 5）、各ステージ内のコマンドは並列実行
         let mut failures: Vec<String> = Vec::new();
 
         for (stage, commands) in &stage_map {
@@ -193,8 +222,13 @@ impl Filter for StopHookFilter {
             let mut report_handles = Vec::new();
 
             for qc in commands {
+                if !qc.report {
+                    // fire-and-forget: デタッチ起動（Stdio::null、スレッド不要）
+                    Self::execute_command_detached(&qc.command, agent_message.as_deref());
+                    continue;
+                }
+
                 let command = qc.command.clone();
-                let report = qc.report;
                 let agent_msg = agent_message.clone();
                 let handle = std::thread::spawn(move || -> Option<String> {
                     match Self::execute_command_tracked(
@@ -206,32 +240,15 @@ impl Filter for StopHookFilter {
                             Self::log_output(&command, &result.output);
                             if result.output.status.success() || result.timed_out {
                                 None
-                            } else if report {
+                            } else {
                                 Some(Self::build_reason(&command, &result.output))
-                            } else {
-                                warn!(
-                                    "⚠️ Stop hook command failed (exit {}): {}",
-                                    result.output.status, command
-                                );
-                                None
                             }
                         }
-                        Err(e) => {
-                            if report {
-                                Some(e)
-                            } else {
-                                warn!("❌ Stop hook failed: {}", e);
-                                None
-                            }
-                        }
+                        Err(e) => Some(e),
                     }
                 });
 
-                if report {
-                    report_handles.push(handle);
-                }
-                // Non-report: thread runs detached (fire-and-forget).
-                // Child processes survive process::exit() as orphaned OS processes.
+                report_handles.push(handle);
             }
 
             for handle in report_handles {
@@ -256,7 +273,7 @@ impl Filter for StopHookFilter {
     }
 
     fn priority(&self) -> u32 {
-        100 // Low priority - runs after other filters
+        100 // 低優先度 - 他のフィルターの後に実行
     }
 }
 

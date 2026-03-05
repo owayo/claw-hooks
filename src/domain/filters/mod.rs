@@ -1,4 +1,4 @@
-//! Filter system for command filtering.
+//! コマンドフィルタリングシステム。
 
 mod chain;
 mod custom_filter;

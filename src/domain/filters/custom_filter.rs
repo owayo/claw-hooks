@@ -1,4 +1,4 @@
-//! Custom command filter implementation.
+//! カスタムコマンドフィルターの実装。
 
 use regex::Regex;
 
@@ -6,36 +6,36 @@ use super::Filter;
 use crate::domain::parser::ShellParser;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
-/// Filter mode for custom command matching.
+/// カスタムコマンドマッチングのフィルターモード。
 enum FilterMode {
-    /// Regex-based pattern matching (command field is regex)
+    /// 正規表現ベースのパターンマッチング（command フィールドが正規表現）
     Regex(Regex),
-    /// Regex command name + args matching
+    /// 正規表現コマンド名 + 引数マッチング
     Args { command: Regex, args: Vec<String> },
 }
 
-/// Filter for custom command patterns.
+/// カスタムコマンドパターンのフィルター。
 ///
-/// Supports two modes:
-/// 1. Regex mode: When only `command` is specified, it's treated as a regex pattern
-/// 2. Args mode: When both `command` and `args` are specified, matches regex command + any arg
+/// 2つのモードをサポート:
+/// 1. 正規表現モード: `command` のみ指定時、正規表現パターンとして扱う
+/// 2. 引数モード: `command` と `args` 両方指定時、正規表現コマンド + いずれかの引数でマッチ
 pub struct CustomCommandFilter {
     mode: FilterMode,
     message: String,
 }
 
 impl CustomCommandFilter {
-    /// Create a new CustomCommandFilter with regex pattern.
+    /// 正規表現パターンで新しい CustomCommandFilter を作成する。
     ///
-    /// The pattern is automatically anchored at the start of the command string
-    /// to ensure it matches the command name, not arguments.
-    /// For example, pattern "yarn" will match "yarn install" but not "grep yarn".
+    /// パターンはコマンド文字列の先頭に自動アンカーされ、
+    /// 引数ではなくコマンド名にマッチすることを保証する。
+    /// 例: パターン "yarn" は "yarn install" にマッチするが "grep yarn" にはマッチしない。
     ///
     /// # Errors
     ///
-    /// Returns error if the pattern is not a valid regex.
+    /// パターンが有効な正規表現でない場合エラーを返す。
     pub fn new(pattern: &str, message: String) -> Result<Self, regex::Error> {
-        // Anchor pattern at start to match command name, not arbitrary arguments
+        // コマンド名にマッチするよう先頭にアンカーする
         let anchored_pattern = if pattern.starts_with('^') {
             pattern.to_string()
         } else {
@@ -48,31 +48,31 @@ impl CustomCommandFilter {
         })
     }
 
-    /// Create a new CustomCommandFilter with regex command + args matching.
+    /// 正規表現コマンド + 引数マッチングで新しい CustomCommandFilter を作成する。
     ///
-    /// Matches if the command name matches `command` regex AND any of the `args` is present
-    /// as the first argument.
+    /// コマンド名が `command` 正規表現にマッチし、かつ `args` のいずれかが
+    /// 最初の引数として存在する場合にマッチする。
     ///
-    /// # Example
+    /// # 例
     ///
     /// ```ignore
     /// let filter = CustomCommandFilter::with_args("npm", vec!["install", "i", "add"], "msg")?;
-    /// // Matches: npm install, npm i, npm add package
-    /// // Does not match: npm run, npm test
+    /// // マッチする: npm install, npm i, npm add package
+    /// // マッチしない: npm run, npm test
     ///
     /// let filter = CustomCommandFilter::with_args("pip3?", vec!["install"], "msg")?;
-    /// // Matches: pip install, pip3 install
+    /// // マッチする: pip install, pip3 install
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns error if the command pattern is not a valid regex.
+    /// コマンドパターンが有効な正規表現でない場合エラーを返す。
     pub fn with_args(
         command: &str,
         args: Vec<String>,
         message: String,
     ) -> Result<Self, regex::Error> {
-        // Compile command as regex (anchored to match full command name)
+        // コマンド名全体にマッチするようアンカー付きで正規表現をコンパイル
         let anchored = format!("^{}$", command);
         let regex = Regex::new(&anchored)?;
         Ok(Self {
@@ -84,8 +84,8 @@ impl CustomCommandFilter {
         })
     }
 
-    /// Strip quoted content from a command string for pattern matching.
-    /// This prevents false positives like matching "yarn" in `echo "yarn"`.
+    /// パターンマッチング用にコマンド文字列からクォートされた内容を除去する。
+    /// `echo "yarn"` のような誤検知を防止する。
     fn strip_quoted_content(s: &str) -> String {
         let mut result = String::new();
         let mut in_single_quote = false;
@@ -94,7 +94,7 @@ impl CustomCommandFilter {
 
         while let Some(c) = chars.next() {
             if c == '\\' && !in_single_quote {
-                // Skip escaped character
+                // エスケープされた文字をスキップ
                 chars.next();
                 continue;
             }
@@ -117,7 +117,7 @@ impl CustomCommandFilter {
         result
     }
 
-    /// Check if any command in the string matches using regex mode.
+    /// 正規表現モードでコマンド文字列がマッチするか判定する。
     fn matches_regex(&self, command: &str, pattern: &Regex) -> bool {
         let mut parser = ShellParser::new();
         let command_strings = parser.extract_command_strings(command);
@@ -127,7 +127,7 @@ impl CustomCommandFilter {
             .any(|cmd| pattern.is_match(&Self::strip_quoted_content(cmd)))
     }
 
-    /// Check if any command in the string matches using args mode.
+    /// 引数モードでコマンド文字列がマッチするか判定する。
     fn matches_args(
         &self,
         input_command: &str,
@@ -145,17 +145,17 @@ impl CustomCommandFilter {
                 continue;
             }
 
-            // Check if command name matches regex
+            // コマンド名が正規表現にマッチするか判定
             if !target_cmd.is_match(parts[0]) {
                 continue;
             }
 
-            // If no args specified, any usage of the command matches
+            // 引数未指定の場合、コマンドの使用すべてにマッチ
             if target_args.is_empty() {
                 return true;
             }
 
-            // Check if any of the target args is present
+            // 対象の引数が存在するか判定
             if parts.len() > 1 && target_args.iter().any(|arg| parts[1] == arg) {
                 return true;
             }
@@ -164,7 +164,7 @@ impl CustomCommandFilter {
         false
     }
 
-    /// Check if any command in the string matches the filter.
+    /// コマンド文字列がフィルターにマッチするか判定する。
     fn matches(&self, command: &str) -> bool {
         match &self.mode {
             FilterMode::Regex(pattern) => self.matches_regex(command, pattern),
@@ -175,12 +175,11 @@ impl CustomCommandFilter {
 
 impl Filter for CustomCommandFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // Only applies to Bash tool in BeforeCommand event
+        // BeforeCommand イベントの Bash ツールにのみ適用
         if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 
-        // Extract command from tool input
         if let ToolInput::Bash(bash) = &input.tool_input {
             return self.matches(&bash.command);
         }
@@ -195,7 +194,7 @@ impl Filter for CustomCommandFilter {
     }
 
     fn priority(&self) -> u32 {
-        50 // Medium priority
+        50 // 中優先度
     }
 }
 

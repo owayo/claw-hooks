@@ -1,4 +1,4 @@
-//! Hook processing service.
+//! フックイベント処理サービス。
 
 use std::io::{self, BufRead, Write};
 use std::process;
@@ -11,17 +11,17 @@ use crate::config::Config;
 use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
 
-/// Service for processing hook events.
+/// フックイベント処理サービス。
 pub struct HookService {
     config: Config,
     filter_chain: FilterChain,
     adapter: FormatAdapter,
-    /// Trace mode: output raw input to stderr for debugging
+    /// トレースモード: デバッグ用に生の入力を stderr に出力
     trace: bool,
 }
 
 impl HookService {
-    /// Create a new HookService with the specified format.
+    /// 指定フォーマットで新しい HookService を作成する。
     pub fn new(config: Config, format: Format, trace: bool) -> Self {
         let filter_chain = FilterChain::new(&config);
         let adapter = FormatAdapter::new(format);
@@ -33,22 +33,22 @@ impl HookService {
         }
     }
 
-    /// Run the hook processing loop.
+    /// フック処理ループを実行する。
     ///
-    /// Reads JSON input from stdin, processes it, and writes JSON output to stdout.
-    /// The input/output format depends on the configured agent format.
+    /// stdin から JSON 入力を読み取り、処理して stdout に JSON 出力を書き込む。
+    /// 入出力フォーマットは設定されたエージェントフォーマットに依存する。
     pub fn run(&self) -> Result<()> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
 
-        // Read all input from stdin
+        // stdin から全入力を読み取り
         let mut input = String::new();
         for line in stdin.lock().lines() {
             input.push_str(&line?);
         }
 
-        // Trace mode: output raw input to stderr immediately
+        // トレースモード: 生の入力を即座に stderr に出力
         if self.trace {
             eprintln!("🔍 [TRACE] Raw input received:");
             eprintln!("{}", input);
@@ -60,16 +60,16 @@ impl HookService {
                 eprintln!("🔍 [TRACE] ERROR: No input received from stdin");
             }
             error!("No input received from stdin");
-            // SECURITY: Use fail-closed - block when no input received
+            // セキュリティ: フェイルクローズ - 入力がない場合はブロック
             let output_json = self.adapter.format_error("No input received from stdin");
             writeln!(stdout, "{}", output_json)?;
-            stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
+            stdout.flush()?; // パイプのためexit前にフラッシュ
             process::exit(self.adapter.error_exit_code());
         }
 
         debug!("Received input: {}", input);
 
-        // Parse input using format adapter
+        // フォーマットアダプターで入力をパース
         let hook_input: HookInput = match self.adapter.parse_input(&input) {
             Ok(parsed) => {
                 if self.trace {
@@ -87,16 +87,16 @@ impl HookService {
                     eprintln!("🔍 [TRACE] Parse error: {}", error_msg);
                 }
                 error!("{}", error_msg);
-                // Output error in the appropriate format with message
-                // SECURITY: Use fail-closed exit code (2 = block)
+                // 適切なフォーマットでエラーを出力
+                // セキュリティ: フェイルクローズ終了コード（2 = block）
                 let output_json = self.adapter.format_error(&error_msg);
                 writeln!(stdout, "{}", output_json)?;
-                stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
+                stdout.flush()?; // パイプのためexit前にフラッシュ
                 process::exit(self.adapter.error_exit_code());
             }
         };
 
-        // Process the hook
+        // フックを処理
         let decision = self.process(&hook_input);
         let exit_code = self.adapter.exit_code(&decision, hook_input.event);
 
@@ -105,7 +105,7 @@ impl HookService {
             eprintln!("🔍 [TRACE] Exit code: {}", exit_code);
         }
 
-        // Write output using format adapter
+        // フォーマットアダプターで出力を書き込み
         let output = self.adapter.format_output(&decision, hook_input.event)?;
 
         if self.trace {
@@ -120,7 +120,7 @@ impl HookService {
         };
         info!("Output {}: {}", emoji, output);
 
-        // Windsurf Stop Block outputs to stderr (agent reads stderr on exit 2)
+        // Windsurf Stop Block は stderr に出力（エージェントは exit 2 時に stderr を読む）
         if self.adapter.use_stderr(&decision, hook_input.event) {
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
@@ -128,13 +128,13 @@ impl HookService {
             stderr.flush()?;
         } else {
             writeln!(stdout, "{}", output)?;
-            stdout.flush()?; // Ensure output is flushed before exit (important for pipes)
+            stdout.flush()?; // パイプのためexit前にフラッシュ
         }
 
         process::exit(exit_code);
     }
 
-    /// Process hook input and return decision.
+    /// フック入力を処理して判定を返す。
     pub fn process(&self, input: &HookInput) -> Decision {
         debug!(
             "Processing hook: event={:?}, tool_name={}",
@@ -150,15 +150,15 @@ impl HookService {
         }
     }
 
-    /// Handle BeforeCommand event (pre-tool-use).
+    /// BeforeCommand イベントの処理（ツール使用前）。
     fn handle_before_command(&self, input: &HookInput) -> Decision {
         debug!("Handling BeforeCommand for tool: {}", input.tool_name);
 
-        // Run through filter chain
+        // フィルターチェーンを実行
         self.filter_chain.execute(input)
     }
 
-    /// Handle AfterFileEdit event (post-tool-use for file operations).
+    /// AfterFileEdit イベントの処理（ファイル操作後）。
     fn handle_after_file_edit(&self, input: &HookInput) -> Decision {
         if self.config.debug {
             debug!(
@@ -167,43 +167,43 @@ impl HookService {
             );
         }
 
-        // For Write/Edit/MultiEdit, run through filter chain for extension hooks
-        // This enables:
-        // - Claude Code: PostToolUse with Write
-        // - Cursor: afterFileEdit (mapped to AfterFileEdit + Write)
-        // - Windsurf: post_write_code (mapped to AfterFileEdit + Write)
+        // Write/Edit/MultiEdit の場合、拡張子フック用にフィルターチェーンを実行
+        // 対応エージェント:
+        // - Claude Code: PostToolUse (Write)
+        // - Cursor: afterFileEdit (AfterFileEdit + Write にマッピング)
+        // - Windsurf: post_write_code (AfterFileEdit + Write にマッピング)
         if matches!(input.tool_name.as_str(), "Write" | "Edit" | "MultiEdit") {
             return self.filter_chain.execute(input);
         }
 
-        // Other AfterFileEdit events always allow
+        // その他の AfterFileEdit イベントは常に許可
         Decision::allow()
     }
 
-    /// Handle Stop event.
+    /// Stop イベントの処理。
     fn handle_stop(&self, input: &HookInput) -> Decision {
         info!("Stop event received: session_id={:?}", input.session_id);
 
-        // Execute stop hooks through the filter chain
+        // フィルターチェーン経由で Stop フックを実行
         self.filter_chain.execute(input)
     }
 
-    /// Handle BeforePrompt event (Gemini CLI only).
+    /// BeforePrompt イベントの処理（Gemini CLI のみ）。
     fn handle_before_prompt(&self, _input: &HookInput) -> Decision {
         debug!("Handling BeforePrompt event");
 
-        // BeforePrompt is currently a pass-through event
+        // BeforePrompt は現在パススルーイベント
         Decision::allow()
     }
 
-    /// Handle SubagentStart/SubagentStop events.
+    /// SubagentStart/SubagentStop イベントの処理。
     fn handle_subagent(&self, input: &HookInput) -> Decision {
         info!(
             "Subagent event received: {:?}, session_id={:?}",
             input.event, input.session_id
         );
 
-        // Execute through filter chain (SubagentFilter handles NanoBuddy notifications)
+        // フィルターチェーン経由で実行（SubagentFilter が NanoBuddy 通知を処理）
         self.filter_chain.execute(input)
     }
 }
@@ -441,6 +441,204 @@ mod tests {
         };
         let decision = service.process(&input);
         assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    // === フィルター無効化テスト ===
+
+    #[test]
+    fn test_process_with_disabled_kill_block() {
+        let config = Config {
+            kill_block: false,
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+        let input = make_bash_input("kill -9 1234");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_with_disabled_dd_block() {
+        let config = Config {
+            dd_block: false,
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_all_blocks_disabled() {
+        let config = Config {
+            rm_block: false,
+            kill_block: false,
+            dd_block: false,
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+
+        assert!(matches!(
+            service.process(&make_bash_input("rm -rf /")),
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            service.process(&make_bash_input("kill 1234")),
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            service.process(&make_bash_input("dd if=/dev/zero of=/dev/sda")),
+            Decision::Allow { .. }
+        ));
+    }
+
+    // === ブロックメッセージ内容テスト ===
+
+    #[test]
+    fn test_process_rm_block_returns_non_empty_message() {
+        let service = make_service();
+        let input = make_bash_input("rm -rf /tmp/foo");
+        let decision = service.process(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    !message.is_empty(),
+                    "rm ブロックメッセージは空であってはならない"
+                );
+                assert!(
+                    message.contains("rm"),
+                    "rm ブロックメッセージは rm に言及すべき: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
+
+    #[test]
+    fn test_process_kill_block_returns_non_empty_message() {
+        let service = make_service();
+        let input = make_bash_input("kill -9 1234");
+        let decision = service.process(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert!(
+                    !message.is_empty(),
+                    "kill ブロックメッセージは空であってはならない"
+                );
+                assert!(
+                    message.contains("kill"),
+                    "kill ブロックメッセージは kill に言及すべき: {}",
+                    message
+                );
+            }
+            _ => panic!("Expected Block decision"),
+        }
+    }
+
+    // === カスタムフィルター引数モードテスト ===
+
+    #[test]
+    fn test_process_custom_filter_with_args_blocks_matching_arg() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "npm".to_string(),
+            args: vec!["install".to_string(), "i".to_string()],
+            message: "Use pnpm instead".to_string(),
+        });
+        let service = HookService::new(config, Format::Claude, false);
+
+        assert!(matches!(
+            service.process(&make_bash_input("npm install lodash")),
+            Decision::Block { .. }
+        ));
+        assert!(matches!(
+            service.process(&make_bash_input("npm i lodash")),
+            Decision::Block { .. }
+        ));
+    }
+
+    #[test]
+    fn test_process_custom_filter_with_args_allows_non_matching_arg() {
+        let mut config = Config::default();
+        config.custom_filters.push(crate::config::CustomFilter {
+            command: "npm".to_string(),
+            args: vec!["install".to_string()],
+            message: "Use pnpm instead".to_string(),
+        });
+        let service = HookService::new(config, Format::Claude, false);
+
+        assert!(matches!(
+            service.process(&make_bash_input("npm run build")),
+            Decision::Allow { .. }
+        ));
+        assert!(matches!(
+            service.process(&make_bash_input("npm test")),
+            Decision::Allow { .. }
+        ));
+    }
+
+    // === チェーンコマンド内の検出テスト ===
+
+    #[test]
+    fn test_process_blocks_rm_in_chained_command() {
+        let service = make_service();
+        let input = make_bash_input("cd /tmp && rm -rf foo");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_kill_in_semicolon_chain() {
+        let service = make_service();
+        let input = make_bash_input("echo done; killall node");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_dd_in_subshell() {
+        let service = make_service();
+        let input = make_bash_input("bash -c 'dd if=/dev/zero of=/dev/sda'");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    // === 非Bashツールのテスト ===
+
+    #[test]
+    fn test_process_before_command_non_bash_tool_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/rm.txt".to_string(),
+                content: Some("rm content".to_string()),
+            }),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    // === カスタムブロックメッセージテスト ===
+
+    #[test]
+    fn test_process_custom_rm_block_message() {
+        let config = Config {
+            rm_block_message: Some("カスタムrmブロック".to_string()),
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+        let input = make_bash_input("rm file.txt");
+        match service.process(&input) {
+            Decision::Block { message } => {
+                assert_eq!(message, "カスタムrmブロック");
+            }
+            _ => panic!("Expected Block decision"),
+        }
     }
 
     #[test]

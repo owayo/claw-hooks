@@ -1,20 +1,20 @@
-//! DD command filter implementation.
+//! dd コマンドフィルターの実装。
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
-/// Default message for dd blocking.
+/// dd ブロック時のデフォルトメッセージ。
 const DEFAULT_DD_MESSAGE: &str = "🚫 dd command is blocked for safety. Use cp or rsync for file operations. If you need dd specifically, use safe-dd or request explicit permission.";
 
-/// Filter for blocking dd command.
+/// dd コマンドをブロックするフィルター。
 pub struct DdFilter {
     enabled: bool,
     message: String,
 }
 
 impl DdFilter {
-    /// Create a new DdFilter with optional custom message.
+    /// カスタムメッセージ付きの新しい DdFilter を作成する。
     pub fn new(enabled: bool, custom_message: Option<String>) -> Self {
         Self {
             enabled,
@@ -22,12 +22,12 @@ impl DdFilter {
         }
     }
 
-    /// DD command patterns
+    /// dd コマンドパターン
     const DD_COMMANDS: &'static [&'static str] = &[
-        "dd", // Unix disk dump command
+        "dd", // Unix ディスクダンプコマンド
     ];
 
-    /// Check if any command in the string is a dd command.
+    /// コマンド文字列に dd コマンドが含まれるか判定する。
     fn contains_dd_command(command: &str) -> bool {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands(command);
@@ -44,12 +44,11 @@ impl Filter for DdFilter {
             return false;
         }
 
-        // Only applies to Bash tool in BeforeCommand event
+        // BeforeCommand イベントの Bash ツールにのみ適用
         if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 
-        // Extract command from tool input
         if let ToolInput::Bash(bash) = &input.tool_input {
             return Self::contains_dd_command(&bash.command);
         }
@@ -64,7 +63,7 @@ impl Filter for DdFilter {
     }
 
     fn priority(&self) -> u32 {
-        15 // High priority, between kill (10) and rm (20)
+        15 // 高優先度（kill(10) と rm(20) の間）
     }
 }
 

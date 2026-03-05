@@ -1,206 +1,206 @@
-//! Core domain types for hook input/output.
+//! フック入出力用のコアドメイン型。
 
 use serde::{Deserialize, Serialize};
 
-/// Hook event type.
+/// フックイベント型。
 ///
-/// Represents the type of hook event in an agent-agnostic way.
-/// Each AI coding agent uses different event names externally,
-/// but internally we use this unified enum for type safety.
+/// エージェント非依存の方法でフックイベントの種類を表現する。
+/// 各 AI コーディングエージェントは外部で異なるイベント名を使用するが、
+/// 内部的には型安全性のためにこの統一列挙型を使用する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
-    /// Before command execution (target for rm, kill blocking).
+    /// コマンド実行前（rm, kill ブロッキングの対象）。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Claude Code: `PreToolUse`
     /// - Cursor: `ShellExecution`
     /// - Windsurf: `pre_run_command`
     /// - Gemini CLI: `BeforeTool`
     BeforeCommand,
 
-    /// After file edit (target for extension hooks).
+    /// ファイル編集後（拡張フックの対象）。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Claude Code: `PostToolUse`
     /// - Cursor: `FileEdit`
     /// - Windsurf: `post_write_code`
     /// - Gemini CLI: `AfterTool`
     AfterFileEdit,
 
-    /// Agent loop stopped.
+    /// エージェントループ停止。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Claude Code: `Stop`
     /// - Cursor: `Stop`
     /// - Windsurf: `post_cascade_response`
     /// - Gemini CLI: `AfterAgent`
     Stop,
 
-    /// Before user prompt submission (Gemini CLI only).
+    /// ユーザープロンプト送信前（Gemini CLI のみ）。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Gemini CLI: `BeforeAgent`
     BeforePrompt,
 
-    /// Before spawning a subagent.
+    /// サブエージェント起動前。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Claude Code: `SubagentStart`
     /// - Cursor: `subagentStart`
     SubagentStart,
 
-    /// After a subagent finishes.
+    /// サブエージェント終了後。
     ///
-    /// External event names:
+    /// 外部イベント名:
     /// - Claude Code: `SubagentStop`
     /// - Cursor: `subagentStop`
     SubagentStop,
 }
 
-/// Hook input received from AI agent.
+/// AI エージェントから受信したフック入力。
 ///
-/// Note: This struct is not directly deserializable from JSON.
-/// Use `FormatAdapter::parse_input()` to convert agent-specific
-/// JSON formats into this internal representation.
+/// 注意: この構造体は JSON から直接デシリアライズできない。
+/// エージェント固有の JSON 形式をこの内部表現に変換するには
+/// `FormatAdapter::parse_input()` を使用すること。
 #[derive(Debug, Clone)]
 pub struct HookInput {
-    /// Event type (agent-agnostic).
+    /// イベント型（エージェント非依存）。
     pub event: HookEvent,
 
-    /// Tool name: "Bash", "Write", "Edit", "MultiEdit", "Read", etc.
+    /// ツール名: "Bash", "Write", "Edit", "MultiEdit", "Read" 等。
     pub tool_name: String,
 
-    /// Tool-specific input
+    /// ツール固有の入力
     pub tool_input: ToolInput,
 
-    /// Optional session identifier
+    /// オプションのセッション識別子
     pub session_id: Option<String>,
 }
 
-/// Tool-specific input variants.
+/// ツール固有の入力バリアント。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ToolInput {
-    /// Bash command input
+    /// Bash コマンド入力
     Bash(BashInput),
-    /// File operation input (Write, Edit, MultiEdit, Read)
+    /// ファイル操作入力（Write, Edit, MultiEdit, Read）
     File(FileOperationInput),
-    /// Stop event input (agent loop ended)
+    /// Stop イベント入力（エージェントループ終了）
     #[allow(dead_code)]
     Stop(StopInput),
-    /// Subagent event input (SubagentStart/SubagentStop)
+    /// サブエージェントイベント入力（SubagentStart/SubagentStop）
     Subagent(SubagentInput),
-    /// Other/unknown tool input
+    /// その他/未知のツール入力
     #[allow(dead_code)]
     Other(serde_json::Value),
 }
 
-/// Bash command input.
+/// Bash コマンド入力。
 #[derive(Debug, Clone, Deserialize)]
 pub struct BashInput {
-    /// Command to execute
+    /// 実行するコマンド
     pub command: String,
 
-    /// Optional timeout in milliseconds
+    /// オプションの timeout（ミリ秒）
     #[serde(default)]
     #[allow(dead_code)]
     pub timeout: Option<u64>,
 }
 
-/// File operation input.
+/// ファイル操作入力。
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileOperationInput {
-    /// File path
+    /// ファイルパス
     pub file_path: String,
 
-    /// Optional content (for Write/Edit)
+    /// オプションのコンテンツ（Write/Edit 用）
     #[serde(default)]
     #[allow(dead_code)]
     pub content: Option<String>,
 }
 
-/// Subagent event input (SubagentStart/SubagentStop).
+/// サブエージェントイベント入力（SubagentStart/SubagentStop）。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct SubagentInput {
-    /// Subagent type (e.g., "generalPurpose", "explore", "shell")
+    /// サブエージェントの種類（例: "generalPurpose", "explore", "shell"）
     #[serde(default)]
     pub subagent_type: Option<String>,
 
-    /// Prompt given to the subagent (SubagentStart only)
+    /// サブエージェントに与えられたプロンプト（SubagentStart のみ）
     #[serde(default)]
     pub prompt: Option<String>,
 
-    /// Status of the subagent (SubagentStop only: "completed", "error")
+    /// サブエージェントのステータス（SubagentStop のみ: "completed", "error"）
     #[serde(default)]
     pub status: Option<String>,
 
-    /// Duration in milliseconds (SubagentStop only)
+    /// 実行時間（ミリ秒、SubagentStop のみ）
     #[serde(default)]
     pub duration: Option<u64>,
 }
 
-/// Stop event input.
+/// Stop イベント入力。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct StopInput {
-    /// Stop status (Cursor: "completed", "aborted", "error")
+    /// 停止ステータス（Cursor: "completed", "aborted", "error"）
     #[serde(default)]
     pub status: Option<String>,
 
-    /// Loop count (Cursor: number of auto-followups triggered)
+    /// ループ回数（Cursor: 自動フォローアップの実行回数）
     #[serde(default)]
     pub loop_count: Option<u32>,
 
-    /// Response content (Windsurf: full cascade response)
+    /// レスポンスコンテンツ（Windsurf: 完全なカスケードレスポンス）
     #[serde(default)]
     pub response: Option<String>,
 
-    /// Agent's last message (Claude Code: last_assistant_message, Windsurf: response)
+    /// エージェントの最後のメッセージ（Claude Code: last_assistant_message, Windsurf: response）
     #[serde(default)]
     pub agent_message: Option<String>,
 
-    /// Whether stop hooks are already active (prevents infinite loops)
+    /// Stop フックが既にアクティブかどうか（無限ループ防止）
     #[serde(default)]
     pub stop_hook_active: bool,
 }
 
-/// Hook output sent back to AI agent.
+/// AI エージェントに返されるフック出力。
 #[derive(Debug, Clone, Serialize)]
 pub struct HookOutput {
-    /// Decision: "approve" or "block"
+    /// 判定: "approve" または "block"
     pub decision: String,
 
-    /// Optional message (usually present when blocking)
+    /// オプションのメッセージ（通常ブロック時に存在）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 
-    /// Hook-specific output for Claude Code (PostToolUse additionalContext)
+    /// Claude Code 用のフック固有出力（PostToolUse additionalContext）
     #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 
-/// Hook-specific output for Claude Code PostToolUse.
+/// Claude Code PostToolUse 用のフック固有出力。
 #[derive(Debug, Clone, Serialize)]
 pub struct HookSpecificOutput {
-    /// Hook event name
+    /// フックイベント名
     #[serde(rename = "hookEventName")]
     pub hook_event_name: String,
 
-    /// Additional context for the agent (e.g., lint warnings)
+    /// エージェントへの追加コンテキスト（例: lint 警告）
     #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
 }
 
-/// Processing decision with optional block message.
+/// オプションのブロックメッセージ付き処理判定。
 #[derive(Debug, Clone)]
 pub enum Decision {
-    /// Allow the operation with optional context for the agent
+    /// オプションのコンテキスト付きで操作を許可
     Allow {
-        /// Additional context to pass to the agent (e.g., lint warnings)
+        /// エージェントに渡す追加コンテキスト（例: lint 警告）
         additional_context: Option<String>,
     },
-    /// Block the operation with a message
+    /// メッセージ付きで操作をブロック
     Block { message: String },
 }
 
@@ -213,28 +213,28 @@ impl Default for Decision {
 }
 
 impl Decision {
-    /// Create an Allow decision with no additional context.
+    /// 追加コンテキストなしの Allow 判定を作成する。
     pub fn allow() -> Self {
         Decision::Allow {
             additional_context: None,
         }
     }
 
-    /// Create an Allow decision with additional context for the agent.
+    /// エージェント向けの追加コンテキスト付き Allow 判定を作成する。
     pub fn allow_with_context(context: String) -> Self {
         Decision::Allow {
             additional_context: Some(context),
         }
     }
 
-    /// Convert decision to HookOutput for the given event.
+    /// 指定イベントに対して判定を HookOutput に変換する。
     pub fn into_output(self, event: HookEvent) -> HookOutput {
         match self {
             Decision::Allow { additional_context } => {
-                // Only include hookSpecificOutput for AfterFileEdit (PostToolUse in Claude Code)
+                // AfterFileEdit（Claude Code の PostToolUse）の場合のみ hookSpecificOutput を含める
                 let hook_specific_output = if event == HookEvent::AfterFileEdit {
                     additional_context.map(|ctx| HookSpecificOutput {
-                        // External format uses "PostToolUse" for Claude Code compatibility
+                        // 外部形式は Claude Code 互換性のため "PostToolUse" を使用
                         hook_event_name: "PostToolUse".to_string(),
                         additional_context: Some(ctx),
                     })
@@ -256,7 +256,7 @@ impl Decision {
         }
     }
 
-    /// Get exit code for this decision.
+    /// この判定の終了コードを取得する。
     ///
     /// - Allow: 0
     /// - Block: 2
@@ -267,8 +267,8 @@ impl Decision {
         }
     }
 
-    /// Merge additional context from another decision.
-    /// If both have context, they are joined with newlines.
+    /// 別の判定から追加コンテキストをマージする。
+    /// 両方にコンテキストがある場合は改行で結合される。
     #[allow(dead_code)]
     pub fn merge_context(self, other_context: Option<String>) -> Self {
         match self {
@@ -310,9 +310,9 @@ mod tests {
     #[test]
     fn test_hook_event_copy() {
         let event = HookEvent::BeforeCommand;
-        let copied = event; // Copy, not move
+        let copied = event; // Copy（ムーブではない）
         assert_eq!(event, copied);
-        // Both can be used after copy
+        // コピー後も両方使用可能
         assert_eq!(event, HookEvent::BeforeCommand);
         assert_eq!(copied, HookEvent::BeforeCommand);
     }
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn test_hook_event_clone() {
         let event = HookEvent::AfterFileEdit;
-        // Explicitly test Clone trait (not just Copy)
+        // Clone トレイトを明示的にテスト（Copy だけでなく）
         let cloned = Clone::clone(&event);
         assert_eq!(event, cloned);
     }
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(format!("{:?}", HookEvent::SubagentStop), "SubagentStop");
     }
 
-    // Decision::into_output() tests
+    // Decision::into_output() テスト
 
     #[test]
     fn test_decision_into_output_allow_before_command() {
@@ -344,7 +344,7 @@ mod tests {
 
         assert_eq!(output.decision, "approve");
         assert!(output.message.is_none());
-        // No hookSpecificOutput for BeforeCommand
+        // BeforeCommand には hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -355,7 +355,7 @@ mod tests {
 
         assert_eq!(output.decision, "approve");
         assert!(output.message.is_none());
-        // No hookSpecificOutput when no additional context
+        // 追加コンテキストがない場合 hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -366,7 +366,7 @@ mod tests {
 
         assert_eq!(output.decision, "approve");
         assert!(output.message.is_none());
-        // hookSpecificOutput should be present for AfterFileEdit with context
+        // コンテキスト付き AfterFileEdit では hookSpecificOutput が存在するべき
         let hook_output = output
             .hook_specific_output
             .expect("Should have hookSpecificOutput");
@@ -379,12 +379,12 @@ mod tests {
 
     #[test]
     fn test_decision_into_output_allow_with_context_before_command() {
-        // Context is ignored for BeforeCommand (only AfterFileEdit supports it)
+        // BeforeCommand ではコンテキストは無視される（AfterFileEdit のみ対応）
         let decision = Decision::allow_with_context("Some context".to_string());
         let output = decision.into_output(HookEvent::BeforeCommand);
 
         assert_eq!(output.decision, "approve");
-        // hookSpecificOutput should NOT be present for BeforeCommand
+        // BeforeCommand では hookSpecificOutput は存在すべきでない
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -409,7 +409,7 @@ mod tests {
         let output = decision.into_output(HookEvent::Stop);
 
         assert_eq!(output.decision, "approve");
-        // No hookSpecificOutput for Stop event
+        // Stop イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let output = decision.into_output(HookEvent::BeforePrompt);
 
         assert_eq!(output.decision, "approve");
-        // No hookSpecificOutput for BeforePrompt event
+        // BeforePrompt イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 

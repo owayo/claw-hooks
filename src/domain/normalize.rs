@@ -1,15 +1,15 @@
-//! Output normalization utilities for AI consumption.
+//! AI向け出力正規化ユーティリティ。
 //!
-//! Optimizes lint/typecheck output for token efficiency
-//! while preserving error information.
+//! lint/typecheck出力をトークン効率のために最適化し、
+//! エラー情報は維持する。
 
-/// Strip ANSI escape codes (colors, styles, cursor control) from text.
+/// テキストからANSIエスケープコード（色、スタイル、カーソル制御）を除去する。
 pub fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // CSI sequence: ESC [ ... final_byte (0x40-0x7e)
+            // CSIシーケンス: ESC [ ... 終端バイト (0x40-0x7e)
             if chars.next() == Some('[') {
                 for c in chars.by_ref() {
                     if ('\x40'..='\x7e').contains(&c) {
@@ -24,13 +24,13 @@ pub fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
-/// Normalize lint/typecheck output for AI consumption.
-/// Optimizes for token efficiency while preserving error information:
-/// - Strips ANSI escape codes (colors, styles)
-/// - Strips common absolute path prefix (e.g., `/Users/owa/GitHub/project/`)
-/// - Strips leading and trailing whitespace from each line
-/// - Collapses consecutive whitespace (spaces and tabs) into a single space
-/// - Collapses consecutive blank lines into one
+/// lint/typecheck出力をAI向けに正規化する。
+/// トークン効率を最適化しつつ、エラー情報は維持する:
+/// - ANSIエスケープコード（色、スタイル）を除去
+/// - 共通の絶対パスプレフィックスを除去（例: `/Users/owa/GitHub/project/`）
+/// - 各行の先頭・末尾の空白を除去
+/// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
+/// - 連続する空行を1行に圧縮
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -52,7 +52,7 @@ pub fn normalize_lint_output(output: &str) -> String {
         lines.push(collapse_whitespace(trimmed));
     }
 
-    // Remove trailing blank lines
+    // 末尾の空行を除去
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
@@ -60,7 +60,7 @@ pub fn normalize_lint_output(output: &str) -> String {
     lines.join("\n")
 }
 
-/// Collapse consecutive whitespace (spaces and tabs) into a single space.
+/// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
 fn collapse_whitespace(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut prev_ws = false;
@@ -78,8 +78,8 @@ fn collapse_whitespace(input: &str) -> String {
     result
 }
 
-/// Strip the common directory prefix from absolute file paths in the text.
-/// Requires 2+ path occurrences and a prefix at least 3 slashes deep (e.g., `/Users/owa/`).
+/// テキスト内の絶対パスから共通ディレクトリプレフィックスを除去する。
+/// パスが2つ以上あり、プレフィックスがスラッシュ3つ以上の深さ（例: `/Users/owa/`）であることが条件。
 fn strip_common_path_prefix(text: &str) -> String {
     let paths = extract_absolute_paths(text);
     if paths.len() < 2 {
@@ -87,7 +87,7 @@ fn strip_common_path_prefix(text: &str) -> String {
     }
 
     let prefix = common_directory_prefix(&paths);
-    // Require at least 3 slashes (e.g., /Users/owa/) to avoid stripping too little
+    // スラッシュ3つ未満だと除去が少なすぎるため、最低3つを要求
     if prefix.is_empty() || prefix.matches('/').count() < 3 {
         return text.to_string();
     }
@@ -95,8 +95,8 @@ fn strip_common_path_prefix(text: &str) -> String {
     text.replace(prefix, "")
 }
 
-/// Extract absolute file paths from lint output text.
-/// Handles formats like `/path/file.rs:10:5`, `-->/path/file.rs:10:5`, `/path/file.ts(10,5)`.
+/// lint出力テキストから絶対パスを抽出する。
+/// `/path/file.rs:10:5`、`-->/path/file.rs:10:5`、`/path/file.ts(10,5)` 等の形式に対応。
 fn extract_absolute_paths(text: &str) -> Vec<&str> {
     text.split_whitespace()
         .filter_map(|token| {
@@ -113,7 +113,7 @@ fn extract_absolute_paths(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Compute the longest common directory prefix among paths.
+/// パス群の最長共通ディレクトリプレフィックスを算出する。
 fn common_directory_prefix<'a>(paths: &[&'a str]) -> &'a str {
     if paths.is_empty() {
         return "";
@@ -221,11 +221,11 @@ mod tests {
         assert_eq!(collapse_whitespace("\t"), " ");
     }
 
-    // === Path prefix stripping ===
+    // === パスプレフィックス除去 ===
 
     #[test]
     fn test_strip_common_path_prefix_multiple_files() {
-        // Same directory → prefix includes /src/
+        // 同一ディレクトリ → プレフィックスに /src/ を含む
         let input = "/Users/owa/GitHub/project/src/main.rs:10 error\n/Users/owa/GitHub/project/src/lib.rs:20 warning";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, "main.rs:10 error\nlib.rs:20 warning");
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_strip_common_path_prefix_shallow_paths_skipped() {
-        // Only 2 slashes per path - prefix too shallow to strip
+        // パスごとにスラッシュ2つのみ - プレフィックスが浅すぎて除去不可
         let input = "/usr/file1:10\n/usr/file2:20";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, input);
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_normalize_strips_path_prefix() {
-        // End-to-end: different directories → prefix is project root
+        // E2E: 異なるディレクトリ → プレフィックスはプロジェクトルート
         let input = "/Users/owa/GitHub/project/src/App.tsx:10:5 error\n/Users/owa/GitHub/project/tests/index.test.tsx:20:3 warning";
         let result = normalize_lint_output(input);
         assert_eq!(
@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    // === Additional edge case tests ===
+    // === エッジケースの追加テスト ===
 
     #[test]
     fn test_common_directory_prefix_empty_input() {
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_common_directory_prefix_single_path() {
         let paths = vec!["/a/b/c/file.rs"];
-        // Single path: last_slash tracks up to last '/' before end of iteration
+        // 単一パス: last_slashはイテレーション終了前の最後の '/' まで追跡
         assert_eq!(common_directory_prefix(&paths), "/a/b/c/");
     }
 
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_extract_absolute_paths_shallow_path_excluded() {
-        // Path with only 1 slash is excluded (needs >= 2)
+        // スラッシュ1つのみのパスは除外（2つ以上が必要）
         let paths = extract_absolute_paths("/file:10");
         assert!(paths.is_empty());
     }
@@ -359,10 +359,10 @@ mod tests {
 
     #[test]
     fn test_strip_ansi_codes_incomplete_sequence() {
-        // ESC without '[' following
+        // ESCの後に '[' が続かない場合
         let input = "text\x1bXmore";
         let result = strip_ansi_codes(input);
-        // ESC consumed, 'X' is not a CSI, so 'X' is lost and 'more' remains
+        // ESCは消費され、'X'はCSIではないため'X'は失われ、'more'が残る
         assert_eq!(result, "textmore");
     }
 

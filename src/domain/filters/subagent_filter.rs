@@ -1,27 +1,27 @@
-//! Subagent event filter implementation.
+//! サブエージェントイベントフィルターの実装。
 //!
-//! Sends NanoBuddy SubagentStart/SubagentStop notifications.
-//! This is an observational filter that always allows the event.
+//! NanoBuddy SubagentStart/SubagentStop 通知を送信する。
+//! 常にイベントを許可する観測用フィルター。
 
 use tracing::debug;
 
 use super::Filter;
 use crate::domain::{Decision, HookEvent, HookInput};
 
-/// Filter for SubagentStart/SubagentStop events.
+/// SubagentStart/SubagentStop イベント用フィルター。
 ///
-/// Sends NanoBuddy notifications and always allows.
-/// Only registered when NanoBuddy is enabled (see FilterChain::new).
+/// NanoBuddy 通知を送信し、常に許可する。
+/// NanoBuddy が有効な場合のみ登録される（FilterChain::new 参照）。
 pub struct SubagentFilter;
 
 impl SubagentFilter {
-    /// Create a new SubagentFilter.
+    /// 新しい SubagentFilter を作成する。
     pub fn new() -> Self {
         Self
     }
 
-    /// Extract subagent_type from hook input.
-    /// Returns `None` if the field is absent or empty.
+    /// フック入力から subagent_type を抽出する。
+    /// フィールドが存在しないか空の場合は `None` を返す。
     fn subagent_type(input: &HookInput) -> Option<&str> {
         if let crate::domain::ToolInput::Subagent(ref subagent) = input.tool_input {
             subagent.subagent_type.as_deref().filter(|s| !s.is_empty())
@@ -59,7 +59,7 @@ impl Filter for SubagentFilter {
     }
 
     fn priority(&self) -> u32 {
-        90 // Between custom filters and extension/stop hooks
+        90 // カスタムフィルターと拡張/ストップフックの間
     }
 }
 

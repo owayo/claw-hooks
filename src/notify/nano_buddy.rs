@@ -1,4 +1,4 @@
-//! NanoBuddy notification via Darwin Notification API.
+//! NanoBuddy通知（Darwin Notification API経由）
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -16,7 +16,7 @@ mod macos {
         fn notify_post(name: *const i8) -> u32;
     }
 
-    // Core Foundation types for DistributedNotificationCenter
+    // DistributedNotificationCenter用のCore Foundation型定義
     type CFNotificationCenterRef = *const std::ffi::c_void;
     type CFStringRef = *const std::ffi::c_void;
 
@@ -41,8 +41,8 @@ mod macos {
 
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
-    /// Create a CFString from a Rust string slice. Returns null on failure.
-    /// Caller must CFRelease non-null results.
+    /// Rust文字列スライスからCFStringを生成。失敗時はnullを返す。
+    /// 非nullの戻り値は呼び出し側でCFReleaseすること。
     unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
         unsafe {
             CFStringCreateWithBytes(
@@ -55,7 +55,7 @@ mod macos {
         }
     }
 
-    /// Post a DistributedNotification with the given name and object string.
+    /// 指定されたnameとobject文字列でDistributedNotificationを送信する。
     fn post_distributed_notification(name: &str, object: &str) {
         unsafe {
             let center = CFNotificationCenterGetDistributedCenter();
@@ -83,7 +83,7 @@ mod macos {
         }
     }
 
-    /// Encode extension string as little-endian u64 (max 8 bytes).
+    /// 拡張子文字列をリトルエンディアンu64にエンコード（最大8バイト）
     pub fn encode_ext(ext: &str) -> u64 {
         let mut value: u64 = 0;
         for (i, byte) in ext.bytes().take(8).enumerate() {
@@ -92,7 +92,7 @@ mod macos {
         value
     }
 
-    /// Notify NanoBuddy that an extension hook completed.
+    /// 拡張子フックの完了をNanoBuddyに通知する。
     pub fn notify_extension_hook(ext: &str) {
         let name = match CString::new(EXT_NOTIFICATION) {
             Ok(n) => n,
@@ -109,7 +109,7 @@ mod macos {
         }
     }
 
-    /// Notify NanoBuddy that monitoring has stopped.
+    /// 監視停止をNanoBuddyに通知する。
     pub fn notify_stop_hook() {
         let name = match CString::new(STOP_NOTIFICATION) {
             Ok(n) => n,
@@ -121,31 +121,40 @@ mod macos {
         }
     }
 
-    /// Format subagent object string, optionally including session ID as JSON.
+    /// サブエージェント通知のobject文字列を生成（session_idがある場合はJSON形式）
     #[cfg_attr(test, allow(dead_code))]
     pub(super) fn format_subagent_object(subagent_type: &str, session_id: Option<&str>) -> String {
         match session_id {
-            Some(sid) => format!(r#"{{"type":"{}","sid":"{}"}}"#, subagent_type, sid),
+            Some(sid) => {
+                #[derive(serde::Serialize)]
+                struct SubagentObject<'a> {
+                    #[serde(rename = "type")]
+                    subagent_type: &'a str,
+                    sid: &'a str,
+                }
+                serde_json::to_string(&SubagentObject { subagent_type, sid })
+                    .expect("SubagentObject のシリアライズは失敗しない")
+            }
             None => subagent_type.to_string(),
         }
     }
 
-    /// Notify NanoBuddy that a subagent has started.
-    /// Uses DistributedNotificationCenter to support arbitrary-length subagent type strings.
+    /// サブエージェントの開始をNanoBuddyに通知する。
+    /// 任意長のサブエージェントタイプ文字列に対応するためDistributedNotificationCenterを使用。
     pub fn notify_subagent_start(subagent_type: &str, session_id: Option<&str>) {
         let object = format_subagent_object(subagent_type, session_id);
         post_distributed_notification(SUBAGENT_START_NOTIFICATION, &object);
     }
 
-    /// Notify NanoBuddy that a subagent has stopped.
-    /// Uses DistributedNotificationCenter to support arbitrary-length subagent type strings.
+    /// サブエージェントの停止をNanoBuddyに通知する。
+    /// 任意長のサブエージェントタイプ文字列に対応するためDistributedNotificationCenterを使用。
     pub fn notify_subagent_stop(subagent_type: &str, session_id: Option<&str>) {
         let object = format_subagent_object(subagent_type, session_id);
         post_distributed_notification(SUBAGENT_STOP_NOTIFICATION, &object);
     }
 }
 
-/// Notify NanoBuddy that an extension hook completed.
+/// 拡張子フックの完了をNanoBuddyに通知する。
 pub fn notify_extension_hook(ext: &str) {
     #[cfg(target_os = "macos")]
     macos::notify_extension_hook(ext);
@@ -154,13 +163,13 @@ pub fn notify_extension_hook(ext: &str) {
     let _ = ext;
 }
 
-/// Notify NanoBuddy that monitoring has stopped.
+/// 監視停止をNanoBuddyに通知する。
 pub fn notify_stop_hook() {
     #[cfg(target_os = "macos")]
     macos::notify_stop_hook();
 }
 
-/// Notify NanoBuddy that a subagent has started.
+/// サブエージェントの開始をNanoBuddyに通知する。
 pub fn notify_subagent_start(subagent_type: &str, session_id: Option<&str>) {
     #[cfg(target_os = "macos")]
     macos::notify_subagent_start(subagent_type, session_id);
@@ -172,7 +181,7 @@ pub fn notify_subagent_start(subagent_type: &str, session_id: Option<&str>) {
     }
 }
 
-/// Notify NanoBuddy that a subagent has stopped.
+/// サブエージェントの停止をNanoBuddyに通知する。
 pub fn notify_subagent_stop(subagent_type: &str, session_id: Option<&str>) {
     #[cfg(target_os = "macos")]
     macos::notify_subagent_stop(subagent_type, session_id);
@@ -184,7 +193,7 @@ pub fn notify_subagent_stop(subagent_type: &str, session_id: Option<&str>) {
     }
 }
 
-/// Encode extension as little-endian u64 (public for tests).
+/// 拡張子をリトルエンディアンu64にエンコード（テスト用公開）
 #[cfg(test)]
 pub fn encode_ext(ext: &str) -> u64 {
     #[cfg(target_os = "macos")]
@@ -248,6 +257,20 @@ mod tests {
         {
             let result = macos::format_subagent_object("explore", None);
             assert_eq!(result, "explore");
+        }
+    }
+
+    #[test]
+    fn test_format_subagent_object_json_roundtrip() {
+        #[cfg(target_os = "macos")]
+        {
+            // 特殊文字・制御文字を含む値で有効なJSONが生成されること
+            let typ = "te\"st\n\t";
+            let sid = "a\\b\"c\r\u{0008}";
+            let s = macos::format_subagent_object(typ, Some(sid));
+            let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+            assert_eq!(v["type"], typ);
+            assert_eq!(v["sid"], sid);
         }
     }
 }

@@ -1,20 +1,20 @@
-//! Kill command filter implementation.
+//! kill コマンドフィルターの実装。
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
-/// Default message for kill blocking (generic, can be customized via config).
+/// kill ブロック時のデフォルトメッセージ（設定でカスタマイズ可能）。
 const DEFAULT_KILL_MESSAGE: &str = "🚫 kill/pkill/killall command blocked for safety. Use safe-kill: safe-kill <PID>, safe-kill -N <name>, or safe-kill -p <port>.";
 
-/// Filter for blocking kill-related commands.
+/// kill 関連コマンドをブロックするフィルター。
 pub struct KillFilter {
     enabled: bool,
     message: String,
 }
 
 impl KillFilter {
-    /// Create a new KillFilter with optional custom message.
+    /// カスタムメッセージ付きの新しい KillFilter を作成する。
     pub fn new(enabled: bool, custom_message: Option<String>) -> Self {
         Self {
             enabled,
@@ -22,7 +22,7 @@ impl KillFilter {
         }
     }
 
-    /// Kill command patterns for Unix and Windows
+    /// Unix/Windows の kill コマンドパターン
     const KILL_COMMANDS: &'static [&'static str] = &[
         "kill",     // Unix
         "pkill",    // Unix
@@ -30,12 +30,12 @@ impl KillFilter {
         "taskkill", // Windows
     ];
 
-    /// Check if any command in the string is a kill-related command.
+    /// コマンド文字列に kill 関連コマンドが含まれるか判定する。
     fn contains_kill_command(command: &str) -> bool {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands(command);
 
-        // Check for direct kill commands (Unix and Windows)
+        // 直接の kill コマンドをチェック（Unix/Windows）
         if commands
             .iter()
             .any(|cmd| Self::KILL_COMMANDS.contains(&cmd.as_str()))
@@ -43,21 +43,21 @@ impl KillFilter {
             return true;
         }
 
-        // Also check for xargs with kill commands
-        // Pattern: "xargs kill", "xargs -0 kill", etc.
+        // xargs 経由の kill コマンドもチェック
+        // パターン: "xargs kill", "xargs -0 kill" 等
         Self::contains_xargs_kill(command)
     }
 
-    /// Check if the command contains xargs with a kill command.
+    /// xargs 経由の kill コマンドが含まれるか判定する。
     fn contains_xargs_kill(command: &str) -> bool {
-        // Split by pipes and check each segment
+        // パイプで分割して各セグメントをチェック
         for segment in command.split('|') {
             let trimmed = segment.trim();
             if trimmed.starts_with("xargs") {
-                // Check if any kill command is mentioned after xargs
+                // xargs の後に kill コマンドが含まれるかチェック
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 for part in parts.iter().skip(1) {
-                    // Skip xargs flags
+                    // xargs のフラグをスキップ
                     if !part.starts_with('-') && Self::KILL_COMMANDS.contains(part) {
                         return true;
                     }
@@ -74,12 +74,11 @@ impl Filter for KillFilter {
             return false;
         }
 
-        // Only applies to Bash tool in BeforeCommand event
+        // BeforeCommand イベントの Bash ツールにのみ適用
         if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 
-        // Extract command from tool input
         if let ToolInput::Bash(bash) = &input.tool_input {
             return Self::contains_kill_command(&bash.command);
         }
@@ -94,7 +93,7 @@ impl Filter for KillFilter {
     }
 
     fn priority(&self) -> u32 {
-        10 // High priority
+        10 // 最高優先度
     }
 }
 

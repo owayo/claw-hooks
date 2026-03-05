@@ -1,4 +1,4 @@
-//! Filter chain implementation.
+//! フィルターチェーンの実装。
 
 use crate::config::Config;
 use crate::domain::Decision;
@@ -9,17 +9,17 @@ use super::{
     StopHookFilter, SubagentFilter,
 };
 
-/// Chain of filters that processes hook inputs.
+/// フック入力を処理するフィルターチェーン。
 pub struct FilterChain {
     filters: Vec<Box<dyn Filter>>,
 }
 
 impl FilterChain {
-    /// Create a new FilterChain from configuration.
+    /// 設定からFilterChainを作成する。
     pub fn new(config: &Config) -> Self {
         let mut filters: Vec<Box<dyn Filter>> = Vec::new();
 
-        // Add built-in filters
+        // 組み込みフィルターを追加
         filters.push(Box::new(KillFilter::new(
             config.kill_block,
             config.kill_block_message.clone(),
@@ -33,17 +33,17 @@ impl FilterChain {
             config.rm_block_message.clone(),
         )));
 
-        // Add custom filters
+        // カスタムフィルターを追加
         for custom in &config.custom_filters {
             let filter: Box<dyn Filter> = if custom.args.is_empty() {
-                // Regex mode: command is treated as regex pattern
+                // 正規表現モード: commandを正規表現パターンとして扱う
                 if let Ok(f) = CustomCommandFilter::new(&custom.command, custom.message.clone()) {
                     Box::new(f)
                 } else {
                     continue;
                 }
             } else {
-                // Args mode: regex command name + args matching
+                // Argsモード: 正規表現コマンド名 + 引数マッチング
                 if let Ok(f) = CustomCommandFilter::with_args(
                     &custom.command,
                     custom.args.clone(),
@@ -57,7 +57,7 @@ impl FilterChain {
             filters.push(filter);
         }
 
-        // Add extension hook filter
+        // 拡張子フックフィルターを追加
         if !config.extension_hooks.is_empty() {
             let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
             filters.push(Box::new(ExtensionHookFilter::new(
@@ -67,7 +67,7 @@ impl FilterChain {
             )));
         }
 
-        // Add stop hook filter
+        // ストップフックフィルターを追加
         if !config.stop_hooks.is_empty() {
             let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
             filters.push(Box::new(StopHookFilter::new(
@@ -77,19 +77,19 @@ impl FilterChain {
             )));
         }
 
-        // Add subagent filter (NanoBuddy notifications for SubagentStart/SubagentStop)
+        // サブエージェントフィルターを追加（SubagentStart/SubagentStop用のNanoBuddy通知）
         if cfg!(target_os = "macos") && config.nano_buddy {
             filters.push(Box::new(SubagentFilter::new()));
         }
 
-        // Sort by priority (lower = higher priority)
+        // 優先度でソート（値が小さいほど優先度が高い）
         filters.sort_by_key(|f| f.priority());
 
         Self { filters }
     }
 
-    /// Execute all applicable filters and return the first blocking decision.
-    /// For Allow decisions, additional_context from all filters is merged.
+    /// 適用可能な全フィルターを実行し、最初のブロック判定を返す。
+    /// Allow判定の場合、全フィルターのadditional_contextがマージされる。
     pub fn execute(&self, input: &HookInput) -> Decision {
         let mut merged_context: Option<String> = None;
 
@@ -99,7 +99,7 @@ impl FilterChain {
                 match decision {
                     Decision::Block { .. } => return decision,
                     Decision::Allow { additional_context } => {
-                        // Merge additional context from all Allow decisions
+                        // 全Allow判定のadditional_contextをマージ
                         if let Some(ctx) = additional_context {
                             merged_context = match merged_context {
                                 Some(existing) => Some(format!("{}\n{}", existing, ctx)),
@@ -244,9 +244,9 @@ mod tests {
     fn test_filter_chain_filters_sorted_by_priority() {
         let config = Config::default();
         let chain = FilterChain::new(&config);
-        // Verify filters are created (at least kill, dd, rm)
+        // フィルターが作成されていることを確認（少なくともkill, dd, rm）
         assert!(chain.filters.len() >= 3);
-        // Verify priorities are in non-decreasing order
+        // 優先度が昇順であることを確認
         for i in 1..chain.filters.len() {
             assert!(
                 chain.filters[i - 1].priority() <= chain.filters[i].priority(),
@@ -263,21 +263,21 @@ mod tests {
             args: vec![],
             message: "should not appear".to_string(),
         });
-        // Should not panic; invalid regex is skipped
+        // パニックしないこと。無効な正規表現はスキップされる
         let chain = FilterChain::new(&config);
-        // Built-in filters should still be present
+        // 組み込みフィルターは残っているべき
         assert!(chain.filters.len() >= 3);
-        // Safe command should still be allowed
+        // 安全なコマンドは許可されるべき
         let input = make_bash_input("ls -la");
         assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
     }
 
     #[test]
     fn test_filter_chain_merges_allow_contexts() {
-        // With extension hooks for the same file, contexts should merge
+        // 同じファイルの拡張子フックではコンテキストがマージされるべき
         let config = Config::default();
         let chain = FilterChain::new(&config);
-        // Non-file events should produce Allow with no context
+        // ファイル以外のイベントはコンテキストなしのAllowを返すべき
         let input = make_bash_input("echo hello");
         let decision = chain.execute(&input);
         match decision {
@@ -290,10 +290,10 @@ mod tests {
 
     #[test]
     fn test_filter_chain_first_block_wins() {
-        // Both rm and kill in same command; first matching block wins
+        // 同一コマンド内にrmとkillの両方がある場合、最初にマッチしたブロックが優先
         let config = Config::default();
         let chain = FilterChain::new(&config);
-        // kill has higher priority (10) than rm (20), so kill filter should block first
+        // killはrm(20)より高い優先度(10)を持つため、killフィルターが先にブロックする
         let input = make_bash_input("kill 123 && rm file.txt");
         let decision = chain.execute(&input);
         assert!(matches!(decision, Decision::Block { .. }));

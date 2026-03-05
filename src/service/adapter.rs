@@ -1,7 +1,7 @@
-//! Format adapters for different AI coding agents.
+//! AIコーディングエージェント向けフォーマットアダプター。
 //!
-//! This module provides input parsing and output formatting for:
-//! - Claude Code (default)
+//! 以下のエージェントの入力パースと出力フォーマットを提供する:
+//! - Claude Code（デフォルト）
 //! - Cursor
 //! - Windsurf (Cascade)
 
@@ -12,18 +12,18 @@ use tracing::debug;
 use crate::cli::Format;
 use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output};
 
-/// Adapter for converting between format-specific I/O and internal types.
+/// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
     format: Format,
 }
 
 impl FormatAdapter {
-    /// Create a new adapter for the specified format.
+    /// 指定されたフォーマット用の新しいアダプターを作成する。
     pub fn new(format: Format) -> Self {
         Self { format }
     }
 
-    /// Parse input string to HookInput based on format.
+    /// フォーマットに基づいて入力文字列をHookInputにパースする。
     pub fn parse_input(&self, input: &str) -> Result<HookInput> {
         match self.format {
             Format::Claude => self.parse_claude_input(input),
@@ -33,8 +33,8 @@ impl FormatAdapter {
         }
     }
 
-    /// Format output based on the agent format.
-    /// The event parameter is used to include hookSpecificOutput for Claude Code AfterFileEdit.
+    /// エージェントフォーマットに基づいて出力をフォーマットする。
+    /// eventパラメータはClaude CodeのAfterFileEditでhookSpecificOutputを含めるために使用される。
     pub fn format_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         match self.format {
             Format::Claude => self.format_claude_output(decision, event),
@@ -44,29 +44,29 @@ impl FormatAdapter {
         }
     }
 
-    /// Get the exit code for the decision.
-    /// Note: Different agents use different exit code semantics.
-    /// - Claude/Windsurf: 0 = allow, 2 = block
-    /// - Cursor: 0 = allow/stop, 2 = block (non-stop)
-    /// - Gemini CLI: 0 = success (decision in JSON), 2 = system error only
+    /// 判定結果に対する終了コードを取得する。
+    /// 注意: エージェントごとに終了コードのセマンティクスが異なる。
+    /// - Claude/Windsurf: 0 = 許可, 2 = ブロック
+    /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
+    /// - Gemini CLI: 0 = 成功（判定はJSON内）, 2 = システムエラーのみ
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
             Format::Gemini => {
-                // Gemini CLI: Always return 0 for successful JSON output.
-                // The decision (allow/deny) is communicated via the JSON response.
-                // Exit code 2 is reserved for system errors (stderr used as reason).
+                // Gemini CLI: JSON出力が成功した場合は常に0を返す。
+                // 判定（allow/deny）はJSONレスポンスで伝達される。
+                // 終了コード2はシステムエラー専用（stderrがreasonとして使用される）。
                 0
             }
             Format::Cursor if event == HookEvent::Stop => {
-                // Cursor Stop: decision communicated via followup_message in JSON.
+                // Cursor Stop: 判定はJSON内のfollowup_messageで伝達される。
                 0
             }
             _ => decision.exit_code(),
         }
     }
 
-    /// Whether the output should be written to stderr instead of stdout.
-    /// Windsurf Stop Block uses stderr for error output.
+    /// 出力をstdoutではなくstderrに書き込むべきかどうか。
+    /// Windsurf Stop Blockはエラー出力にstderrを使用する。
     pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
         matches!(
             (&self.format, event, decision),
@@ -74,15 +74,15 @@ impl FormatAdapter {
         )
     }
 
-    /// Format an error message for output.
-    /// This is used when input parsing fails.
-    /// SECURITY: Uses fail-closed design - parse errors result in blocking.
+    /// エラーメッセージを出力用にフォーマットする。
+    /// 入力パース失敗時に使用される。
+    /// セキュリティ: フェイルクローズド設計 - パースエラー時はブロックする。
     pub fn format_error(&self, message: &str) -> String {
         let error_message = format!("🚫 Hook error (fail-closed): {}", message);
         match self.format {
             Format::Claude | Format::Windsurf => {
-                // Claude and Windsurf use the same format with decision and message
-                // SECURITY: Block on parse errors (fail-closed design)
+                // ClaudeとWindsurfはdecisionとmessageで同じフォーマットを使用
+                // セキュリティ: パースエラー時はブロック（フェイルクローズド設計）
                 serde_json::json!({
                     "decision": "block",
                     "message": error_message
@@ -90,8 +90,8 @@ impl FormatAdapter {
                 .to_string()
             }
             Format::Cursor => {
-                // Cursor uses permission and user_message
-                // SECURITY: Deny on parse errors (fail-closed design)
+                // Cursorはpermissionとuser_messageを使用
+                // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）
                 serde_json::json!({
                     "permission": "deny",
                     "user_message": error_message,
@@ -100,8 +100,8 @@ impl FormatAdapter {
                 .to_string()
             }
             Format::Gemini => {
-                // Gemini uses decision and reason
-                // SECURITY: Deny on parse errors (fail-closed design)
+                // Geminiはdecisionとreasonを使用
+                // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）
                 serde_json::json!({
                     "decision": "deny",
                     "reason": error_message
@@ -111,12 +111,12 @@ impl FormatAdapter {
         }
     }
 
-    /// Get the exit code for error scenarios (fail-closed = block = exit 2).
+    /// エラー時の終了コードを取得する（フェイルクローズド = ブロック = 終了コード2）。
     pub fn error_exit_code(&self) -> i32 {
-        2 // Same as Decision::Block exit code
+        2 // Decision::Blockの終了コードと同じ
     }
 
-    // === Claude Code Format ===
+    // === Claude Code フォーマット ===
 
     fn parse_claude_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "🤖 Claude Code raw input");
@@ -126,7 +126,7 @@ impl FormatAdapter {
 
         let raw_event = claude_input.hook_event_name.clone();
 
-        // Map Claude Code event names to HookEvent
+        // Claude Codeのイベント名をHookEventにマッピング
         let event = match raw_event.as_str() {
             "PreToolUse" => HookEvent::BeforeCommand,
             "PostToolUse" => HookEvent::AfterFileEdit,
@@ -136,7 +136,7 @@ impl FormatAdapter {
             other => return Err(anyhow!("Unknown Claude event: {}", other)),
         };
 
-        // Handle Stop event specially (no tool_name or tool_input)
+        // Stopイベントを特別に処理（tool_nameやtool_inputが無い）
         let (tool_name, tool_input) = if event == HookEvent::Stop {
             (
                 "Stop".to_string(),
@@ -149,10 +149,10 @@ impl FormatAdapter {
                 }),
             )
         } else if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
-            // SubagentStart/SubagentStop: extract subagent info from raw JSON
-            // NOTE: We re-parse from raw input because serde(untagged) ToolInput
-            // may deserialize the tool_input object as Stop(StopInput) instead of
-            // Other(Value), since StopInput has all-optional fields.
+            // SubagentStart/SubagentStop: 生のJSONからサブエージェント情報を抽出
+            // 注意: serde(untagged)のToolInputはStopInputの全フィールドがオプションのため、
+            // tool_inputオブジェクトをOther(Value)ではなくStop(StopInput)として
+            // デシリアライズする可能性があるため、生の入力を再パースする。
             let raw: serde_json::Value = serde_json::from_str(input)
                 .map_err(|e| anyhow!("Failed to re-parse raw input: {}", e))?;
             // agent_type はルートレベルまたは tool_input 内にある場合がある
@@ -168,8 +168,8 @@ impl FormatAdapter {
                     .filter(|s| !s.is_empty())
                     .map(String::from);
                 crate::domain::SubagentInput {
-                    // root-level agent_type (human-readable name like "Explore") takes priority
-                    // over tool_input.subagent_type (may contain session ID/UUID)
+                    // ルートレベルのagent_type（"Explore"のような人間が読める名前）を優先
+                    // tool_input.subagent_type（セッションID/UUIDを含む場合がある）より優先
                     subagent_type: root_agent_type.or(tool_input_type),
                     prompt: val.get("prompt").and_then(|v| v.as_str()).map(String::from),
                     status: val.get("status").and_then(|v| v.as_str()).map(String::from),
@@ -216,7 +216,7 @@ impl FormatAdapter {
     }
 
     fn format_claude_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop events use "reason" instead of "message" for Block decisions
+        // StopイベントではBlock判定に"message"ではなく"reason"を使用
         if event == HookEvent::Stop {
             let output = match decision {
                 Decision::Allow { .. } => ClaudeStopOutput {
@@ -236,7 +236,7 @@ impl FormatAdapter {
         serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
 
-    // === Cursor Format ===
+    // === Cursor フォーマット ===
 
     fn parse_cursor_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "🖱️ Cursor raw input");
@@ -244,7 +244,7 @@ impl FormatAdapter {
         let cursor_input: CursorInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Cursor input: {}", e))?;
 
-        // Convert Cursor format to internal HookInput based on hook type
+        // フックタイプに基づいてCursorフォーマットを内部HookInputに変換
         match cursor_input {
             CursorInput::SubagentStart {
                 subagent_type,
@@ -308,7 +308,7 @@ impl FormatAdapter {
                     "🖱️ Cursor parsed input"
                 );
 
-                // Cursor's stop hook is equivalent to Stop event
+                // CursorのstopフックはStopイベントに相当
                 Ok(HookInput {
                     event: HookEvent::Stop,
                     tool_name: "Stop".to_string(),
@@ -333,7 +333,7 @@ impl FormatAdapter {
                     "🖱️ Cursor parsed input"
                 );
 
-                // Cursor's beforeShellExecution is equivalent to BeforeCommand for Bash
+                // CursorのbeforeShellExecutionはBashのBeforeCommandに相当
                 Ok(HookInput {
                     event: HookEvent::BeforeCommand,
                     tool_name: "Bash".to_string(),

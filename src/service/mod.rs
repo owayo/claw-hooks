@@ -1,9 +1,9 @@
-//! Service layer containing business logic orchestration.
+//! ビジネスロジックのオーケストレーションを含むサービス層。
 
 mod adapter;
 mod hook_service;
 
-// Allow unused for potential library API usage
+// ライブラリAPIとしての利用に備え未使用を許容
 #[allow(unused)]
 pub use adapter::FormatAdapter;
 

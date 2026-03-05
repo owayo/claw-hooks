@@ -1,4 +1,4 @@
-//! Configuration service for loading and generating config files.
+//! 設定ファイルの読み込みと生成を行う設定サービス。
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -8,18 +8,18 @@ use super::Config;
 use super::types::{ProjectConfig, default_log_path_for_config_dir};
 use super::validation;
 
-/// Project-level configuration file name.
+/// プロジェクトレベルの設定ファイル名。
 const PROJECT_CONFIG_NAME: &str = ".claw-hooks.toml";
 
-/// Keys that are only allowed in global configuration, not in project config.
+/// グローバル設定でのみ許可され、プロジェクト設定では使用できないキー。
 const GLOBAL_ONLY_KEYS: &[&str] = &["debug", "log_path", "nano_buddy"];
 
-/// Configuration service.
+/// 設定サービス。
 pub struct ConfigService;
 
 impl ConfigService {
-    /// Get the default configuration file path.
-    /// Always uses ~/.config/claw-hooks/config.toml for cross-platform consistency.
+    /// デフォルトの設定ファイルパスを取得。
+    /// クロスプラットフォームの一貫性のため常に ~/.config/claw-hooks/config.toml を使用。
     pub fn default_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -28,24 +28,24 @@ impl ConfigService {
             .join("config.toml")
     }
 
-    /// Load configuration from file.
+    /// ファイルから設定を読み込む。
     ///
-    /// If `path` is `None`, uses the default path.
-    /// If the file doesn't exist, creates default configuration file.
-    /// Validates configuration after loading.
-    /// Log path defaults to the same directory as config file.
+    /// `path` が `None` の場合はデフォルトパスを使用。
+    /// ファイルが存在しない場合はデフォルト設定ファイルを作成。
+    /// 読み込み後に設定を検証。
+    /// ログパスはデフォルトで設定ファイルと同じディレクトリ。
     pub fn load(path: Option<&Path>) -> Result<Config> {
         let project_search_dir = std::env::current_dir().ok();
         Self::load_inner(path, project_search_dir.as_deref())
     }
 
-    /// Internal load implementation that accepts an explicit project search directory.
+    /// 明示的なプロジェクト検索ディレクトリを受け取る内部読み込み実装。
     fn load_inner(path: Option<&Path>, project_search_dir: Option<&Path>) -> Result<Config> {
         let path = path.map(PathBuf::from).unwrap_or_else(Self::default_path);
         let config_dir = path.parent();
 
         if !path.exists() {
-            // Create default config file
+            // デフォルト設定ファイルを作成
             Self::generate_at(&path)?;
         }
 
@@ -55,25 +55,25 @@ impl ConfigService {
         let mut config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
-        // If log_path was not explicitly set in config, use config file directory
-        // Check if log_path matches the general default (meaning it wasn't set in file)
+        // log_path が設定ファイルで明示的に設定されていない場合、設定ファイルのディレクトリを使用
+        // log_path が汎用デフォルトと一致するかチェック（ファイルで設定されていないことを意味する）
         let general_default = default_log_path_for_config_dir(None);
         if config.log_path == general_default {
             config.log_path = default_log_path_for_config_dir(config_dir);
         }
 
-        // Validate global configuration
+        // グローバル設定の検証
         config
             .validate()
             .with_context(|| format!("Invalid configuration in {}", path.display()))?;
 
-        // Search for and merge project-level configuration
+        // プロジェクトレベルの設定を検索してマージ
         let project_path = project_search_dir.and_then(Self::find_project_config_from);
         if let Some(project_path) = project_path {
             let project = Self::load_project_config(&project_path)?;
             config.merge_project(&project);
 
-            // Re-validate after merge
+            // マージ後に再検証
             config.validate().with_context(|| {
                 format!(
                     "Invalid configuration after merging project config from {}",
@@ -85,13 +85,13 @@ impl ConfigService {
         Ok(config)
     }
 
-    /// Search for `.claw-hooks.toml` in the current working directory.
+    /// カレントディレクトリで `.claw-hooks.toml` を検索。
     pub fn find_project_config() -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
         Self::find_project_config_from(&cwd)
     }
 
-    /// Check if `.claw-hooks.toml` exists in the given directory.
+    /// 指定ディレクトリに `.claw-hooks.toml` が存在するか確認。
     fn find_project_config_from(dir: &Path) -> Option<PathBuf> {
         let candidate = dir.join(PROJECT_CONFIG_NAME);
         if candidate.is_file() {
@@ -101,12 +101,12 @@ impl ConfigService {
         }
     }
 
-    /// Load and validate a project-level configuration file.
+    /// プロジェクトレベルの設定ファイルを読み込み検証する。
     pub fn load_project_config(path: &Path) -> Result<ProjectConfig> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read project config: {}", path.display()))?;
 
-        // Reject global-only keys in project config
+        // プロジェクト設定でグローバル専用キーを拒否
         Self::reject_global_only_keys(&content, path)?;
 
         let project: ProjectConfig = toml::from_str(&content)
@@ -118,11 +118,11 @@ impl ConfigService {
         Ok(project)
     }
 
-    /// Reject usage of global-only keys (debug, log_path, nano_buddy) in project config.
+    /// プロジェクト設定でのグローバル専用キー（debug, log_path, nano_buddy）の使用を拒否する。
     fn reject_global_only_keys(content: &str, path: &Path) -> Result<()> {
         for line in content.lines() {
             let trimmed = line.trim();
-            // Skip comments and empty lines
+            // コメント行と空行をスキップ
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
@@ -139,14 +139,14 @@ impl ConfigService {
         Ok(())
     }
 
-    /// Generate default configuration file at the default path.
+    /// デフォルトパスにデフォルト設定ファイルを生成する。
     pub fn generate_default() -> Result<()> {
         Self::generate_at(&Self::default_path())
     }
 
-    /// Generate default configuration file at the specified path.
+    /// 指定パスにデフォルト設定ファイルを生成する。
     pub fn generate_at(path: &Path) -> Result<()> {
-        // Create parent directories if needed
+        // 必要に応じて親ディレクトリを作成
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create config directory: {}", parent.display())
@@ -160,7 +160,7 @@ impl ConfigService {
         Ok(())
     }
 
-    /// Generate default configuration content with comments.
+    /// コメント付きのデフォルト設定内容を生成する。
     fn default_config_content() -> String {
         r#"# claw-hooks configuration file
 # https://github.com/owayo/claw-hooks

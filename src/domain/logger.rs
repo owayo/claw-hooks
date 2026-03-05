@@ -1,4 +1,4 @@
-//! Logging system with daily rotation using local timezone.
+//! ローカルタイムゾーンを使用した日次ローテーション付きログシステム。
 
 use anyhow::Result;
 use logroller::{LogRollerBuilder, Rotation, RotationAge, TimeZone};
@@ -12,33 +12,33 @@ use tracing_subscriber::prelude::*;
 
 use crate::config::Config;
 
-/// Initialize the logging system.
+/// ログシステムを初期化する。
 pub fn init(config: &Config) -> Result<()> {
-    // Create log directory if needed
+    // 必要に応じてログディレクトリを作成
     if !config.log_path.exists() {
         fs::create_dir_all(&config.log_path)?;
     }
 
-    // Clean up old logs
+    // 古いログを削除
     cleanup_old_logs(&config.log_path)?;
 
-    // Create rolling file appender with daily rotation using local timezone
-    // File naming: claw-hooks.YYYY-MM-DD (e.g., claw-hooks.2026-02-05)
+    // ローカルタイムゾーンによる日次ローテーション付きローリングファイルアペンダを作成
+    // ファイル命名: claw-hooks.YYYY-MM-DD（例: claw-hooks.2026-02-05）
     let appender = LogRollerBuilder::new(config.log_path.as_path(), Path::new("claw-hooks"))
         .rotation(Rotation::AgeBased(RotationAge::Daily))
-        .time_zone(TimeZone::Local) // Use system local timezone for rotation
+        .time_zone(TimeZone::Local) // ローテーションにシステムのローカルタイムゾーンを使用
         .max_keep_files(3)
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create log roller: {}", e))?;
 
     let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
 
-    // Use local timezone for timestamps
+    // タイムスタンプにローカルタイムゾーンを使用
     let time_format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     let timer = OffsetTime::new(local_offset, time_format);
 
-    // Set up subscriber with file output
+    // ファイル出力付きサブスクライバを設定
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .with(
@@ -55,15 +55,15 @@ pub fn init(config: &Config) -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set global subscriber: {}", e))?;
 
-    // Keep the guard alive for the duration of the program
-    // Note: In a real application, this guard should be stored somewhere
-    // to prevent it from being dropped, which would stop the logging thread.
+    // プログラムの実行中はguardを維持する
+    // 注: 実際のアプリケーションでは、guardをどこかに保持しないと
+    // ドロップ時にログスレッドが停止してしまう。
     std::mem::forget(_guard);
 
     Ok(())
 }
 
-/// Clean up log files older than 2 days.
+/// 2日以上経過したログファイルを削除する。
 pub fn cleanup_old_logs(log_path: &Path) -> Result<()> {
     use std::time::{Duration, SystemTime};
 
@@ -78,7 +78,7 @@ pub fn cleanup_old_logs(log_path: &Path) -> Result<()> {
         let entry = entry?;
         let path = entry.path();
 
-        // Only process log files
+        // ログファイルのみ処理
         if !path.is_file() {
             continue;
         }
@@ -88,12 +88,12 @@ pub fn cleanup_old_logs(log_path: &Path) -> Result<()> {
             None => continue,
         };
 
-        // Check if it's a claw-hooks log file
+        // claw-hooks のログファイルか確認
         if !filename.starts_with("claw-hooks") {
             continue;
         }
 
-        // Check modification time
+        // 更新日時を確認
         if let Ok(metadata) = entry.metadata() {
             if let Ok(modified) = metadata.modified() {
                 if modified < cutoff {

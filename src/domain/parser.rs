@@ -1,7 +1,7 @@
-//! Shell command parser.
+//! シェルコマンドパーサー。
 //!
-//! Provides functionality to extract commands from shell command strings.
-//! Uses tree-sitter-bash for accurate AST-based parsing when the `ast-parser` feature is enabled.
+//! シェルコマンド文字列からコマンドを抽出する機能を提供する。
+//! `ast-parser` フィーチャーが有効な場合、tree-sitter-bash による正確な AST ベースの解析を使用する。
 
 #[cfg(feature = "ast-parser")]
 use tree_sitter::{Node, Parser};
@@ -12,17 +12,17 @@ const COMMAND_WRAPPERS: &[&str] = &[
     "command",
 ];
 
-/// Shells that can execute command strings via -c flag
+/// -c フラグでコマンド文字列を実行できるシェル
 const SHELL_COMMANDS: &[&str] = &["bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash"];
 
-/// Shell command parser using tree-sitter-bash for AST-based analysis.
+/// tree-sitter-bash を使用した AST ベースのシェルコマンドパーサー。
 pub struct ShellParser {
     #[cfg(feature = "ast-parser")]
     parser: Parser,
 }
 
 impl ShellParser {
-    /// Create a new ShellParser.
+    /// 新しい ShellParser を作成する。
     pub fn new() -> Self {
         #[cfg(feature = "ast-parser")]
         {
@@ -38,15 +38,15 @@ impl ShellParser {
         }
     }
 
-    /// Extract commands from a shell command string.
+    /// シェルコマンド文字列からコマンドを抽出する。
     ///
-    /// Handles:
-    /// - Pipelines (|)
-    /// - Logical operators (&&, ||)
-    /// - Semicolons (;)
-    /// - Command wrappers (sudo, env, nohup, etc.)
-    /// - Subshells (bash -c, sh -c, etc.)
-    /// - xargs with commands
+    /// 対応する構文:
+    /// - パイプライン (|)
+    /// - 論理演算子 (&&, ||)
+    /// - セミコロン (;)
+    /// - ラッパーコマンド (sudo, env, nohup 等)
+    /// - サブシェル (bash -c, sh -c 等)
+    /// - xargs 付きコマンド
     #[cfg(feature = "ast-parser")]
     pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
         let tree = match self.parser.parse(command, None) {
@@ -56,8 +56,8 @@ impl ShellParser {
 
         let root = tree.root_node();
         let mut commands = Vec::new();
-        // Now handles wrappers and subshells directly within extract_commands_from_node
-        // using AST-based argument extraction instead of string search
+        // 文字列検索の代わりに AST ベースの引数抽出を使用して
+        // ラッパーとサブシェルを extract_commands_from_node 内で直接処理する
         self.extract_commands_from_node(root, command, &mut commands);
 
         commands
@@ -68,8 +68,8 @@ impl ShellParser {
         self.extract_commands_fallback(command)
     }
 
-    /// Extract full command strings (command name + arguments) from a shell command string.
-    /// Used by custom filters to match patterns like "npm install".
+    /// シェルコマンド文字列から完全なコマンド文字列（コマンド名 + 引数）を抽出する。
+    /// "npm install" のようなパターンをマッチするためにカスタムフィルターで使用される。
     #[cfg(feature = "ast-parser")]
     pub fn extract_command_strings(&mut self, command: &str) -> Vec<String> {
         let tree = match self.parser.parse(command, None) {
@@ -89,8 +89,8 @@ impl ShellParser {
         self.extract_command_strings_fallback(command)
     }
 
-    /// Extract full command strings from AST node recursively
-    /// Uses raw arguments with quotes preserved for accurate pattern matching.
+    /// AST ノードから完全なコマンド文字列を再帰的に抽出する。
+    /// 正確なパターンマッチングのためにクォートを保持した生の引数を使用する。
     #[cfg(feature = "ast-parser")]
     fn extract_command_strings_from_node(
         &mut self,
@@ -102,7 +102,7 @@ impl ShellParser {
             "command" | "simple_command" => {
                 if let Some(cmd_name) = self.get_command_name(node, source) {
                     if !cmd_name.is_empty() {
-                        // Build full command string: command + arguments (with quotes preserved)
+                        // 完全なコマンド文字列を構築: コマンド + 引数（クォート保持）
                         let args_raw = self.get_command_arguments_raw(node, source);
                         let full_cmd = if args_raw.is_empty() {
                             cmd_name.clone()
@@ -111,8 +111,8 @@ impl ShellParser {
                         };
                         command_strings.push(full_cmd);
 
-                        // Handle shell -c "command" - extract nested command strings
-                        // Use stripped args for shell command extraction
+                        // shell -c "command" を処理 - ネストされたコマンド文字列を抽出
+                        // シェルコマンド抽出にはクォート除去済み引数を使用
                         if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
                             let args = self.get_command_arguments(node, source);
                             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
@@ -121,10 +121,10 @@ impl ShellParser {
                             }
                         }
 
-                        // Handle xargs - extract the command being run
+                        // xargs を処理 - 実行されるコマンドを抽出
                         if cmd_name == "xargs" {
                             let args = self.get_command_arguments(node, source);
-                            // Build xargs target command string
+                            // xargs 対象コマンド文字列を構築
                             let xargs_args: Vec<_> =
                                 args.iter().filter(|a| !a.starts_with('-')).collect();
                             if !xargs_args.is_empty() {
@@ -138,7 +138,7 @@ impl ShellParser {
                         }
                     }
                 }
-                // Recurse into children for command substitutions
+                // コマンド置換のために子ノードに再帰
                 for child in node.children(&mut node.walk()) {
                     self.extract_command_strings_from_node(child, source, command_strings);
                 }
@@ -156,7 +156,7 @@ impl ShellParser {
         }
     }
 
-    /// Fallback parser for extract_command_strings
+    /// extract_command_strings のフォールバックパーサー
     fn extract_command_strings_fallback(&self, command: &str) -> Vec<String> {
         let mut command_strings = Vec::new();
 
@@ -175,7 +175,7 @@ impl ShellParser {
         command_strings
     }
 
-    /// Extract full command strings from a single segment (fallback).
+    /// 単一セグメントから完全なコマンド文字列を抽出する（フォールバック）。
     fn extract_command_strings_from_segment_fallback(&self, segment: &str) -> Vec<String> {
         let mut command_strings = Vec::new();
         let trimmed = segment.trim();
@@ -200,14 +200,14 @@ impl ShellParser {
         };
         command_strings.push(full_cmd);
 
-        // Handle shell -c "command"
+        // shell -c "command" を処理
         if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                 command_strings.extend(self.extract_command_strings_fallback(&shell_cmd));
             }
         }
 
-        // Handle xargs target command
+        // xargs 対象コマンドを処理
         if cmd_name == "xargs" {
             let xargs_args: Vec<_> = args.iter().filter(|a| !a.starts_with('-')).collect();
             if !xargs_args.is_empty() {
@@ -221,7 +221,7 @@ impl ShellParser {
             }
         }
 
-        // Handle command substitutions in arguments.
+        // 引数内のコマンド置換を処理。
         for nested in Self::extract_nested_command_fragments(trimmed) {
             command_strings.extend(self.extract_command_strings_fallback(&nested));
         }

@@ -1,4 +1,4 @@
-//! Configuration validation.
+//! 設定バリデーション。
 
 use anyhow::{Result, bail};
 use regex::Regex;
@@ -7,14 +7,11 @@ use std::collections::BTreeMap;
 use super::types::ProjectConfig;
 use super::{Config, CustomFilter, StopHook};
 
-/// Validate configuration.
+/// 設定を検証する。
 pub fn validate(config: &Config) -> Result<()> {
-    // Validate log path
-    if !config.log_path.as_os_str().is_empty() {
-        // Path will be created if it doesn't exist, so just check it's valid
-        if config.log_path.to_string_lossy().contains('\0') {
-            bail!("Invalid log_path: contains null character");
-        }
+    // ログパスの検証（NUL文字を含まないこと）
+    if !config.log_path.as_os_str().is_empty() && config.log_path.to_string_lossy().contains('\0') {
+        bail!("Invalid log_path: contains null character");
     }
 
     validate_custom_filters(&config.custom_filters)?;
@@ -24,14 +21,14 @@ pub fn validate(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Validate custom filter definitions.
+/// カスタムフィルター定義を検証する。
 pub fn validate_custom_filters(filters: &[CustomFilter]) -> Result<()> {
     for (i, filter) in filters.iter().enumerate() {
         if filter.command.is_empty() {
             bail!("custom_filters[{}]: command cannot be empty", i);
         }
 
-        // Validate regex pattern
+        // 正規表現パターンの検証
         if let Err(e) = Regex::new(&filter.command) {
             bail!(
                 "custom_filters[{}]: invalid regex pattern '{}': {}",
@@ -48,7 +45,7 @@ pub fn validate_custom_filters(filters: &[CustomFilter]) -> Result<()> {
     Ok(())
 }
 
-/// Validate extension hook definitions.
+/// 拡張子フック定義を検証する。
 pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result<()> {
     for (ext, commands) in hooks {
         if !ext.starts_with('.') {
@@ -59,8 +56,7 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
             bail!("extension_hooks['{}']: commands cannot be empty", ext);
         }
 
-        // SECURITY: Ensure all commands contain exactly one {file} placeholder
-        // This is required for safe argument handling
+        // セキュリティ: すべてのコマンドが {file} プレースホルダーを1つだけ含むことを保証
         for (j, cmd) in commands.iter().enumerate() {
             if cmd.is_empty() {
                 bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
@@ -102,7 +98,7 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
     Ok(())
 }
 
-/// Validate stop hook definitions.
+/// Stop フック定義を検証する。
 pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
     for (i, hook) in hooks.iter().enumerate() {
         if hook.commands.is_empty() {
@@ -114,7 +110,7 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
             }
         }
 
-        // Validate stage range (1-5)
+        // ステージ範囲の検証（1-5）
         if let Some(stage) = hook.stage {
             if !(1..=5).contains(&stage) {
                 bail!(
@@ -125,7 +121,7 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
             }
         }
 
-        // Validate condition if present
+        // 条件が指定されている場合の検証
         if let Some(ref condition) = hook.condition {
             if let Some(ref file_exists) = condition.file_exists {
                 if file_exists.is_empty() {
@@ -145,8 +141,8 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
     Ok(())
 }
 
-/// Validate a project-level configuration.
-/// Only validates fields that are `Some` (specified in the project config).
+/// プロジェクトレベルの設定を検証する。
+/// `Some` のフィールドのみ検証（プロジェクト設定で指定されたもの）。
 pub fn validate_project(config: &ProjectConfig) -> Result<()> {
     if let Some(ref filters) = config.custom_filters {
         validate_custom_filters(filters)?;

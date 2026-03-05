@@ -1,4 +1,4 @@
-//! Configuration data types.
+//! 設定データ型。
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -7,56 +7,56 @@ use std::path::{Path, PathBuf};
 
 use super::validation;
 
-/// Default hook command timeout in seconds.
+/// フックコマンドのデフォルトタイムアウト（秒）。
 fn default_hook_timeout() -> u64 {
     60
 }
 
-/// Main configuration structure.
+/// メイン設定構造体。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Enable blocking of rm/rmdir commands
+    /// rm/rmdir コマンドのブロックを有効化
     pub rm_block: bool,
 
-    /// Custom message for rm blocking (optional)
+    /// rm ブロック時のカスタムメッセージ（任意）
     pub rm_block_message: Option<String>,
 
-    /// Enable blocking of kill/pkill/killall commands
+    /// kill/pkill/killall コマンドのブロックを有効化
     pub kill_block: bool,
 
-    /// Custom message for kill blocking (optional)
+    /// kill ブロック時のカスタムメッセージ（任意）
     pub kill_block_message: Option<String>,
 
-    /// Enable blocking of dd command
+    /// dd コマンドのブロックを有効化
     pub dd_block: bool,
 
-    /// Custom message for dd blocking (optional)
+    /// dd ブロック時のカスタムメッセージ（任意）
     pub dd_block_message: Option<String>,
 
-    /// Enable debug logging to file
+    /// ファイルへのデバッグログを有効化
     pub debug: bool,
 
-    /// Path to log directory
+    /// ログディレクトリのパス
     pub log_path: PathBuf,
 
-    /// Custom command filters
+    /// カスタムコマンドフィルター
     #[serde(default)]
     pub custom_filters: Vec<CustomFilter>,
 
-    /// Extension-based hooks (map format: ".ext" = ["cmd1", "cmd2"])
+    /// 拡張子ベースのフック（マップ形式: ".ext" = ["cmd1", "cmd2"]）
     #[serde(default)]
     pub extension_hooks: BTreeMap<String, Vec<String>>,
 
-    /// Stop event hooks
+    /// Stop イベントフック
     #[serde(default)]
     pub stop_hooks: Vec<StopHook>,
 
-    /// NanoBuddy連携を有効化 (隠しオプション)
+    /// NanoBuddy連携を有効化（隠しオプション）
     #[serde(default)]
     pub nano_buddy: bool,
 
-    /// Timeout in seconds for hook command execution (default: 60)
+    /// フックコマンド実行のタイムアウト（秒、デフォルト: 60）
     #[serde(default = "default_hook_timeout")]
     pub hook_timeout: u64,
 }
@@ -82,13 +82,13 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Validate configuration and return errors if invalid.
-    /// Delegates to the comprehensive validation module.
+    /// 設定を検証し、無効な場合はエラーを返す。
+    /// 包括的なバリデーションモジュールに委譲。
     pub fn validate(&self) -> Result<()> {
         validation::validate(self)
     }
 
-    /// Merge project-level configuration overrides into this config.
+    /// プロジェクトレベルの設定オーバーライドをこの設定にマージする。
     ///
     /// - `Option<T>` が `Some` の場合のみ上書き/マージ
     /// - `None` = 未指定 → グローバルを維持
@@ -128,50 +128,50 @@ impl Config {
     }
 }
 
-/// Project-level configuration overrides.
+/// プロジェクトレベルの設定オーバーライド。
 ///
-/// All fields are `Option<T>` — `None` means "not specified" (keep global default).
-/// Placed at `.claw-hooks.toml` in the project root.
+/// すべてのフィールドは `Option<T>` — `None` は「未指定」（グローバルデフォルトを維持）を意味する。
+/// プロジェクトルートの `.claw-hooks.toml` に配置。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
-    /// Override rm blocking
+    /// rm ブロックの上書き
     pub rm_block: Option<bool>,
-    /// Override rm block message
+    /// rm ブロックメッセージの上書き
     pub rm_block_message: Option<String>,
-    /// Override kill blocking
+    /// kill ブロックの上書き
     pub kill_block: Option<bool>,
-    /// Override kill block message
+    /// kill ブロックメッセージの上書き
     pub kill_block_message: Option<String>,
-    /// Override dd blocking
+    /// dd ブロックの上書き
     pub dd_block: Option<bool>,
-    /// Override dd block message
+    /// dd ブロックメッセージの上書き
     pub dd_block_message: Option<String>,
-    /// Override hook timeout
+    /// フックタイムアウトの上書き
     pub hook_timeout: Option<u64>,
-    /// Override custom filters (replaces global)
+    /// カスタムフィルターの上書き（グローバルを置換）
     pub custom_filters: Option<Vec<CustomFilter>>,
-    /// Override extension hooks (replaces global)
+    /// 拡張子フックの上書き（グローバルを置換）
     pub extension_hooks: Option<BTreeMap<String, Vec<String>>>,
-    /// Additional stop hooks (merged with global)
+    /// 追加の Stop フック（グローバルとマージ）
     pub stop_hooks: Option<Vec<StopHook>>,
 }
 
-/// Custom command filter configuration.
+/// カスタムコマンドフィルター設定。
 ///
-/// Two modes are supported:
-/// 1. Regex mode: Only `command` field is set (regex pattern)
-/// 2. Args mode: Both `command` and `args` fields are set (exact command + args matching)
+/// 2つのモードをサポート:
+/// 1. 正規表現モード: `command` フィールドのみ設定（正規表現パターン）
+/// 2. 引数モード: `command` と `args` 両方を設定（コマンド完全一致 + 引数マッチング）
 ///
-/// # Examples
+/// # 例
 ///
-/// Regex mode:
+/// 正規表現モード:
 /// ```toml
 /// [[custom_filters]]
 /// command = "npm (install|i|add)"
 /// message = "Use pnpm instead"
 /// ```
 ///
-/// Args mode:
+/// 引数モード:
 /// ```toml
 /// [[custom_filters]]
 /// command = "npm"
@@ -180,34 +180,34 @@ pub struct ProjectConfig {
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomFilter {
-    /// Command name (exact match when `args` is specified) or regex pattern
+    /// コマンド名（`args` 指定時は完全一致）または正規表現パターン
     pub command: String,
 
-    /// Optional list of arguments to match (any match triggers the filter)
-    /// When specified, `command` is treated as exact match, not regex
+    /// マッチさせる引数のリスト（任意、いずれか一致でフィルター発動）
+    /// 指定時は `command` は正規表現ではなく完全一致として扱われる
     #[serde(default)]
     pub args: Vec<String>,
 
-    /// Message to display when command is blocked
+    /// コマンドがブロックされた際に表示するメッセージ
     pub message: String,
 }
 
-/// Stop hook execution condition.
-/// All specified fields are evaluated as AND (all must be satisfied).
+/// Stop フックの実行条件。
+/// 指定されたすべてのフィールドは AND で評価（すべて満たす必要がある）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookCondition {
-    /// Execute hook only when this file exists (relative to cwd)
+    /// このファイルが存在する場合のみフックを実行（cwd からの相対パス）
     #[serde(default)]
     pub file_exists: Option<String>,
 
-    /// Execute hook only when this command exists in PATH
+    /// このコマンドが PATH に存在する場合のみフックを実行
     #[serde(default)]
     pub command_exists: Option<String>,
 }
 
 impl HookCondition {
-    /// Evaluate the condition against the working directory.
-    /// Returns true if all specified conditions are satisfied (AND logic).
+    /// 作業ディレクトリに対して条件を評価する。
+    /// 指定されたすべての条件が満たされる場合に true を返す（AND ロジック）。
     pub fn is_satisfied(&self, cwd: &Path) -> bool {
         if let Some(ref file) = self.file_exists {
             if !cwd.join(file).exists() {
@@ -222,14 +222,14 @@ impl HookCondition {
         true
     }
 
-    /// Check if a command exists in PATH.
+    /// コマンドが PATH に存在するか確認する。
     fn command_in_path(cmd: &str) -> bool {
         if cmd.is_empty() {
             return false;
         }
 
         let command_path = Path::new(cmd);
-        // Explicit paths ("./tool", "/usr/bin/tool", "dir\\tool.exe") are checked directly.
+        // 明示的なパス（"./tool", "/usr/bin/tool", "dir\\tool.exe"）は直接チェック。
         if command_path.components().count() > 1 || command_path.is_absolute() {
             return command_path.is_file();
         }
@@ -240,7 +240,7 @@ impl HookCondition {
 
         #[cfg(windows)]
         {
-            // Windows resolves commands using PATHEXT when extension is omitted.
+            // Windows は拡張子省略時に PATHEXT を使用してコマンドを解決する。
             let has_extension = command_path.extension().is_some();
             let pathext = std::env::var_os("PATHEXT")
                 .map(|v| {
@@ -282,7 +282,7 @@ impl HookCondition {
     }
 }
 
-/// Stop event hook configuration.
+/// Stop イベントフック設定。
 ///
 /// ```toml
 /// [[stop_hooks]]
@@ -293,45 +293,45 @@ impl HookCondition {
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopHook {
-    /// Commands to execute on Stop event (executed in parallel)
+    /// Stop イベント時に実行するコマンド（並列実行）
     pub commands: Vec<String>,
 
-    /// Optional condition for execution
+    /// 実行条件（任意）
     #[serde(default)]
     pub condition: Option<HookCondition>,
 
-    /// Execution stage (1-5, lower runs first, default: 5)
-    /// Hooks with lower stage values execute before higher ones.
-    /// Hooks in the same stage execute in parallel.
+    /// 実行ステージ（1-5、小さい値が先に実行、デフォルト: 5）
+    /// ステージ値が小さいフックが先に実行される。
+    /// 同じステージのフックは並列実行される。
     #[serde(default)]
     pub stage: Option<u8>,
 
-    /// Whether to report results back to the AI agent.
-    /// If not specified: true when `condition` is set, false otherwise.
+    /// 結果をAIエージェントに報告するかどうか。
+    /// 未指定の場合: `condition` が設定されていれば true、そうでなければ false。
     #[serde(default)]
     pub report: Option<bool>,
 }
 
 impl StopHook {
-    /// Get the effective stage value (defaults to 5 if not specified).
+    /// 有効なステージ値を取得（未指定時はデフォルト5）。
     pub fn stage_value(&self) -> u8 {
         self.stage.unwrap_or(5)
     }
 
-    /// Determine whether this hook's results should be reported to the AI agent.
-    /// Explicit `report` value takes precedence; otherwise defaults based on `condition`.
+    /// このフックの結果をAIエージェントに報告すべきかを判定する。
+    /// 明示的な `report` 値が優先され、未指定時は `condition` の有無に基づくデフォルト。
     pub fn should_report(&self) -> bool {
         self.report.unwrap_or(self.condition.is_some())
     }
 }
 
-/// Get default log path (relative to config directory).
-/// This returns a placeholder; the actual path is set by ConfigService based on config file location.
+/// デフォルトのログパスを取得（設定ディレクトリからの相対）。
+/// プレースホルダーを返す。実際のパスは ConfigService が設定ファイルの場所に基づいて設定する。
 pub fn default_log_path() -> PathBuf {
     default_log_path_for_config_dir(None)
 }
 
-/// Get log path based on config directory.
+/// 設定ディレクトリに基づくログパスを取得。
 pub fn default_log_path_for_config_dir(config_dir: Option<&Path>) -> PathBuf {
     config_dir
         .map(|d| d.to_path_buf())
@@ -350,11 +350,11 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    // === HookCondition tests ===
+    // === HookCondition テスト ===
 
     #[test]
     fn test_hook_condition_file_exists_satisfied() {
-        // Cargo.toml exists in the project root
+        // プロジェクトルートに Cargo.toml が存在する
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: None,
@@ -390,15 +390,15 @@ mod tests {
             command_exists: None,
         };
         let cwd = Path::new("/nonexistent-path-xyz");
-        // Empty string joined with nonexistent path → not satisfied
+        // 空文字列と存在しないパスの結合 → 条件不成立
         assert!(!condition.is_satisfied(cwd));
     }
 
-    // === command_exists tests ===
+    // === command_exists テスト ===
 
     #[test]
     fn test_hook_condition_command_exists_satisfied() {
-        // "sh" should exist on any Unix system
+        // "sh" はすべての Unix システムに存在するはず
         let condition = HookCondition {
             file_exists: None,
             command_exists: Some("sh".to_string()),
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_hook_condition_both_file_and_command_satisfied() {
-        // Both conditions must be true (AND logic)
+        // 両方の条件が true である必要がある（AND ロジック）
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: Some("sh".to_string()),
@@ -450,7 +450,7 @@ mod tests {
         assert!(!condition.is_satisfied(cwd));
     }
 
-    // === TOML deserialization tests ===
+    // === TOML デシリアライゼーションテスト ===
 
     #[test]
     fn test_stop_hook_with_condition_deserializes() {
@@ -600,11 +600,11 @@ mod tests {
         let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
         assert_eq!(wrapper.stop_hooks.len(), 3);
 
-        // First: no condition
+        // 1番目: 条件なし
         assert!(wrapper.stop_hooks[0].condition.is_none());
         assert_eq!(wrapper.stop_hooks[0].commands, vec!["notify-send 'Done'"]);
 
-        // Second: Cargo.toml condition, commands array
+        // 2番目: Cargo.toml 条件、コマンド配列
         let cond1 = wrapper.stop_hooks[1].condition.as_ref().unwrap();
         assert_eq!(cond1.file_exists, Some("Cargo.toml".to_string()));
         assert_eq!(
@@ -615,12 +615,12 @@ mod tests {
             ]
         );
 
-        // Third: tsconfig.json condition
+        // 3番目: tsconfig.json 条件
         let cond2 = wrapper.stop_hooks[2].condition.as_ref().unwrap();
         assert_eq!(cond2.file_exists, Some("tsconfig.json".to_string()));
     }
 
-    // === hook_timeout tests ===
+    // === hook_timeout テスト ===
 
     #[test]
     fn test_hook_timeout_default_value() {
@@ -636,12 +636,12 @@ mod tests {
 
     #[test]
     fn test_hook_timeout_zero() {
-        // hook_timeout = 0 is technically valid (immediate timeout)
+        // hook_timeout = 0 は技術的に有効（即時タイムアウト）
         let config: Config = toml::from_str("hook_timeout = 0").unwrap();
         assert_eq!(config.hook_timeout, 0);
     }
 
-    // === ProjectConfig deserialization tests ===
+    // === ProjectConfig デシリアライゼーションテスト ===
 
     #[test]
     fn test_project_config_deserialize_empty() {
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(hooks[0].commands, vec!["pnpm exec tsc --noEmit"]);
     }
 
-    // === merge_project tests ===
+    // === merge_project テスト ===
 
     #[test]
     fn test_merge_project_none_keeps_global() {
@@ -828,7 +828,7 @@ mod tests {
         );
     }
 
-    // === StopHook stage/report tests ===
+    // === StopHook stage/report テスト ===
 
     #[test]
     fn test_stop_hook_stage_default_value() {

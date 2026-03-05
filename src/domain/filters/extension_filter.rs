@@ -1,4 +1,4 @@
-//! Extension-based hook filter implementation.
+//! 拡張子ベースのフックフィルターの実装。
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -10,38 +10,38 @@ use crate::domain::command::run_with_timeout;
 use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
-/// Parsed command template result.
+/// パース済みコマンドテンプレートの結果。
 struct ParsedCommand {
-    /// The command/program to execute
+    /// 実行するコマンド/プログラム
     program: String,
-    /// Arguments before the file placeholder
+    /// ファイルプレースホルダーの前の引数
     args_before: Vec<String>,
-    /// Arguments after the file placeholder
+    /// ファイルプレースホルダーの後の引数
     args_after: Vec<String>,
-    /// If {file} appears inline (e.g., --file={file}), the template token
+    /// {file} がインラインで使用される場合（例: --file={file}）のテンプレートトークン
     inline_template: Option<String>,
 }
 
-/// Result of executing a single command.
+/// 単一コマンドの実行結果。
 struct CommandResult {
-    /// Command that was executed
+    /// 実行されたコマンド
     command: String,
-    /// Whether the command succeeded
+    /// コマンドが成功したかどうか
     success: bool,
-    /// Combined stdout and stderr output
+    /// 結合された stdout と stderr の出力
     output: String,
 }
 
-/// Filter for extension-based hooks.
+/// 拡張子ベースのフックフィルター。
 pub struct ExtensionHookFilter {
-    /// Map of extension -> commands (e.g., ".go" -> ["gofmt -w {file}", "golangci-lint run {file}"])
+    /// 拡張子 → コマンドのマップ（例: ".go" → ["gofmt -w {file}", "golangci-lint run {file}"]）
     hooks: BTreeMap<String, Vec<String>>,
     nano_buddy: bool,
     timeout_secs: u64,
 }
 
 impl ExtensionHookFilter {
-    /// Create a new ExtensionHookFilter.
+    /// 新しい ExtensionHookFilter を作成する。
     pub fn new(hooks: BTreeMap<String, Vec<String>>, nano_buddy: bool, timeout_secs: u64) -> Self {
         Self {
             hooks,
@@ -50,7 +50,7 @@ impl ExtensionHookFilter {
         }
     }
 
-    /// Extract extension from file path (without the leading dot).
+    /// ファイルパスから拡張子を抽出する（先頭のドットを含まない）。
     fn extract_ext(file_path: &str) -> Option<String> {
         Path::new(file_path)
             .extension()
@@ -58,7 +58,7 @@ impl ExtensionHookFilter {
             .map(|e| e.to_string())
     }
 
-    /// Get matching commands for file path.
+    /// ファイルパスにマッチするコマンドを取得する。
     fn get_matching_commands(&self, file_path: &str) -> Option<&Vec<String>> {
         let path = Path::new(file_path);
         let extension = path.extension()?.to_str()?;
@@ -67,10 +67,10 @@ impl ExtensionHookFilter {
         self.hooks.get(&ext_with_dot)
     }
 
-    /// Validate file path for security issues.
-    /// Returns Ok(()) if path is safe, Err with message if dangerous.
+    /// ファイルパスのセキュリティ検証。
+    /// パスが安全なら Ok(())、危険なら Err を返す。
     fn validate_file_path(file_path: &str) -> Result<(), String> {
-        // Prevent parent directory traversal segments like ../ or /a/../b
+        // 親ディレクトリトラバーサル（../ や /a/../b）を防止
         if Path::new(file_path)
             .components()
             .any(|component| component == Component::ParentDir)
@@ -78,14 +78,14 @@ impl ExtensionHookFilter {
             return Err("Path traversal detected".to_string());
         }
 
-        // Prevent paths that could be interpreted as command flags
-        // Use ./ prefix to make it safe for tools that interpret - as flag
+        // コマンドフラグとして解釈されるパスを防止
+        // '-' をフラグと解釈するツール向けに ./ プレフィックスで安全化
         if file_path.starts_with('-') {
             return Err("Path starting with '-' could be interpreted as flag".to_string());
         }
 
-        // Prevent shell metacharacters that could cause injection
-        // Note: We don't use shell, but some tools might interpret these
+        // インジェクションを引き起こすシェルメタ文字を防止
+        // 注: シェルは使用しないが、一部ツールがこれらを解釈する可能性がある
         const DANGEROUS_CHARS: &[char] = &['`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\0'];
         for c in DANGEROUS_CHARS {
             if file_path.contains(*c) {
@@ -96,8 +96,8 @@ impl ExtensionHookFilter {
         Ok(())
     }
 
-    /// Parse command template and return structured result.
-    /// Handles {file} placeholder safely, including inline patterns like --file={file}.
+    /// コマンドテンプレートをパースして構造化された結果を返す。
+    /// --file={file} のようなインラインパターンを含む {file} プレースホルダーを安全に処理する。
     fn parse_command_template(template: &str) -> Result<ParsedCommand, String> {
         let parts = crate::domain::parse_shell_tokens(template);
         if parts.is_empty() {
@@ -117,11 +117,11 @@ impl ExtensionHookFilter {
 
         for part in parts.iter().skip(1) {
             if *part == "{file}" {
-                // Standalone {file} placeholder
+                // 単独の {file} プレースホルダー
                 found_placeholder = true;
                 placeholder_count += 1;
             } else if part.contains("{file}") {
-                // Inline placeholder like --file={file}
+                // --file={file} のようなインラインプレースホルダー
                 found_placeholder = true;
                 let count = part.matches("{file}").count();
                 placeholder_count += count;
@@ -148,23 +148,22 @@ impl ExtensionHookFilter {
         })
     }
 
-    /// Execute a single command safely and return the result.
-    /// SECURITY: File path is passed as a separate argument to prevent injection.
+    /// 単一コマンドを安全に実行して結果を返す。
+    /// セキュリティ: ファイルパスはインジェクション防止のため個別の引数として渡される。
     fn execute_command(
         &self,
         command_template: &str,
         file_path: &str,
     ) -> Result<CommandResult, String> {
-        // Validate file path first
+        // ファイルパスの検証
         Self::validate_file_path(file_path)?;
 
-        // Parse command template
+        // コマンドテンプレートのパース
         let parsed = Self::parse_command_template(command_template)?;
 
-        // For tools that might interpret - as flag, use -- to signal end of options
-        // or prefix with ./ for relative paths starting with special chars
+        // '-' をフラグと解釈するツール向けに ./ プレフィックスを付与
         let safe_path = if file_path.starts_with('-') {
-            // This shouldn't happen due to validation, but double-check
+            // 検証で弾かれるはずだが念のため
             format!("./{}", file_path)
         } else {
             file_path.to_string()
@@ -179,8 +178,8 @@ impl ExtensionHookFilter {
             parsed.inline_template
         );
 
-        // Build command with file path as a separate, properly escaped argument
-        // On Windows, use `cmd /c` to resolve .cmd/.bat wrappers (e.g. npx.cmd)
+        // ファイルパスを個別の引数としてコマンドを構築
+        // Windows では `cmd /c` を使用して .cmd/.bat ラッパー（例: npx.cmd）を解決
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
             c.arg("/c").arg(&parsed.program);
@@ -191,18 +190,18 @@ impl ExtensionHookFilter {
         cmd.args(&parsed.args_before);
 
         if let Some(ref template) = parsed.inline_template {
-            // Handle inline template like --file={file}
+            // --file={file} のようなインラインテンプレートを処理
             let arg = template.replace("{file}", &safe_path);
             cmd.arg(&arg);
         } else {
-            // Standalone {file} placeholder
+            // 単独の {file} プレースホルダー
             cmd.arg(&safe_path);
         }
 
         cmd.args(&parsed.args_after);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        // Build the actual expanded command string for logging
+        // ログ用に展開済みのコマンド文字列を構築
         let actual_command = {
             let mut parts = vec![parsed.program.clone()];
             parts.extend(parsed.args_before.iter().cloned());
@@ -231,7 +230,7 @@ impl ExtensionHookFilter {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Combine stdout and stderr, filtering empty lines
+        // stdout と stderr を結合（空行を除外）
         let combined_output = [stdout.trim(), stderr.trim()]
             .iter()
             .filter(|s| !s.is_empty())
@@ -270,8 +269,8 @@ impl ExtensionHookFilter {
         })
     }
 
-    /// Execute all commands for an extension and collect output.
-    /// Returns combined output from all commands that produced warnings/errors.
+    /// 拡張子に対応するすべてのコマンドを実行し、出力を収集する。
+    /// 警告/エラーを出力したすべてのコマンドの結合出力を返す。
     fn execute_commands(&self, commands: &[String], file_path: &str) -> (bool, Option<String>) {
         let mut all_success = true;
         let mut outputs: Vec<String> = Vec::new();
@@ -282,7 +281,7 @@ impl ExtensionHookFilter {
                     if !result.success {
                         all_success = false;
                     }
-                    // Collect non-empty output (warnings, errors, lint messages)
+                    // 空でない出力を収集（警告、エラー、lint メッセージ）
                     if !result.output.is_empty() {
                         outputs.push(format!("[{}] {}", result.command, result.output));
                     }
@@ -307,14 +306,8 @@ impl ExtensionHookFilter {
 
 impl Filter for ExtensionHookFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // Applies to Write, Edit, MultiEdit in both BeforeCommand and AfterFileEdit events
-        // NOT for Read operations
-        //
-        // BeforeCommand: Run hook before file write (e.g., validation)
-        // AfterFileEdit: Run hook after file write (e.g., formatting, linting)
-        //   - Claude Code: PostToolUse event
-        //   - Cursor: afterFileEdit hook
-        //   - Windsurf: post_write_code action
+        // BeforeCommand/AfterFileEdit イベントで Write, Edit, MultiEdit に適用
+        // Read 操作には適用しない
         if !matches!(
             input.event,
             HookEvent::BeforeCommand | HookEvent::AfterFileEdit
@@ -326,7 +319,7 @@ impl Filter for ExtensionHookFilter {
             return false;
         }
 
-        // Check if we have a matching extension hook
+        // マッチする拡張子フックがあるか確認
         if let ToolInput::File(file_input) = &input.tool_input {
             return self.get_matching_commands(&file_input.file_path).is_some();
         }
@@ -335,10 +328,10 @@ impl Filter for ExtensionHookFilter {
     }
 
     fn execute(&self, input: &HookInput) -> Decision {
-        // Extract file path and execute commands
+        // ファイルパスを抽出してコマンドを実行
         if let ToolInput::File(file_input) = &input.tool_input {
             if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
-                // NanoBuddy notification (before hook commands so it arrives first)
+                // NanoBuddy 通知（フックコマンドより先に到達するよう先に送信）
                 if self.nano_buddy {
                     if let Some(ext) = Self::extract_ext(&file_input.file_path) {
                         debug!("🐱 NanoBuddy ext notification: .{}", ext);
@@ -346,24 +339,24 @@ impl Filter for ExtensionHookFilter {
                     }
                 }
 
-                // Execute commands and collect output
+                // コマンドを実行して出力を収集
                 let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
 
-                // Return Allow with additional context if there's any output
-                // This passes lint warnings/errors to the agent (Claude Code only)
-                // Normalize output for token efficiency (strip ANSI, collapse blanks)
+                // 出力がある場合は追加コンテキスト付きの Allow を返す
+                // lint 警告/エラーをエージェントに渡す（Claude Code のみ）
+                // トークン効率のため出力を正規化（ANSI 除去、空行圧縮）
                 if let Some(ctx) = output {
                     return Decision::allow_with_context(normalize_lint_output(&ctx));
                 }
             }
         }
 
-        // Always allow - extension hooks are side effects, not filters
+        // 常に許可 — 拡張子フックは副作用であり、フィルターではない
         Decision::allow()
     }
 
     fn priority(&self) -> u32 {
-        100 // Low priority - runs after other filters
+        100 // 低優先度 — 他のフィルターの後に実行
     }
 }
 

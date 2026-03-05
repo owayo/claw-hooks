@@ -1,10 +1,10 @@
-//! Domain layer containing core business logic.
+//! コアビジネスロジックを含むドメイン層。
 //!
-//! This module contains:
-//! - Input/output data types for hook processing
-//! - Filter trait and implementations
-//! - Shell command parser
-//! - Logger with rotation
+//! このモジュールには以下が含まれる:
+//! - フック処理用の入出力データ型
+//! - Filter トレイトとその実装
+//! - シェルコマンドパーサー
+//! - ローテーション付きロガー
 
 pub mod command;
 mod error;
@@ -17,7 +17,7 @@ mod types;
 pub use filters::FilterChain;
 pub use types::{Decision, HookEvent, HookInput, ToolInput};
 
-// Allow unused for potential future use / library API
+// 将来の利用やライブラリ API 向けに未使用を許容
 #[allow(unused)]
 pub use error::ClawError;
 

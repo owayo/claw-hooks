@@ -1,7 +1,7 @@
-//! claw-hooks: AI coding agent hook system
+//! claw-hooks: AIコーディングエージェント用フックシステム
 //!
-//! A CLI tool that integrates with AI coding agents (Claude Code, Cursor, Windsurf)
-//! to filter dangerous commands, suggest safer alternatives, and execute extension-based hooks.
+//! AIコーディングエージェント (Claude Code, Cursor, Windsurf) と連携し、
+//! 危険なコマンドのフィルタリング、安全な代替手段の提案、拡張子ベースのフック実行を行うCLIツール。
 
 mod cli;
 mod config;
@@ -19,15 +19,15 @@ use service::HookService;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load configuration
+    // 設定ファイルの読み込み
     let config = ConfigService::load(cli.config.as_deref())?;
 
-    // Initialize logging if debug mode
+    // デバッグモード時にロギングを初期化
     if cli.debug || config.debug {
         domain::logger::init(&config)?;
     }
 
-    // Execute command
+    // コマンド実行
     match cli.command {
         Commands::Hook { format, trace } => {
             let service = HookService::new(config, format, trace);
@@ -49,7 +49,7 @@ fn main() -> Result<()> {
             config::validate(&config)?;
             if !cli.quiet {
                 eprintln!("Configuration is valid.");
-                // Show project config info if found
+                // プロジェクト設定が見つかった場合の情報表示
                 if let Some(project_path) = ConfigService::find_project_config() {
                     eprintln!("Project config found: {}", project_path.display());
                     match ConfigService::load_project_config(&project_path) {

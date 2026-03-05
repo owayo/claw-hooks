@@ -1,20 +1,20 @@
-//! RM command filter implementation.
+//! rm コマンドフィルターの実装。
 
 use super::Filter;
 use crate::domain::parser::ShellParser;
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
-/// Default message for rm blocking (generic, can be customized via config).
+/// rm ブロック時のデフォルトメッセージ（設定でカスタマイズ可能）。
 const DEFAULT_RM_MESSAGE: &str = "🚫 rm/rmdir command blocked for safety. Configure rm_block_message in config.toml to customize this message.";
 
-/// Filter for blocking rm-related commands.
+/// rm 関連コマンドをブロックするフィルター。
 pub struct RmFilter {
     enabled: bool,
     message: String,
 }
 
 impl RmFilter {
-    /// Create a new RmFilter with optional custom message.
+    /// カスタムメッセージ付きの新しい RmFilter を作成する。
     pub fn new(enabled: bool, custom_message: Option<String>) -> Self {
         Self {
             enabled,
@@ -22,15 +22,15 @@ impl RmFilter {
         }
     }
 
-    /// RM command patterns for Unix and Windows
+    /// Unix/Windows の rm コマンドパターン
     const RM_COMMANDS: &'static [&'static str] = &[
         "rm",    // Unix
         "rmdir", // Unix/Windows
         "del",   // Windows
-        "erase", // Windows (alias for del)
+        "erase", // Windows (del のエイリアス)
     ];
 
-    /// Check if any command in the string is an rm-related command.
+    /// コマンド文字列に rm 関連コマンドが含まれるか判定する。
     fn contains_rm_command(command: &str) -> bool {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands(command);
@@ -47,12 +47,11 @@ impl Filter for RmFilter {
             return false;
         }
 
-        // Only applies to Bash tool in BeforeCommand event
+        // BeforeCommand イベントの Bash ツールにのみ適用
         if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
             return false;
         }
 
-        // Extract command from tool input
         if let ToolInput::Bash(bash) = &input.tool_input {
             return Self::contains_rm_command(&bash.command);
         }
@@ -67,7 +66,7 @@ impl Filter for RmFilter {
     }
 
     fn priority(&self) -> u32 {
-        20 // High priority, but lower than kill
+        20 // 高優先度（kill より低い）
     }
 }
 

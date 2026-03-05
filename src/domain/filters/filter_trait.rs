@@ -1,15 +1,15 @@
-//! Filter trait definition.
+//! フィルタートレイト定義。
 
 use crate::domain::{Decision, HookInput};
 
-/// Trait for command filters.
+/// コマンドフィルターのトレイト。
 pub trait Filter: Send + Sync {
-    /// Check if this filter applies to the given input.
+    /// このフィルターが指定された入力に適用されるか判定する。
     fn applies_to(&self, input: &HookInput) -> bool;
 
-    /// Execute the filter and return a decision.
+    /// フィルターを実行し、判定結果を返す。
     fn execute(&self, input: &HookInput) -> Decision;
 
-    /// Get the priority of this filter (lower = higher priority).
+    /// フィルターの優先度を取得する（値が小さいほど優先度が高い）。
     fn priority(&self) -> u32;
 }

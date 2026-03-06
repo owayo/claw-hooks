@@ -1,3 +1,5 @@
+cd "$(dirname "$0")"
+
 get-md https://code.claude.com/docs/en/hooks-guide.md -o ./claude_code/claude_code.md
 
 get-md -s main https://cursor.com/en-US/docs/agent/hooks -o ./cursor/cursor.md

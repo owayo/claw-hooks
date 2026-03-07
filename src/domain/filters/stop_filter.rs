@@ -128,9 +128,16 @@ impl StopHookFilter {
         match spawn_piped_with_env(program, args, &envs) {
             Ok(child) => {
                 let command_owned = command.to_string();
+                let start = std::time::Instant::now();
                 let handle = std::thread::spawn(move || {
                     match run_with_timeout_tracked(child, timeout_secs, &command_owned) {
                         Ok(result) => {
+                            let elapsed = start.elapsed();
+                            info!(
+                                "⏰️ Stop hook [{}] completed in {:.2}s",
+                                command_owned,
+                                elapsed.as_secs_f64()
+                            );
                             Self::log_output(&command_owned, &result.output);
                         }
                         Err(e) => {

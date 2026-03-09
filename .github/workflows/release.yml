@@ -255,27 +255,55 @@ jobs:
           private_key: ${{ secrets.PRIVATE_KEY }}
           repositories: '["homebrew-claw-hooks"]'
 
-      - name: Download and Calculate SHA256
-        id: sha256
+      - name: Create Homebrew bottles and calculate SHA256
+        id: bottles
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           TAG="${{ needs.prepare-release.outputs.tag }}"
 
-          # Download tarballs and calculate SHA256
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz" -o arm64.tar.gz
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz" -o x86_64.tar.gz
+          # Source archive SHA256
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz" -o source.tar.gz
+          SHA256_SOURCE=$(sha256sum source.tar.gz | cut -d' ' -f1)
+          echo "sha256_source=${SHA256_SOURCE}" >> $GITHUB_OUTPUT
+
+          # Download release binaries
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz" -o mac_arm64.tar.gz
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz" -o mac_x86_64.tar.gz
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-unknown-linux-gnu.tar.gz" -o linux_x86_64.tar.gz
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-unknown-linux-gnu.tar.gz" -o linux_arm64.tar.gz
 
-          SHA256_ARM64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)
-          SHA256_X86_64=$(sha256sum x86_64.tar.gz | cut -d' ' -f1)
-          SHA256_LINUX_X86_64=$(sha256sum linux_x86_64.tar.gz | cut -d' ' -f1)
-          SHA256_LINUX_ARM64=$(sha256sum linux_arm64.tar.gz | cut -d' ' -f1)
+          # Create bottle tarball function
+          create_bottle() {
+            local src_tarball=$1
+            local bottle_tag=$2
+            rm -rf bottle_staging
+            mkdir -p "bottle_staging/claw-hooks/${VERSION}/bin"
+            tar xzf "${src_tarball}" -C "bottle_staging/claw-hooks/${VERSION}/bin/"
+            chmod +x "bottle_staging/claw-hooks/${VERSION}/bin/claw-hooks"
+            local bottle_name="claw-hooks-${VERSION}.${bottle_tag}.bottle.tar.gz"
+            tar czf "${bottle_name}" -C bottle_staging claw-hooks
+            sha256sum "${bottle_name}" | cut -d' ' -f1
+          }
 
-          echo "sha256_arm64=${SHA256_ARM64}" >> $GITHUB_OUTPUT
-          echo "sha256_x86_64=${SHA256_X86_64}" >> $GITHUB_OUTPUT
-          echo "sha256_linux_x86_64=${SHA256_LINUX_X86_64}" >> $GITHUB_OUTPUT
-          echo "sha256_linux_arm64=${SHA256_LINUX_ARM64}" >> $GITHUB_OUTPUT
+          SHA256_BOTTLE_ARM64_SONOMA=$(create_bottle mac_arm64.tar.gz arm64_sonoma)
+          SHA256_BOTTLE_SONOMA=$(create_bottle mac_x86_64.tar.gz sonoma)
+          SHA256_BOTTLE_X86_64_LINUX=$(create_bottle linux_x86_64.tar.gz x86_64_linux)
+
+          echo "sha256_bottle_arm64_sonoma=${SHA256_BOTTLE_ARM64_SONOMA}" >> $GITHUB_OUTPUT
+          echo "sha256_bottle_sonoma=${SHA256_BOTTLE_SONOMA}" >> $GITHUB_OUTPUT
+          echo "sha256_bottle_x86_64_linux=${SHA256_BOTTLE_X86_64_LINUX}" >> $GITHUB_OUTPUT
+
+      - name: Upload bottles to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          TAG="${{ needs.prepare-release.outputs.tag }}"
+          gh release upload "${TAG}" \
+            "claw-hooks-${VERSION}.arm64_sonoma.bottle.tar.gz" \
+            "claw-hooks-${VERSION}.sonoma.bottle.tar.gz" \
+            "claw-hooks-${VERSION}.x86_64_linux.bottle.tar.gz" \
+            --clobber \
+            --repo "${{ github.repository }}"
 
       - name: Update Homebrew Formula
         env:
@@ -283,10 +311,10 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           TAG="${{ needs.prepare-release.outputs.tag }}"
-          SHA256_ARM64="${{ steps.sha256.outputs.sha256_arm64 }}"
-          SHA256_X86_64="${{ steps.sha256.outputs.sha256_x86_64 }}"
-          SHA256_LINUX_X86_64="${{ steps.sha256.outputs.sha256_linux_x86_64 }}"
-          SHA256_LINUX_ARM64="${{ steps.sha256.outputs.sha256_linux_arm64 }}"
+          SHA256_SOURCE="${{ steps.bottles.outputs.sha256_source }}"
+          SHA256_BOTTLE_ARM64_SONOMA="${{ steps.bottles.outputs.sha256_bottle_arm64_sonoma }}"
+          SHA256_BOTTLE_SONOMA="${{ steps.bottles.outputs.sha256_bottle_sonoma }}"
+          SHA256_BOTTLE_X86_64_LINUX="${{ steps.bottles.outputs.sha256_bottle_x86_64_linux }}"
 
           # Clone homebrew tap
           git clone "https://x-access-token:${GH_TOKEN}@github.com/owayo/homebrew-claw-hooks.git"
@@ -300,31 +328,21 @@ jobs:
           class ClawHooks < Formula
             desc "Hooks CLI for AI coding agents (Claude Code, Cursor, Windsurf)"
             homepage "https://github.com/owayo/claw-hooks"
-            version "VERSION_PLACEHOLDER"
+            url "URL_SOURCE_PLACEHOLDER"
+            sha256 "SHA256_SOURCE_PLACEHOLDER"
             license "MIT"
 
-            on_macos do
-              if Hardware::CPU.arm?
-                url "URL_ARM64_PLACEHOLDER"
-                sha256 "SHA256_ARM64_PLACEHOLDER"
-              else
-                url "URL_X86_64_PLACEHOLDER"
-                sha256 "SHA256_X86_64_PLACEHOLDER"
-              end
+            bottle do
+              root_url "ROOT_URL_PLACEHOLDER"
+              sha256 cellar: :any_skip_relocation, arm64_sonoma: "SHA256_BOTTLE_ARM64_SONOMA_PLACEHOLDER"
+              sha256 cellar: :any_skip_relocation, sonoma: "SHA256_BOTTLE_SONOMA_PLACEHOLDER"
+              sha256 cellar: :any_skip_relocation, x86_64_linux: "SHA256_BOTTLE_X86_64_LINUX_PLACEHOLDER"
             end
 
-            on_linux do
-              if Hardware::CPU.arm?
-                url "URL_LINUX_ARM64_PLACEHOLDER"
-                sha256 "SHA256_LINUX_ARM64_PLACEHOLDER"
-              else
-                url "URL_LINUX_X86_64_PLACEHOLDER"
-                sha256 "SHA256_LINUX_X86_64_PLACEHOLDER"
-              end
-            end
+            depends_on "rust" => :build
 
             def install
-              bin.install "claw-hooks"
+              system "cargo", "install", *std_cargo_args
             end
 
             test do
@@ -334,15 +352,12 @@ jobs:
           FORMULA
 
           # Replace placeholders with actual values
-          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|g" Formula/claw-hooks.rb
-          sed -i "s|URL_ARM64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz|g" Formula/claw-hooks.rb
-          sed -i "s|SHA256_ARM64_PLACEHOLDER|${SHA256_ARM64}|g" Formula/claw-hooks.rb
-          sed -i "s|URL_X86_64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz|g" Formula/claw-hooks.rb
-          sed -i "s|SHA256_X86_64_PLACEHOLDER|${SHA256_X86_64}|g" Formula/claw-hooks.rb
-          sed -i "s|URL_LINUX_ARM64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-aarch64-unknown-linux-gnu.tar.gz|g" Formula/claw-hooks.rb
-          sed -i "s|SHA256_LINUX_ARM64_PLACEHOLDER|${SHA256_LINUX_ARM64}|g" Formula/claw-hooks.rb
-          sed -i "s|URL_LINUX_X86_64_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}/claw-hooks-x86_64-unknown-linux-gnu.tar.gz|g" Formula/claw-hooks.rb
-          sed -i "s|SHA256_LINUX_X86_64_PLACEHOLDER|${SHA256_LINUX_X86_64}|g" Formula/claw-hooks.rb
+          sed -i "s|URL_SOURCE_PLACEHOLDER|https://github.com/owayo/claw-hooks/archive/refs/tags/${TAG}.tar.gz|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_SOURCE_PLACEHOLDER|${SHA256_SOURCE}|g" Formula/claw-hooks.rb
+          sed -i "s|ROOT_URL_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_BOTTLE_ARM64_SONOMA_PLACEHOLDER|${SHA256_BOTTLE_ARM64_SONOMA}|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_BOTTLE_SONOMA_PLACEHOLDER|${SHA256_BOTTLE_SONOMA}|g" Formula/claw-hooks.rb
+          sed -i "s|SHA256_BOTTLE_X86_64_LINUX_PLACEHOLDER|${SHA256_BOTTLE_X86_64_LINUX}|g" Formula/claw-hooks.rb
 
           # Remove leading spaces from heredoc
           sed -i 's/^          //' Formula/claw-hooks.rb
@@ -371,4 +386,9 @@ jobs:
           echo "  - claw-hooks-aarch64-apple-darwin.tar.gz"
           echo "  - claw-hooks-x86_64-pc-windows-msvc.zip"
           echo ""
-          echo "🍺 Homebrew tap updated: owayo/homebrew-claw-hooks"
+          echo "Homebrew bottles uploaded:"
+          echo "  - claw-hooks-${{ needs.prepare-release.outputs.version }}.arm64_sonoma.bottle.tar.gz"
+          echo "  - claw-hooks-${{ needs.prepare-release.outputs.version }}.sonoma.bottle.tar.gz"
+          echo "  - claw-hooks-${{ needs.prepare-release.outputs.version }}.x86_64_linux.bottle.tar.gz"
+          echo ""
+          echo "🍺 Homebrew tap updated: owayo/homebrew-claw-hooks (bottle-based)"

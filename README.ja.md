@@ -33,7 +33,7 @@
 - ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`command rm`、bash -c、パイプ内のコマンドを検出）
+- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`timeout --signal`、`command rm`、bash -c、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
@@ -186,8 +186,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`sudo -n rm`、`command rm`、`cd /tmp && rm`、パイプ内のコマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、command、bash -c、xargs）
+- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、パイプ内のコマンドも検出
+- ✅ ラッパー・サブシェル対応（sudo、timeout、command、bash -c、xargs）
 - ✅ 単一バイナリ、Python/jq依存なし
 
 一度設定するだけ:
@@ -239,9 +239,35 @@ cargo build --release
 
 バイナリ: `target/release/claw-hooks`
 
-### ビルド済みバイナリ
+### GitHub Releases から
 
-[Releases](https://github.com/owayo/claw-hooks/releases)からダウンロード。
+**macOS (Apple Silicon)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**macOS (Intel)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Linux (x86_64)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Linux (ARM64)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Windows**
+
+[Releases](https://github.com/owayo/claw-hooks/releases/latest) から `claw-hooks-x86_64-pc-windows-msvc.zip` をダウンロードし、展開してPATHに追加してください。
 
 ## クイックスタート
 

@@ -948,6 +948,35 @@ fn test_block_sudo_non_interactive_rm() {
 }
 
 #[test]
+fn test_block_sudo_long_option_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo --user root rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 2, "sudo --user root rm should be blocked");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_timeout_long_option_rm() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"timeout --signal TERM 10 rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 2,
+        "timeout --signal TERM 10 rm should be blocked"
+    );
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_block_command_wrapper_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"command rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

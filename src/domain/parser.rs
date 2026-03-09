@@ -248,7 +248,7 @@ impl ShellParser {
                         self.process_wrapper_args(&cmd_name, &args, commands);
                     }
 
-                    // Handle shell -c "command" at AST level
+                    // AST レベルで shell -c "command" を処理
                     if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
                         if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                             let nested = self.extract_commands(&shell_cmd);
@@ -260,7 +260,7 @@ impl ShellParser {
                         }
                     }
 
-                    // Handle xargs at AST level
+                    // AST レベルで xargs を処理
                     if cmd_name == "xargs" {
                         if let Some(xargs_cmd) = Self::extract_xargs_from_args(&args) {
                             if !commands.contains(&xargs_cmd) {
@@ -269,20 +269,20 @@ impl ShellParser {
                         }
                     }
                 }
-                // Also recurse into children to find command substitutions in arguments
-                // e.g., echo $(yarn --version) - need to find yarn inside $()
+                // 引数内のコマンド置換を拾うために子ノードも再帰的に探索する。
+                // 例: echo $(yarn --version) から yarn を抽出する。
                 for child in node.children(&mut node.walk()) {
                     self.extract_commands_from_node(child, source, commands);
                 }
             }
             "subshell" | "command_substitution" => {
-                // Parse contents of subshell/command substitution
+                // サブシェル/コマンド置換の中身を再帰解析する。
                 for child in node.children(&mut node.walk()) {
                     self.extract_commands_from_node(child, source, commands);
                 }
             }
             _ => {
-                // Recurse into children
+                // 子ノードを再帰走査する。
                 for child in node.children(&mut node.walk()) {
                     self.extract_commands_from_node(child, source, commands);
                 }
@@ -290,20 +290,20 @@ impl ShellParser {
         }
     }
 
-    /// Get command arguments from AST node (excludes the command name itself)
-    /// Strips quotes from arguments for internal processing.
+    /// AST ノードから引数を取得する（コマンド名自体は除外）。
+    /// 内部処理用にクォートを除去する。
     #[cfg(feature = "ast-parser")]
     fn get_command_arguments(&self, node: Node, source: &str) -> Vec<String> {
         self.get_command_arguments_impl(node, source, true)
     }
 
-    /// Get command arguments with quotes preserved for pattern matching.
+    /// パターンマッチ用途でクォートを保持したまま引数を取得する。
     #[cfg(feature = "ast-parser")]
     fn get_command_arguments_raw(&self, node: Node, source: &str) -> Vec<String> {
         self.get_command_arguments_impl(node, source, false)
     }
 
-    /// Implementation: Get command arguments with optional quote stripping.
+    /// 実装本体: クォート除去有無を切り替えて引数を取得する。
     #[cfg(feature = "ast-parser")]
     fn get_command_arguments_impl(
         &self,
@@ -339,7 +339,7 @@ impl ShellParser {
         args
     }
 
-    /// Extract command from shell -c arguments
+    /// shell -c 形式の引数から実行文字列を取り出す。
     fn extract_shell_c_from_args(args: &[String]) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
             if arg == "-c" && i + 1 < args.len() {
@@ -349,19 +349,19 @@ impl ShellParser {
         None
     }
 
-    /// Extract command from xargs arguments
+    /// xargs の引数から実行コマンドを取り出す。
     #[cfg(feature = "ast-parser")]
     fn extract_xargs_from_args(args: &[String]) -> Option<String> {
         args.iter().find(|arg| !arg.starts_with('-')).cloned()
     }
 
-    /// Get command name from a command node
+    /// command ノードからコマンド名を取得する。
     #[cfg(feature = "ast-parser")]
     fn get_command_name(&self, node: Node, source: &str) -> Option<String> {
         for child in node.children(&mut node.walk()) {
             match child.kind() {
                 "command_name" => {
-                    // Get the actual word inside command_name
+                    // command_name 内の実文字列を取得する。
                     for inner in child.children(&mut child.walk()) {
                         if inner.kind() == "word" {
                             return Some(
@@ -371,7 +371,7 @@ impl ShellParser {
                             );
                         }
                     }
-                    // Fallback: use the command_name text directly
+                    // フォールバック: command_name 自体を使う。
                     return Some(
                         source[child.byte_range()]
                             .trim_matches(|c| c == '"' || c == '\'')
@@ -379,7 +379,7 @@ impl ShellParser {
                     );
                 }
                 "word" => {
-                    // First word in simple_command might be the command
+                    // simple_command の先頭 word がコマンド名である場合に拾う。
                     let text = source[child.byte_range()]
                         .trim_matches(|c| c == '"' || c == '\'')
                         .to_string();
@@ -397,31 +397,18 @@ impl ShellParser {
     /// 入れ子ラッパーも再帰的に処理する（例: sudo bash -c 'rm'）
     #[cfg(feature = "ast-parser")]
     fn process_wrapper_args(&mut self, wrapper: &str, args: &[String], commands: &mut Vec<String>) {
-        let mut skip_next = false;
-        for (i, arg) in args.iter().enumerate() {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if arg.starts_with('-') {
-                if Self::wrapper_flag_takes_arg(wrapper, arg) {
-                    skip_next = true;
-                }
-                continue;
-            }
-            if wrapper == "env" && Self::is_env_assignment_token(arg) {
-                continue;
-            }
-            // 実行されるコマンドを検出
-            if !commands.contains(arg) {
-                commands.push(arg.clone());
+        if let Some(command_index) = Self::find_wrapped_command_index(wrapper, args) {
+            let command_name = &args[command_index];
+
+            if !commands.contains(command_name) {
+                commands.push(command_name.clone());
             }
 
             // このコマンド以降の残り引数
-            let remaining_args: Vec<String> = args[i + 1..].to_vec();
+            let remaining_args: Vec<String> = args[command_index + 1..].to_vec();
 
             // shell -c の場合は内側のコマンドを抽出
-            if SHELL_COMMANDS.contains(&arg.as_str()) {
+            if SHELL_COMMANDS.contains(&command_name.as_str()) {
                 if let Some(shell_cmd) = Self::extract_shell_c_from_args(&remaining_args) {
                     let nested = self.extract_commands(&shell_cmd);
                     for nested_cmd in nested {
@@ -433,11 +420,9 @@ impl ShellParser {
             }
 
             // 次のコマンドもラッパーなら再帰的に処理
-            if COMMAND_WRAPPERS.contains(&arg.as_str()) {
-                self.process_wrapper_args(arg, &remaining_args, commands);
+            if COMMAND_WRAPPERS.contains(&command_name.as_str()) {
+                self.process_wrapper_args(command_name, &remaining_args, commands);
             }
-
-            break;
         }
     }
 
@@ -450,24 +435,142 @@ impl ShellParser {
     const NICE_FLAGS_WITH_ARGS: &[&str] = &["-n"];
     const IONICE_FLAGS_WITH_ARGS: &[&str] = &["-c", "-n"];
     const DOAS_FLAGS_WITH_ARGS: &[&str] = &["-u"];
+    const SUDO_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--user",
+        "--group",
+        "--host",
+        "--chdir",
+        "--prompt",
+        "--other-user",
+    ];
+    const ENV_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--unset",
+        "--chdir",
+        "--argv0",
+        "--split-string",
+        "--block-signal",
+        "--default-signal",
+        "--ignore-signal",
+    ];
+    const TIMEOUT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--signal", "--kill-after"];
+    const NICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--adjustment"];
+    const IONICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--class", "--classdata"];
 
-    /// 指定ラッパー上で、フラグが値を取るかを判定する
+    /// 指定ラッパーで「値を次トークンから取る」フラグかを判定する。
     fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
-        if flag.contains('=') {
+        if !flag.starts_with('-') || flag == "-" || flag == "--" {
             return false;
         }
+
+        let (base_flag, has_inline_value) = match flag.split_once('=') {
+            Some((base, _)) => (base, true),
+            None => (flag, false),
+        };
+
+        if base_flag.starts_with("--") {
+            if has_inline_value {
+                return false;
+            }
+            return Self::wrapper_long_flags_with_args(wrapper).contains(&base_flag);
+        }
+
+        // `-uroot` のように短縮フラグへ値が連結されている場合は追加トークン不要。
+        if base_flag.len() > 2 {
+            let short_flag = &base_flag[..2];
+            if Self::wrapper_short_flags_with_args(wrapper).contains(&short_flag) {
+                return false;
+            }
+        }
+
+        Self::wrapper_short_flags_with_args(wrapper).contains(&base_flag)
+    }
+
+    fn wrapper_short_flags_with_args(wrapper: &str) -> &'static [&'static str] {
         match wrapper {
-            "sudo" => Self::SUDO_FLAGS_WITH_ARGS.contains(&flag),
-            "env" => Self::ENV_FLAGS_WITH_ARGS.contains(&flag),
-            "timeout" => Self::TIMEOUT_FLAGS_WITH_ARGS.contains(&flag),
-            "nice" => Self::NICE_FLAGS_WITH_ARGS.contains(&flag),
-            "ionice" => Self::IONICE_FLAGS_WITH_ARGS.contains(&flag),
-            "doas" => Self::DOAS_FLAGS_WITH_ARGS.contains(&flag),
-            _ => false,
+            "sudo" => Self::SUDO_FLAGS_WITH_ARGS,
+            "env" => Self::ENV_FLAGS_WITH_ARGS,
+            "timeout" => Self::TIMEOUT_FLAGS_WITH_ARGS,
+            "nice" => Self::NICE_FLAGS_WITH_ARGS,
+            "ionice" => Self::IONICE_FLAGS_WITH_ARGS,
+            "doas" => Self::DOAS_FLAGS_WITH_ARGS,
+            _ => &[],
         }
     }
 
-    /// Returns true for shell-style env assignments (e.g., KEY=value).
+    fn wrapper_long_flags_with_args(wrapper: &str) -> &'static [&'static str] {
+        match wrapper {
+            "sudo" => Self::SUDO_LONG_FLAGS_WITH_ARGS,
+            "env" => Self::ENV_LONG_FLAGS_WITH_ARGS,
+            "timeout" => Self::TIMEOUT_LONG_FLAGS_WITH_ARGS,
+            "nice" => Self::NICE_LONG_FLAGS_WITH_ARGS,
+            "ionice" => Self::IONICE_LONG_FLAGS_WITH_ARGS,
+            _ => &[],
+        }
+    }
+
+    /// GNU timeout の制限時間トークンかを判定する（例: 10, 0.5, 30s, 5m）。
+    fn is_timeout_duration_token(token: &str) -> bool {
+        if token.is_empty() {
+            return false;
+        }
+
+        let trimmed = token.trim();
+        let value = match trimmed.chars().last() {
+            Some('s' | 'm' | 'h' | 'd') => &trimmed[..trimmed.len() - 1],
+            _ => trimmed,
+        };
+
+        if value.is_empty() {
+            return false;
+        }
+
+        value
+            .parse::<f64>()
+            .is_ok_and(|n| n.is_finite() && n >= 0.0)
+    }
+
+    /// ラッパー引数列から実際に実行されるコマンド位置を返す。
+    fn find_wrapped_command_index(wrapper: &str, args: &[String]) -> Option<usize> {
+        let mut i = 0usize;
+        let mut timeout_duration_consumed = false;
+
+        while i < args.len() {
+            let arg = &args[i];
+
+            if arg == "--" {
+                return (i + 1 < args.len()).then_some(i + 1);
+            }
+
+            if wrapper == "env" && Self::is_env_assignment_token(arg) {
+                i += 1;
+                continue;
+            }
+
+            if arg.starts_with('-') {
+                if Self::wrapper_flag_takes_arg(wrapper, arg) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+
+            if wrapper == "timeout"
+                && !timeout_duration_consumed
+                && Self::is_timeout_duration_token(arg)
+            {
+                timeout_duration_consumed = true;
+                i += 1;
+                continue;
+            }
+
+            return Some(i);
+        }
+
+        None
+    }
+
+    /// シェル形式の環境変数代入（例: KEY=value）かを判定する。
     fn is_env_assignment_token(token: &str) -> bool {
         let Some((name, _value)) = token.split_once('=') else {
             return false;
@@ -485,8 +588,8 @@ impl ShellParser {
         chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
     }
 
-    /// Parse the effective command from a tokenized segment,
-    /// skipping leading environment assignments.
+    /// トークン列から実際に実行されるコマンドを取り出す。
+    /// 先頭の環境変数代入は読み飛ばす。
     fn parse_effective_command(tokens: &[String]) -> Option<(String, Vec<String>)> {
         if tokens.is_empty() {
             return None;
@@ -499,7 +602,7 @@ impl ShellParser {
         Some((tokens[start].clone(), tokens[start + 1..].to_vec()))
     }
 
-    /// If the segment is exactly wrapped by a single top-level `( ... )`, return inner text.
+    /// セグメント全体が最上位の `( ... )` で包まれていれば中身を返す。
     fn unwrap_subshell(segment: &str) -> Option<&str> {
         let trimmed = segment.trim();
         if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
@@ -541,7 +644,7 @@ impl ShellParser {
                         return None;
                     }
                     depth -= 1;
-                    // Outer-most pair must close at the final character.
+                    // 最外周の括弧は末尾で閉じている必要がある。
                     if depth == 0 && idx != last_index {
                         return None;
                     }
@@ -557,7 +660,7 @@ impl ShellParser {
         }
     }
 
-    /// Extract nested command fragments from command substitutions ($(...), `...`).
+    /// コマンド置換（`$(...)`, `` `...` ``）から内部断片を抽出する。
     fn extract_nested_command_fragments(segment: &str) -> Vec<String> {
         let chars: Vec<char> = segment.chars().collect();
         let len = chars.len();
@@ -592,7 +695,7 @@ impl ShellParser {
                 continue;
             }
 
-            // $(...)
+            // `$(...)` 形式
             if !in_single && ch == '$' && i + 1 < len && chars[i + 1] == '(' {
                 let start = i + 2;
                 let mut j = start;
@@ -652,7 +755,7 @@ impl ShellParser {
                 }
             }
 
-            // `...`
+            // `` `...` `` 形式
             if !in_single && ch == '`' {
                 let start = i + 1;
                 let mut j = start;
@@ -694,7 +797,7 @@ impl ShellParser {
         fragments
     }
 
-    /// Fallback parser using string manipulation
+    /// 文字列処理ベースのフォールバックパーサー。
     fn extract_commands_fallback(&self, command: &str) -> Vec<String> {
         let mut commands = Vec::new();
 
@@ -712,7 +815,7 @@ impl ShellParser {
         commands
     }
 
-    /// Extract commands from a single segment (fallback)
+    /// 単一セグメントからコマンドを抽出する（フォールバック）。
     fn extract_commands_from_segment_fallback(&self, segment: &str) -> Vec<String> {
         let mut commands = Vec::new();
         let trimmed = segment.trim();
@@ -734,32 +837,17 @@ impl ShellParser {
 
         // ラッパーコマンドを展開
         if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
-            let mut skip_next = false;
-            for (i, arg) in args.iter().enumerate() {
-                if skip_next {
-                    skip_next = false;
-                    continue;
-                }
-                if arg.starts_with('-') {
-                    if Self::wrapper_flag_takes_arg(&cmd, arg) {
-                        skip_next = true;
-                    }
-                    continue;
-                }
-                if cmd == "env" && Self::is_env_assignment_token(arg) {
-                    continue;
-                }
-                commands.push(arg.clone());
-                let remaining: Vec<String> = args[i..].to_vec();
+            if let Some(command_index) = Self::find_wrapped_command_index(&cmd, &args) {
+                commands.push(args[command_index].clone());
+                let remaining: Vec<String> = args[command_index..].to_vec();
                 if !remaining.is_empty() {
                     let remaining_str = remaining.join(" ");
                     commands.extend(self.extract_commands_from_segment_fallback(&remaining_str));
                 }
-                break;
             }
         }
 
-        // Handle shell -c "command"
+        // shell -c "command" を処理
         if SHELL_COMMANDS.contains(&cmd.as_str()) {
             for (i, arg) in args.iter().enumerate() {
                 if arg == "-c" && i + 1 < args.len() {
@@ -770,7 +858,7 @@ impl ShellParser {
             }
         }
 
-        // Handle xargs
+        // xargs を処理
         if cmd == "xargs" {
             for arg in &args {
                 if arg.starts_with('-') {
@@ -781,7 +869,7 @@ impl ShellParser {
             }
         }
 
-        // Handle command substitutions in arguments (e.g., echo $(rm -rf /tmp)).
+        // 引数中のコマンド置換を処理（例: echo $(rm -rf /tmp)）。
         for nested in Self::extract_nested_command_fragments(trimmed) {
             commands.extend(self.extract_commands_fallback(&nested));
         }
@@ -789,7 +877,7 @@ impl ShellParser {
         commands
     }
 
-    /// Split by && and || operators
+    /// `&&` と `||` で分割する。
     fn split_by_logical_ops(s: &str) -> Vec<&str> {
         let mut result = Vec::new();
         let mut current_start = 0;
@@ -828,7 +916,7 @@ impl ShellParser {
                             if !part.trim().is_empty() {
                                 result.push(part.trim());
                             }
-                            // Consume the second operator char and move start after it.
+                            // 2文字目の演算子も消費し、次の開始位置を更新する。
                             let _ = chars.next();
                             current_start = next_idx + next_c.len_utf8();
                         }
@@ -846,7 +934,7 @@ impl ShellParser {
         result
     }
 
-    /// Extract command with its arguments (fallback string-based parser).
+    /// コマンドと引数を抽出する（文字列ベースのフォールバック）。
     fn extract_command_with_args_fallback(&self, command: &str) -> (String, Vec<String>) {
         let mut parts = Vec::new();
         let mut current = String::new();
@@ -895,7 +983,7 @@ impl ShellParser {
         (cmd, parts)
     }
 
-    /// Extract command with its arguments (public API).
+    /// コマンドと引数を抽出する（公開 API）。
     #[allow(dead_code)]
     pub fn extract_command_with_args(&self, command: &str) -> (String, Vec<String>) {
         self.extract_command_with_args_fallback(command)
@@ -908,10 +996,10 @@ impl Default for ShellParser {
     }
 }
 
-/// Parse a command string into tokens, respecting shell quoting rules.
-/// This is a standalone function that can be used without creating a ShellParser.
+/// シェルのクォート規則を考慮してコマンド文字列をトークン化する。
+/// `ShellParser` を生成せずに使える独立関数。
 ///
-/// # Examples
+/// # 使用例
 /// ```
 /// let tokens = parse_shell_tokens("echo 'hello world'");
 /// assert_eq!(tokens, vec!["echo", "hello world"]);
@@ -1032,7 +1120,7 @@ mod tests {
         assert!(command_strings.iter().any(|s| s == "npm install"));
     }
 
-    // === Wrapper and subshell detection tests ===
+    // === ラッパー・サブシェル検出テスト ===
 
     #[test]
     fn test_extract_sudo_wrapper() {
@@ -1050,9 +1138,23 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sudo_with_long_user_flag() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sudo --user root rm -rf /tmp/test");
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
     fn test_extract_sudo_with_non_interactive_flag() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("sudo -n rm -rf /tmp/test");
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_timeout_with_long_signal_option() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("timeout --signal TERM 10 rm -rf /tmp/test");
         assert!(commands.contains(&"rm".to_string()));
     }
 
@@ -1136,7 +1238,7 @@ mod tests {
         let commands = parser.extract_commands("echo \"not yarn install\"; pnpm install");
         assert!(commands.contains(&"echo".to_string()));
         assert!(commands.contains(&"pnpm".to_string()));
-        // Should NOT contain yarn from the quoted string
+        // クォート内の文字列から yarn は抽出しない。
         assert!(!commands.contains(&"yarn".to_string()));
     }
 
@@ -1145,7 +1247,7 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("echo 'rm -rf /'");
         assert!(commands.contains(&"echo".to_string()));
-        // rm should not be extracted since it's inside quotes (an argument)
+        // rm は引数内クォートなので抽出しない。
         assert!(!commands.contains(&"rm".to_string()));
     }
 
@@ -1154,7 +1256,7 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("echo $(yarn --version)");
         assert!(commands.contains(&"echo".to_string()));
-        // yarn inside $() should be extracted as a command
+        // $() 内の yarn は実行コマンドとして抽出する。
         assert!(
             commands.contains(&"yarn".to_string()),
             "yarn should be extracted from command substitution: {:?}",
@@ -1167,7 +1269,7 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("echo `yarn --version`");
         assert!(commands.contains(&"echo".to_string()));
-        // yarn inside backticks should be extracted as a command
+        // バッククォート内の yarn は実行コマンドとして抽出する。
         assert!(
             commands.contains(&"yarn".to_string()),
             "yarn should be extracted from backtick command substitution: {:?}",
@@ -1183,7 +1285,7 @@ mod tests {
         assert!(commands.contains(&"yarn".to_string()));
     }
 
-    // === Boundary Condition Tests ===
+    // === 境界条件テスト ===
 
     #[test]
     fn test_extract_commands_empty_input() {
@@ -1209,7 +1311,7 @@ mod tests {
     fn test_extract_commands_leading_operator() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("&& ls");
-        // Should still extract ls even with leading operator
+        // 先頭が演算子でも ls は抽出する。
         assert!(commands.contains(&"ls".to_string()));
     }
 
@@ -1250,14 +1352,14 @@ mod tests {
         let commands = parser.extract_commands("echo \"a && b\" && rm -rf /tmp/test");
         assert!(commands.contains(&"echo".to_string()));
         assert!(commands.contains(&"rm".to_string()));
-        // "b" should NOT be extracted as it's inside quotes
+        // "b" はクォート内部なので抽出しない。
         assert!(!commands.contains(&"b".to_string()));
     }
 
     #[test]
     fn test_extract_commands_newline_separated() {
         let mut parser = ShellParser::new();
-        // Commands separated by semicolon (newlines handled by shell)
+        // セミコロン区切りのコマンドを抽出する（改行はシェル側で解釈）。
         let commands = parser.extract_commands("ls; echo hello");
         assert!(commands.contains(&"ls".to_string()));
         assert!(commands.contains(&"echo".to_string()));

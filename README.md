@@ -33,7 +33,7 @@
 - ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `command rm`, bash -c, pipes)
+- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `sudo --user`, `timeout --signal`, `command rm`, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
@@ -186,8 +186,8 @@ Rules:
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `sudo -n rm`, `command rm`, `cd /tmp && rm`, commands in pipes
-- ✅ Handles wrappers and subshells (sudo, command, bash -c, xargs)
+- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `timeout --signal TERM 10 rm`, `command rm`, `cd /tmp && rm`, commands in pipes
+- ✅ Handles wrappers and subshells (sudo, timeout, command, bash -c, xargs)
 - ✅ Single binary, no Python/jq dependencies
 
 Configure once:
@@ -239,9 +239,35 @@ cargo build --release
 
 Binary: `target/release/claw-hooks`
 
-### Pre-built Binaries
+### From GitHub Releases
 
-Download from [Releases](https://github.com/owayo/claw-hooks/releases).
+**macOS (Apple Silicon)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**macOS (Intel)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Linux (x86_64)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Linux (ARM64)**
+```bash
+curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv claw-hooks /usr/local/bin/
+```
+
+**Windows**
+
+Download `claw-hooks-x86_64-pc-windows-msvc.zip` from [Releases](https://github.com/owayo/claw-hooks/releases/latest), extract, and add to PATH.
 
 ## Quickstart
 

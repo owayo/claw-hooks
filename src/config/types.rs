@@ -6,10 +6,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::validation;
+use crate::domain::normalize::DEFAULT_OUTPUT_MAX_LENGTH;
 
 /// フックコマンドのデフォルトタイムアウト（秒）。
 fn default_hook_timeout() -> u64 {
     60
+}
+
+/// 出力最大長のデフォルト値。
+fn default_output_max_length() -> usize {
+    DEFAULT_OUTPUT_MAX_LENGTH
 }
 
 /// メイン設定構造体。
@@ -59,6 +65,12 @@ pub struct Config {
     /// フックコマンド実行のタイムアウト（秒、デフォルト: 60）
     #[serde(default = "default_hook_timeout")]
     pub hook_timeout: u64,
+
+    /// 出力メッセージの最大長（文字数、デフォルト: 1000）。
+    /// AIエージェントのコンテキストウィンドウ溢れを防止する。
+    /// 0 の場合は無制限。
+    #[serde(default = "default_output_max_length")]
+    pub output_max_length: usize,
 }
 
 impl Default for Config {
@@ -77,6 +89,7 @@ impl Default for Config {
             stop_hooks: Vec::new(),
             nano_buddy: false,
             hook_timeout: default_hook_timeout(),
+            output_max_length: default_output_max_length(),
         }
     }
 }
@@ -116,6 +129,9 @@ impl Config {
         if let Some(v) = project.hook_timeout {
             self.hook_timeout = v;
         }
+        if let Some(v) = project.output_max_length {
+            self.output_max_length = v;
+        }
         if let Some(ref v) = project.custom_filters {
             self.custom_filters = v.clone();
         }
@@ -148,6 +164,8 @@ pub struct ProjectConfig {
     pub dd_block_message: Option<String>,
     /// フックタイムアウトの上書き
     pub hook_timeout: Option<u64>,
+    /// 出力最大長の上書き
+    pub output_max_length: Option<usize>,
     /// カスタムフィルターの上書き（グローバルを置換）
     pub custom_filters: Option<Vec<CustomFilter>>,
     /// 拡張子フックの上書き（グローバルを置換）
@@ -641,6 +659,26 @@ mod tests {
         assert_eq!(config.hook_timeout, 0);
     }
 
+    // === output_max_length テスト ===
+
+    #[test]
+    fn test_output_max_length_default_value() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.output_max_length, 1000);
+    }
+
+    #[test]
+    fn test_output_max_length_custom_value() {
+        let config: Config = toml::from_str("output_max_length = 2000").unwrap();
+        assert_eq!(config.output_max_length, 2000);
+    }
+
+    #[test]
+    fn test_output_max_length_zero_means_unlimited() {
+        let config: Config = toml::from_str("output_max_length = 0").unwrap();
+        assert_eq!(config.output_max_length, 0);
+    }
+
     // === ProjectConfig デシリアライゼーションテスト ===
 
     #[test]
@@ -650,6 +688,7 @@ mod tests {
         assert!(pc.kill_block.is_none());
         assert!(pc.dd_block.is_none());
         assert!(pc.hook_timeout.is_none());
+        assert!(pc.output_max_length.is_none());
         assert!(pc.custom_filters.is_none());
         assert!(pc.extension_hooks.is_none());
         assert!(pc.stop_hooks.is_none());
@@ -804,6 +843,20 @@ mod tests {
         // extension_hooks は上書き
         assert!(!config.extension_hooks.contains_key(".rs"));
         assert!(config.extension_hooks.contains_key(".ts"));
+    }
+
+    #[test]
+    fn test_merge_project_overrides_output_max_length() {
+        let mut config = Config::default();
+        assert_eq!(config.output_max_length, 1000);
+
+        let project = ProjectConfig {
+            output_max_length: Some(500),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.output_max_length, 500);
     }
 
     #[test]

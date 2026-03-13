@@ -3,6 +3,34 @@
 //! lint/typecheck出力をトークン効率のために最適化し、
 //! エラー情報は維持する。
 
+/// デフォルトの出力最大長（文字数）。
+pub const DEFAULT_OUTPUT_MAX_LENGTH: usize = 1000;
+
+/// テキストを指定された最大長に切り詰める。
+/// 切り詰めが発生した場合、末尾に省略メッセージを付加する。
+/// `max_length` が 0 の場合は無制限（切り詰めなし）。
+pub fn truncate_output(output: &str, max_length: usize) -> String {
+    if max_length == 0 || output.len() <= max_length {
+        return output.to_string();
+    }
+
+    let suffix = "\n... (truncated)";
+    let keep = max_length.saturating_sub(suffix.len());
+
+    // UTF-8境界で安全に切り詰める
+    let truncated = if output.is_char_boundary(keep) {
+        &output[..keep]
+    } else {
+        let mut end = keep;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        &output[..end]
+    };
+
+    format!("{}{}", truncated, suffix)
+}
+
 /// テキストからANSIエスケープコード（色、スタイル、カーソル制御）を除去する。
 pub fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -378,5 +406,48 @@ mod tests {
         let input = "\n\nerror: foo";
         let result = normalize_lint_output(input);
         assert_eq!(result, "error: foo");
+    }
+
+    // === truncate_output テスト ===
+
+    #[test]
+    fn test_truncate_output_within_limit() {
+        let input = "short text";
+        assert_eq!(truncate_output(input, 1000), "short text");
+    }
+
+    #[test]
+    fn test_truncate_output_exact_limit() {
+        let input = "a".repeat(1000);
+        assert_eq!(truncate_output(&input, 1000), input);
+    }
+
+    #[test]
+    fn test_truncate_output_exceeds_limit() {
+        let input = "a".repeat(1500);
+        let result = truncate_output(&input, 1000);
+        assert!(result.len() <= 1000);
+        assert!(result.ends_with("... (truncated)"));
+    }
+
+    #[test]
+    fn test_truncate_output_zero_means_unlimited() {
+        let input = "a".repeat(10000);
+        assert_eq!(truncate_output(&input, 0), input);
+    }
+
+    #[test]
+    fn test_truncate_output_utf8_boundary() {
+        // 日本語文字（3バイト each）でUTF-8境界を正しく処理することを確認
+        let input = "あ".repeat(500); // 1500 bytes
+        let result = truncate_output(&input, 100);
+        assert!(result.ends_with("... (truncated)"));
+        // 不正なUTF-8にならないことを確認
+        assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn test_truncate_output_empty_input() {
+        assert_eq!(truncate_output("", 1000), "");
     }
 }

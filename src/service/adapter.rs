@@ -10,17 +10,22 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::Format;
-use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output};
+use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output, truncate_output};
 
 /// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
     format: Format,
+    /// 出力メッセージの最大長（0 = 無制限）
+    output_max_length: usize,
 }
 
 impl FormatAdapter {
     /// 指定されたフォーマット用の新しいアダプターを作成する。
-    pub fn new(format: Format) -> Self {
-        Self { format }
+    pub fn new(format: Format, output_max_length: usize) -> Self {
+        Self {
+            format,
+            output_max_length,
+        }
     }
 
     /// フォーマットに基づいて入力文字列をHookInputにパースする。
@@ -223,16 +228,20 @@ impl FormatAdapter {
                     decision: "approve".to_string(),
                     reason: None,
                 },
-                Decision::Block { message } => ClaudeStopOutput {
-                    decision: "block".to_string(),
-                    reason: Some(normalize_lint_output(message)),
-                },
+                Decision::Block { message } => {
+                    let normalized = normalize_lint_output(message);
+                    let truncated = truncate_output(&normalized, self.output_max_length);
+                    ClaudeStopOutput {
+                        decision: "block".to_string(),
+                        reason: Some(truncated),
+                    }
+                }
             };
             return serde_json::to_string(&output)
                 .map_err(|e| anyhow!("Failed to serialize output: {}", e));
         }
 
-        let output = decision.clone().into_output(event);
+        let output = self.truncate_decision(decision).into_output(event);
         serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
     }
 
@@ -372,15 +381,17 @@ impl FormatAdapter {
         // Stop Block events use "followup_message" to instruct the agent to fix issues
         if event == HookEvent::Stop {
             if let Decision::Block { message } = decision {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
                 let output = CursorStopOutput {
-                    followup_message: normalize_lint_output(message),
+                    followup_message: truncated,
                 };
                 return serde_json::to_string(&output)
                     .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e));
             }
         }
 
-        let output = match decision {
+        let output = match &self.truncate_decision(decision) {
             Decision::Allow { .. } => CursorOutput {
                 permission: "allow".to_string(),
                 user_message: None,
@@ -479,13 +490,14 @@ impl FormatAdapter {
         // Stop Block: return plain text for stderr output (Windsurf reads stderr on exit 2)
         if event == HookEvent::Stop {
             if let Decision::Block { message } = decision {
-                return Ok(normalize_lint_output(message));
+                let normalized = normalize_lint_output(message);
+                return Ok(truncate_output(&normalized, self.output_max_length));
             }
         }
 
         // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
         // Since Windsurf doesn't support additionalContext, we use a simplified output
-        let output = match decision {
+        let output = match &self.truncate_decision(decision) {
             Decision::Allow { .. } => crate::domain::HookOutput {
                 decision: "approve".to_string(),
                 message: None,
@@ -662,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -671,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_shell_execution() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -685,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_file_edit() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"file_path":"/path/to/file.rs"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
@@ -699,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_file_edit_camel_case() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         // Test with camelCase filePath (Cursor might use either)
         let input = r#"{"filePath":"/path/to/file.tsx"}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -714,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_input_parsing_pre_run_command() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"rm -rf /tmp/test","cwd":"/path/to/project"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -728,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_input_parsing_post_write_code() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"post_write_code","tool_info":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
@@ -737,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_allow() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
@@ -746,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_deny() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -761,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_allow() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
@@ -772,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_allow_with_context() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let decision = Decision::allow_with_context("Lint warning: unused variable".to_string());
         let output = adapter
             .format_output(&decision, HookEvent::AfterFileEdit)
@@ -786,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_block() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -801,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_stop() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"status":"completed","loop_count":3}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -817,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_stop_aborted() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"status":"aborted"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -832,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_input_parsing_post_cascade_response() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"Task completed successfully."}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -851,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_stop() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         // Stop events have no tool_name or tool_input
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -866,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_stop_hook_active_false() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":false}"#;
         let result = adapter.parse_input(input).unwrap();
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
@@ -878,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_stop_hook_active_unset() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"Stop"}"#;
         let result = adapter.parse_input(input).unwrap();
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
@@ -890,7 +902,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_stop_with_last_assistant_message() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"I've completed the refactoring task."}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -906,7 +918,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_stop_without_last_assistant_message() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
         let result = adapter.parse_input(input).unwrap();
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
@@ -918,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_input_parsing_post_cascade_response_sets_agent_message() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"All tasks completed successfully."}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -938,7 +950,7 @@ mod tests {
     #[test]
     fn test_gemini_input_parsing_before_tool() {
         // Use official Gemini CLI tool name: run_shell_command
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -953,7 +965,7 @@ mod tests {
     #[test]
     fn test_gemini_input_parsing_run_shell_command() {
         // run_shell_command is the official Gemini CLI built-in tool name
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -962,7 +974,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_after_tool() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
@@ -972,7 +984,7 @@ mod tests {
     #[test]
     fn test_gemini_input_parsing_replace_tool() {
         // Gemini CLI uses "replace" tool for editing existing files
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
@@ -981,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_after_agent() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"AfterAgent"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -990,7 +1002,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_before_agent() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeAgent"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforePrompt);
@@ -999,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_with_event_alias() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         // Gemini might use "event" instead of "hook_event_name"
         let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -1009,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_unknown_tool() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"custom_tool","tool_input":{}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -1018,7 +1030,7 @@ mod tests {
 
     #[test]
     fn test_gemini_output_allow() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
@@ -1028,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_gemini_output_deny() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1044,7 +1056,7 @@ mod tests {
 
     #[test]
     fn test_gemini_error_format() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let error_output = adapter.format_error("Invalid JSON input");
         assert!(error_output.contains(r#""decision":"deny""#));
         assert!(error_output.contains("reason"));
@@ -1055,7 +1067,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_allow() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
@@ -1066,7 +1078,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_block() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1081,7 +1093,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_allow_after_file_edit() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         // Windsurf doesn't support additionalContext, so context is ignored
         let decision = Decision::allow_with_context("Some lint warning".to_string());
         let output = adapter
@@ -1095,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_error_format() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let error_output = adapter.format_error("Invalid JSON input");
         assert!(error_output.contains(r#""decision":"block""#));
         assert!(error_output.contains("fail-closed"));
@@ -1105,7 +1117,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_stop_block_uses_reason_field() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1123,7 +1135,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_stop_allow_unchanged() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
@@ -1135,7 +1147,7 @@ mod tests {
     #[test]
     fn test_claude_output_before_command_block_still_uses_message() {
         // Non-Stop events should continue using "message" field
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1151,7 +1163,7 @@ mod tests {
 
     #[test]
     fn test_gemini_output_stop_block() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1167,7 +1179,7 @@ mod tests {
 
     #[test]
     fn test_gemini_output_stop_allow() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
@@ -1177,7 +1189,7 @@ mod tests {
 
     #[test]
     fn test_normalize_strips_ansi_codes() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let message =
             "Stop hook failed: cargo clippy\n\x1b[31merror\x1b[0m: unused variable `x`".to_string();
         let output = adapter
@@ -1191,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_normalize_strips_leading_whitespace() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let message =
             "Stop hook failed: cargo clippy\n    error: unused\n        --> src/main.rs:1:1"
                 .to_string();
@@ -1209,7 +1221,7 @@ mod tests {
 
     #[test]
     fn test_normalize_collapses_blank_lines() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let message = "error 1\n\n\n\nerror 2\n\n\nerror 3".to_string();
         let output = adapter
             .format_output(&Decision::Block { message }, HookEvent::Stop)
@@ -1222,7 +1234,7 @@ mod tests {
 
     #[test]
     fn test_normalize_preserves_simple_messages() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let message = "short lint error".to_string();
         let output = adapter
             .format_output(
@@ -1239,7 +1251,7 @@ mod tests {
 
     #[test]
     fn test_normalize_gemini_strips_ansi_and_whitespace() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let message = "  \x1b[1;31merror\x1b[0m: type mismatch\n    expected `u32`".to_string();
         let output = adapter
             .format_output(&Decision::Block { message }, HookEvent::Stop)
@@ -1256,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_stop_block_uses_followup_message() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1275,7 +1287,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_stop_allow_unchanged() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
@@ -1286,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_stop_block_normalizes_output() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let message =
             "  \x1b[1;31merror\x1b[0m: type mismatch\n    expected `u32`\n\n\n    got `String`"
                 .to_string();
@@ -1305,7 +1317,7 @@ mod tests {
     #[test]
     fn test_cursor_output_before_command_block_still_uses_deny() {
         // Non-Stop events should continue using "permission":"deny" format
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1320,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_stop_block_plain_text() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(
                 &Decision::Block {
@@ -1336,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_stop_allow_unchanged() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
@@ -1346,7 +1358,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_output_stop_block_normalizes_output() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let message = "  \x1b[31merror\x1b[0m: unused\n\n\n    --> src/main.rs:1:1".to_string();
         let output = adapter
             .format_output(&Decision::Block { message }, HookEvent::Stop)
@@ -1360,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_cursor_exit_code_stop_block_is_zero() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let decision = Decision::Block {
             message: "lint error".to_string(),
         };
@@ -1370,7 +1382,7 @@ mod tests {
 
     #[test]
     fn test_cursor_exit_code_before_command_block_is_two() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
@@ -1380,7 +1392,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_use_stderr_for_stop_block() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let block = Decision::Block {
             message: "error".to_string(),
         };
@@ -1389,7 +1401,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_use_stdout_for_non_stop() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let block = Decision::Block {
             message: "error".to_string(),
         };
@@ -1398,7 +1410,7 @@ mod tests {
 
     #[test]
     fn test_claude_use_stdout_for_stop_block() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let block = Decision::Block {
             message: "error".to_string(),
         };
@@ -1409,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_subagent_start() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"SubagentStart","tool_input":{"subagent_type":"explore","prompt":"Search the codebase"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
@@ -1423,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_subagent_stop() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"SubagentStop","tool_input":{"subagent_type":"generalPurpose","status":"completed","duration":5000}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStop);
@@ -1437,7 +1449,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_subagent_start_no_tool_input() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"SubagentStart"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
@@ -1451,7 +1463,7 @@ mod tests {
     #[test]
     fn test_claude_input_parsing_subagent_start_root_agent_type() {
         // Claude Code sends agent_type at root level (not inside tool_input)
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input =
             r#"{"hook_event_name":"SubagentStart","agent_id":"aa1c090","agent_type":"readme-en"}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -1465,7 +1477,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_subagent_stop_root_agent_type() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"SubagentStop","agent_id":"aa1c090","agent_type":"readme-en","permission_mode":"bypassPermissions"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStop);
@@ -1479,7 +1491,7 @@ mod tests {
     #[test]
     fn test_claude_input_parsing_subagent_start_no_agent_type() {
         // agent_type が無い場合は subagent_type = None
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"SubagentStart","agent_id":"aa1c090"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
@@ -1492,7 +1504,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_subagent_start() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"subagent_type":"explore","prompt":"Explore the authentication flow","model":"claude-sonnet-4-20250514"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
@@ -1506,7 +1518,7 @@ mod tests {
 
     #[test]
     fn test_cursor_input_parsing_subagent_stop() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let input = r#"{"subagent_type":"generalPurpose","status":"completed","result":"Task done","duration":45000}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(
@@ -1525,7 +1537,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_subagent_start_allow() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::SubagentStart)
             .unwrap();
@@ -1534,7 +1546,7 @@ mod tests {
 
     #[test]
     fn test_claude_output_subagent_stop_allow() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::SubagentStop)
             .unwrap();
@@ -1545,21 +1557,21 @@ mod tests {
 
     #[test]
     fn test_claude_parse_missing_tool_input_is_error() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_claude_parse_missing_tool_name_is_error() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_claude_parse_unknown_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let input =
             r#"{"hook_event_name":"Unknown","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
         assert!(adapter.parse_input(input).is_err());
@@ -1567,14 +1579,14 @@ mod tests {
 
     #[test]
     fn test_claude_parse_invalid_json_is_error() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         assert!(adapter.parse_input("{").is_err());
         assert!(adapter.parse_input("not json").is_err());
     }
 
     #[test]
     fn test_cursor_parse_empty_object_is_error() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         // Empty object doesn't match any CursorInput variant
         let input = r#"{}"#;
         assert!(adapter.parse_input(input).is_err());
@@ -1582,41 +1594,41 @@ mod tests {
 
     #[test]
     fn test_windsurf_unknown_action_is_error() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_windsurf_parse_invalid_json_is_error() {
-        let adapter = FormatAdapter::new(Format::Windsurf);
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
         assert!(adapter.parse_input("{invalid}").is_err());
     }
 
     #[test]
     fn test_gemini_parse_missing_tool_name_for_tool_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool"}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_gemini_parse_missing_tool_input_for_tool_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command"}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_gemini_unknown_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Gemini);
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"UnknownEvent"}"#;
         assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
     fn test_cursor_error_format_fail_closed() {
-        let adapter = FormatAdapter::new(Format::Cursor);
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter.format_error("Invalid JSON input");
         assert!(output.contains(r#""permission":"deny""#));
         assert!(output.contains("fail-closed"));
@@ -1624,7 +1636,7 @@ mod tests {
 
     #[test]
     fn test_claude_error_format_fail_closed() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter.format_error("Parse error");
         assert!(output.contains(r#""decision":"block""#));
         assert!(output.contains("fail-closed"));
@@ -1632,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_error_exit_code() {
-        let adapter = FormatAdapter::new(Format::Claude);
+        let adapter = FormatAdapter::new(Format::Claude, 0);
         assert_eq!(adapter.error_exit_code(), 2);
     }
 }
@@ -1808,12 +1820,32 @@ impl FormatAdapter {
                 decision: "allow".to_string(),
                 reason: None,
             },
-            Decision::Block { message } => GeminiOutput {
-                decision: "deny".to_string(),
-                reason: Some(normalize_lint_output(message)),
-            },
+            Decision::Block { message } => {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
+                GeminiOutput {
+                    decision: "deny".to_string(),
+                    reason: Some(truncated),
+                }
+            }
         };
         serde_json::to_string(&output)
             .map_err(|e| anyhow!("Failed to serialize Gemini output: {}", e))
+    }
+
+    /// Decision のメッセージを output_max_length で切り詰める。
+    fn truncate_decision(&self, decision: &Decision) -> Decision {
+        match decision {
+            Decision::Allow {
+                additional_context: ctx,
+            } => Decision::Allow {
+                additional_context: ctx
+                    .as_ref()
+                    .map(|c| truncate_output(c, self.output_max_length)),
+            },
+            Decision::Block { message } => Decision::Block {
+                message: truncate_output(message, self.output_max_length),
+            },
+        }
     }
 }

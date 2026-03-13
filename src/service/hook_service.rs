@@ -24,7 +24,7 @@ impl HookService {
     /// 指定フォーマットで新しい HookService を作成する。
     pub fn new(config: Config, format: Format, trace: bool) -> Self {
         let filter_chain = FilterChain::new(&config);
-        let adapter = FormatAdapter::new(format);
+        let adapter = FormatAdapter::new(format, config.output_max_length);
         Self {
             config,
             filter_chain,

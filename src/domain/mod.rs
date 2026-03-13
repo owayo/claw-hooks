@@ -21,5 +21,5 @@ pub use types::{Decision, HookEvent, HookInput, ToolInput};
 #[allow(unused)]
 pub use types::{BashInput, FileOperationInput, HookOutput, StopInput, SubagentInput};
 
-pub use normalize::normalize_lint_output;
+pub use normalize::{normalize_lint_output, truncate_output};
 pub use parser::parse_shell_tokens;

@@ -209,6 +209,11 @@ debug = false
 # Commands exceeding this timeout will be killed (SIGKILL)
 # hook_timeout = 60
 
+# Maximum length of output messages in characters (default: 1000)
+# Prevents AI agent context window overflow from large outputs
+# Set to 0 for unlimited output
+# output_max_length = 1000
+
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified
 # Each command template must contain exactly one {file}

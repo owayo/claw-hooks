@@ -67,22 +67,22 @@ mod tests {
 
     #[test]
     fn test_contains_kill_command() {
-        // Simple Unix commands
+        // Unix コマンド
         assert!(contains_kill_command("kill 1234"));
         assert!(contains_kill_command("pkill node"));
         assert!(contains_kill_command("killall python"));
         assert!(!contains_kill_command("ls -la"));
         assert!(!contains_kill_command("echo kill"));
 
-        // Windows commands
+        // Windows コマンド
         assert!(contains_kill_command("taskkill /PID 1234"));
         assert!(contains_kill_command("taskkill /IM node.exe /F"));
 
-        // Piped commands
+        // パイプコマンド
         assert!(contains_kill_command("ps aux | grep node | xargs kill"));
         assert!(contains_kill_command("pgrep node | xargs kill -9"));
 
-        // Chained commands
+        // チェーンコマンド
         assert!(contains_kill_command("cd /tmp && kill 1234"));
         assert!(contains_kill_command("echo test; pkill node"));
     }

@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_extension_hook_timeout_returns_allow_with_error_context() {
-        // Extension hooks always allow, but timeout error should appear in context
+        // 拡張フックは常に許可するが、タイムアウトエラーはコンテキストに表示されるべき
         let mut hooks = BTreeMap::new();
         hooks.insert(
             ".txt".to_string(),
@@ -686,7 +686,7 @@ mod tests {
             "Should timeout in ~2s, took {:?}",
             elapsed
         );
-        // Error context should mention the failure
+        // エラーコンテキストに失敗が記載されるべき
         match decision {
             Decision::Allow { additional_context } => {
                 let ctx = additional_context.expect("Should have error context on timeout");
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_execute_normalizes_output() {
-        // Use "sh -c" with printf to produce ANSI-colored output with indentation
+        // "sh -c"とprintfを使用してANSIカラー付きのインデント出力を生成する
         let mut hooks = BTreeMap::new();
         hooks.insert(
             ".txt".to_string(),
@@ -766,13 +766,13 @@ mod tests {
                     "ANSI codes should be stripped: {}",
                     ctx
                 );
-                // Leading whitespace should be stripped
+                // 先頭の空白が除去されるべき
                 assert!(
                     !ctx.contains("\n  "),
                     "Leading whitespace should be stripped: {}",
                     ctx
                 );
-                // Consecutive blank lines should be collapsed
+                // 連続する空行が圧縮されるべき
                 assert!(
                     !ctx.contains("\n\n\n"),
                     "Blank lines should be collapsed: {}",

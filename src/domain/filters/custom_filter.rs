@@ -202,7 +202,7 @@ impl Filter for CustomCommandFilter {
 mod tests {
     use super::*;
 
-    // Regex mode tests
+    // 正規表現モードのテスト
     #[test]
     fn test_custom_filter_regex() {
         let filter = CustomCommandFilter::new("python", "Use uv instead".to_string()).unwrap();
@@ -221,7 +221,7 @@ mod tests {
         // yarn in quotes should NOT trigger (it's not a command)
         assert!(!filter.matches("echo \"not yarn install\"; pnpm install"));
 
-        // Direct yarn command
+        // 直接のyarnコマンド
         assert!(filter.matches("yarn install"));
         assert!(filter.matches("yarn add react"));
 
@@ -242,7 +242,7 @@ mod tests {
         assert!(!filter.matches("echo \"python is great\""));
     }
 
-    // Args mode tests
+    // 引数モードのテスト
     #[test]
     fn test_custom_filter_args_basic() {
         let filter = CustomCommandFilter::with_args(
@@ -252,7 +252,7 @@ mod tests {
         )
         .unwrap();
 
-        // Should match
+        // マッチするべき
         assert!(filter.matches("npm install"));
         assert!(filter.matches("npm i"));
         assert!(filter.matches("npm add react"));
@@ -277,30 +277,30 @@ mod tests {
         )
         .unwrap();
 
-        // Should match in chained commands
+        // チェーンされたコマンド内でマッチするべき
         assert!(filter.matches("echo done; npm install"));
         assert!(filter.matches("cd /app && npm i lodash"));
 
-        // Should not match when in quotes
+        // クォート内ではマッチしないべき
         assert!(!filter.matches("echo \"npm install\""));
 
-        // Should not match different subcommand in chain
+        // チェーン内で異なるサブコマンドにはマッチしないべき
         assert!(!filter.matches("npm run build && echo done"));
     }
 
     #[test]
     fn test_custom_filter_args_empty_args() {
-        // Empty args means match any usage of the command
+        // 空の引数はコマンドのすべての使用にマッチする
         let filter =
             CustomCommandFilter::with_args("yarn", vec![], "Use pnpm instead".to_string()).unwrap();
 
-        // Should match all yarn commands
+        // すべてのyarnコマンドにマッチするべき
         assert!(filter.matches("yarn"));
         assert!(filter.matches("yarn install"));
         assert!(filter.matches("yarn add react"));
         assert!(filter.matches("yarn run build"));
 
-        // Should not match other commands
+        // 他のコマンドにはマッチしないべき
         assert!(!filter.matches("npm install"));
     }
 
@@ -313,18 +313,18 @@ mod tests {
         )
         .unwrap();
 
-        // Should match
+        // マッチするべき
         assert!(filter.matches("hoge --fuga"));
         assert!(filter.matches("hoge -f value"));
 
-        // Should not match
+        // マッチしないべき
         assert!(!filter.matches("hoge --other"));
         assert!(!filter.matches("hoge run"));
     }
 
     #[test]
     fn test_custom_filter_args_with_regex_command() {
-        // Test regex pattern in command field with args mode
+        // コマンドフィールドの正規表現パターンを引数モードでテスト
         let filter = CustomCommandFilter::with_args(
             "pip3?",
             vec!["install".to_string(), "uninstall".to_string()],
@@ -338,11 +338,11 @@ mod tests {
         assert!(filter.matches("pip uninstall requests"));
         assert!(filter.matches("pip3 uninstall requests"));
 
-        // Should not match other subcommands
+        // 他のサブコマンドにはマッチしないべき
         assert!(!filter.matches("pip list"));
         assert!(!filter.matches("pip3 --version"));
 
-        // Should not match other commands
+        // 他のコマンドにはマッチしないべき
         assert!(!filter.matches("python install"));
     }
 
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_custom_filter_invalid_regex_returns_error() {
-        // Invalid regex pattern should return error
+        // 無効な正規表現パターンはエラーを返すべき
         assert!(CustomCommandFilter::new("[", "msg".to_string()).is_err());
         assert!(CustomCommandFilter::new("(unclosed", "msg".to_string()).is_err());
     }
@@ -365,11 +365,11 @@ mod tests {
         )
         .unwrap();
 
-        // Should match when install is the first non-flag argument
+        // installが最初の非フラグ引数の場合にマッチするべき
         assert!(filter.matches("npm install"));
         assert!(filter.matches("npm install lodash"));
 
-        // Should not match when install is not first argument
+        // installが最初の引数でない場合はマッチしないべき
         // (--silent is not in args, so this is checking first arg is not "install")
         assert!(!filter.matches("npm --silent install"));
     }
@@ -381,15 +381,15 @@ mod tests {
         // This is a known limitation - custom filters match on command name at start of string.
         let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
 
-        // Direct npm commands match
+        // 直接のnpmコマンドはマッチする
         assert!(filter.matches("npm install"));
 
         // env with VAR=value prefix: npm is still the command
-        // This works because extract_command_strings handles env prefix
+        // extract_command_stringsがenv接頭辞を処理するため動作する
         assert!(filter.matches("NODE_ENV=prod npm install"));
 
         // sudo wrapper: Currently does NOT match (known limitation)
-        // The command is "sudo", not "npm" from CustomFilter's perspective
+        // CustomFilterの観点ではコマンドは"sudo"であり"npm"ではない
         assert!(!filter.matches("sudo npm install"));
     }
 
@@ -397,7 +397,7 @@ mod tests {
     fn test_custom_filter_with_bash_c_subshell() {
         let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
 
-        // Should match npm in bash -c
+        // bash -c内のnpmにマッチするべき
         assert!(filter.matches("bash -c 'npm install'"));
         assert!(filter.matches("sh -c \"npm install\""));
     }
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_strip_quoted_content_nested_quotes() {
-        // Single quotes inside double quotes: inner content stripped
+        // ダブルクォート内のシングルクォート: 内部コンテンツが除去される
         let result = CustomCommandFilter::strip_quoted_content(r#"echo "it's fine""#);
         assert_eq!(result, "echo ");
     }

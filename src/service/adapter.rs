@@ -363,7 +363,7 @@ impl FormatAdapter {
                     "🖱️ Cursor parsed input"
                 );
 
-                // Cursor's afterFileEdit is equivalent to AfterFileEdit for Write
+                // CursorのafterFileEditはWriteのAfterFileEditに対応する
                 Ok(HookInput {
                     event: HookEvent::AfterFileEdit,
                     tool_name: "Write".to_string(),
@@ -378,7 +378,7 @@ impl FormatAdapter {
     }
 
     fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop Block events use "followup_message" to instruct the agent to fix issues
+        // Stop Blockイベントは"followup_message"を使用してエージェントに修正を指示する
         if event == HookEvent::Stop {
             if let Decision::Block { message } = decision {
                 let normalized = normalize_lint_output(message);
@@ -415,7 +415,7 @@ impl FormatAdapter {
         let windsurf_input: WindsurfInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
 
-        // Map Windsurf agent_action_name to internal event type
+        // Windsurfのagent_action_nameを内部イベント型にマッピング
         let (event, tool_name, tool_input) = match windsurf_input.agent_action_name.as_str() {
             "pre_run_command" => {
                 let command = windsurf_input
@@ -496,7 +496,7 @@ impl FormatAdapter {
         }
 
         // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
-        // Since Windsurf doesn't support additionalContext, we use a simplified output
+        // WindsurfはadditionalContextをサポートしないため、簡略化された出力を使用する
         let output = match &self.truncate_decision(decision) {
             Decision::Allow { .. } => crate::domain::HookOutput {
                 decision: "approve".to_string(),
@@ -778,7 +778,7 @@ mod tests {
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // No hookSpecificOutput for BeforeCommand
+        // BeforeCommandにはhookSpecificOutputがない
         assert!(!output.contains("hookSpecificOutput"));
     }
 
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn test_claude_input_parsing_stop() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
-        // Stop events have no tool_name or tool_input
+        // Stopイベントにはtool_nameやtool_inputがない
         let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_before_tool() {
-        // Use official Gemini CLI tool name: run_shell_command
+        // Gemini CLI公式のツール名run_shell_commandを使用
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_replace_tool() {
-        // Gemini CLI uses "replace" tool for editing existing files
+        // Gemini CLIは既存ファイルの編集に"replace"ツールを使用する
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"custom_tool","tool_input":{}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "custom_tool"); // Unknown tools kept as-is
+        assert_eq!(result.tool_name, "custom_tool"); // 不明なツールはそのまま保持
     }
 
     #[test]
@@ -1072,7 +1072,7 @@ mod tests {
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // Windsurf doesn't support hookSpecificOutput
+        // WindsurfはhookSpecificOutputをサポートしない
         assert!(!output.contains("hookSpecificOutput"));
     }
 
@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn test_windsurf_output_allow_after_file_edit() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
-        // Windsurf doesn't support additionalContext, so context is ignored
+        // WindsurfはadditionalContextをサポートしないため、コンテキストは無視される
         let decision = Decision::allow_with_context("Some lint warning".to_string());
         let output = adapter
             .format_output(&decision, HookEvent::AfterFileEdit)
@@ -1140,13 +1140,13 @@ mod tests {
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // No reason field for Allow
+        // Allowにはreasonフィールドがない
         assert!(!output.contains(r#""reason""#));
     }
 
     #[test]
     fn test_claude_output_before_command_block_still_uses_message() {
-        // Non-Stop events should continue using "message" field
+        // Stop以外のイベントは引き続き"message"フィールドを使用する
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter
             .format_output(
@@ -1212,7 +1212,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let reason = parsed["reason"].as_str().unwrap();
-        // Leading whitespace should be stripped from each line
+        // 各行の先頭の空白が除去されていること
         assert!(reason.contains("error: unused"));
         assert!(reason.contains("--> src/main.rs:1:1"));
         assert!(!reason.contains("    error"));
@@ -1228,7 +1228,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let reason = parsed["reason"].as_str().unwrap();
-        // Consecutive blank lines should be collapsed into one
+        // 連続する空行は1行に圧縮されること
         assert_eq!(reason, "error 1\n\nerror 2\n\nerror 3");
     }
 
@@ -1291,7 +1291,7 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        // Stop Allow should use standard allow format
+        // Stop Allowは標準のallow形式を使用すること
         assert!(output.contains(r#""permission":"allow""#));
         assert!(!output.contains(r#""followup_message""#));
     }
@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn test_cursor_output_before_command_block_still_uses_deny() {
-        // Non-Stop events should continue using "permission":"deny" format
+        // Stop以外のイベントは引き続き"permission":"deny"形式を使用する
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(
@@ -1341,7 +1341,7 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        // Stop Block should return plain text (not JSON) for stderr output
+        // Stop Blockはstderr出力用にプレーンテキスト（JSONではない）を返すこと
         assert!(!output.starts_with('{'));
         assert!(output.contains("unused variable"));
     }
@@ -1352,7 +1352,7 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        // Stop Allow should use standard approve format
+        // Stop Allowは標準のapprove形式を使用すること
         assert!(output.contains(r#""decision":"approve""#));
     }
 
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn test_cursor_parse_empty_object_is_error() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        // Empty object doesn't match any CursorInput variant
+        // 空オブジェクトはどのCursorInputバリアントにもマッチしない
         let input = r#"{}"#;
         assert!(adapter.parse_input(input).is_err());
     }
@@ -1736,7 +1736,7 @@ impl FormatAdapter {
 
         let raw_event = gemini_input.hook_event_name.clone();
 
-        // Map Gemini events to internal HookEvent
+        // Geminiイベントを内部のHookEventにマッピング
         let event = match raw_event.as_str() {
             "BeforeTool" => HookEvent::BeforeCommand,
             "AfterTool" => HookEvent::AfterFileEdit,
@@ -1745,7 +1745,7 @@ impl FormatAdapter {
             other => return Err(anyhow!("Unknown Gemini event: {}", other)),
         };
 
-        // Handle non-tool events
+        // ツール以外のイベントを処理
         if event == HookEvent::Stop || event == HookEvent::BeforePrompt {
             let tool_name = if event == HookEvent::Stop {
                 "Stop".to_string()
@@ -1774,7 +1774,7 @@ impl FormatAdapter {
             });
         }
 
-        // Tool events require tool_name and tool_input
+        // ツールイベントにはtool_nameとtool_inputが必要
         let raw_tool_name = gemini_input
             .tool_name
             .ok_or_else(|| anyhow!("Missing tool_name field"))?;
@@ -1782,18 +1782,18 @@ impl FormatAdapter {
             .tool_input
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
 
-        // Map Gemini tool names to internal tool names
+        // Geminiのツール名を内部のツール名にマッピング
         // See: https://ai.google.dev/gemini-api/docs/tools (built-in tools reference)
         let tool_name = match raw_tool_name.as_str() {
-            // Shell execution
+            // シェル実行
             "shell" | "run_shell_command" | "execute_command" => "Bash".to_string(),
             // File writing/editing (replace is used for editing existing files)
             "write_file" | "create_file" | "update_file" | "replace" | "edit_file" => {
                 "Write".to_string()
             }
-            // File reading
+            // ファイル読み取り
             "read_file" | "view_file" | "read_many_files" => "Read".to_string(),
-            // Keep unknown tools as-is
+            // 不明なツールはそのまま保持
             other => other.to_string(),
         };
 

@@ -317,7 +317,7 @@ mod tests {
             tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
             session_id: None,
         };
-        // No stop hooks configured, should allow
+        // ストップフックが未設定の場合、許可されるべき
         assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
     }
 }

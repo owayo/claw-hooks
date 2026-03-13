@@ -51,19 +51,19 @@ mod tests {
 
     #[test]
     fn test_contains_rm_command() {
-        // Simple Unix commands
+        // Unix コマンド
         assert!(contains_rm_command("rm file.txt"));
         assert!(contains_rm_command("rm -rf /tmp/test"));
         assert!(contains_rm_command("rmdir empty_dir"));
         assert!(!contains_rm_command("ls -la"));
         assert!(!contains_rm_command("echo rm"));
 
-        // Windows commands
+        // Windows コマンド
         assert!(contains_rm_command("del file.txt"));
         assert!(contains_rm_command("del /F /Q temp.log"));
         assert!(contains_rm_command("erase old_file.bak"));
 
-        // Chained commands
+        // チェーンコマンド
         assert!(contains_rm_command("cd /tmp && rm -rf test"));
         assert!(contains_rm_command("echo done; rmdir old"));
         assert!(contains_rm_command("dir && del *.tmp"));

@@ -318,7 +318,7 @@ mod tests {
 
         let config = ConfigService::load(Some(&config_path)).unwrap();
 
-        // Should have created the file and loaded defaults
+        // ファイルが作成され、デフォルト値がロードされていること
         assert!(config_path.exists());
         assert!(config.rm_block);
         assert!(config.kill_block);
@@ -391,10 +391,10 @@ mod tests {
     #[test]
     fn test_find_project_config_from_does_not_traverse_parent() {
         let dir = tempfile::TempDir::new().unwrap();
-        // Place .claw-hooks.toml in parent dir
+        // 親ディレクトリに.claw-hooks.tomlを配置
         fs::write(dir.path().join(".claw-hooks.toml"), "rm_block = false\n").unwrap();
 
-        // Subdir does NOT have .claw-hooks.toml — should NOT find parent's
+        // サブディレクトリには.claw-hooks.tomlがない — 親のものを検出してはならない
         let sub = dir.path().join("subdir");
         fs::create_dir_all(&sub).unwrap();
 
@@ -498,7 +498,7 @@ commands = ["echo global"]
         )
         .unwrap();
 
-        // Create project config in a subdirectory
+        // サブディレクトリにプロジェクト設定を作成
         let project_dir = dir.path().join("project");
         fs::create_dir_all(&project_dir).unwrap();
         let project_path = project_dir.join(".claw-hooks.toml");
@@ -531,7 +531,7 @@ commands = ["echo project"]
         )
         .unwrap();
 
-        // No .claw-hooks.toml in temp dir — use load_inner with explicit search dir
+        // 一時ディレクトリに.claw-hooks.tomlがない — 明示的な検索ディレクトリでload_innerを使用
         let config = ConfigService::load_inner(Some(&config_path), Some(dir.path())).unwrap();
 
         assert!(config.rm_block);

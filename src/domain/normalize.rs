@@ -7,7 +7,7 @@
 pub const DEFAULT_OUTPUT_MAX_LENGTH: usize = 1000;
 
 /// テキストを指定された最大長に切り詰める。
-/// 切り詰めが発生した場合、末尾に省略メッセージを付加する。
+/// サフィックスが収まる場合のみ省略メッセージ (`\n... (truncated)`) を末尾に付加する。
 /// `max_length` が 0 の場合は無制限（切り詰めなし）。
 pub fn truncate_output(output: &str, max_length: usize) -> String {
     if max_length == 0 || output.len() <= max_length {
@@ -15,7 +15,20 @@ pub fn truncate_output(output: &str, max_length: usize) -> String {
     }
 
     let suffix = "\n... (truncated)";
-    let keep = max_length.saturating_sub(suffix.len());
+    // max_length がサフィックス長以下の場合はサフィックスなしで切り詰める
+    if max_length <= suffix.len() {
+        let end = if output.is_char_boundary(max_length) {
+            max_length
+        } else {
+            let mut e = max_length;
+            while e > 0 && !output.is_char_boundary(e) {
+                e -= 1;
+            }
+            e
+        };
+        return output[..end].to_string();
+    }
+    let keep = max_length - suffix.len();
 
     // UTF-8境界で安全に切り詰める
     let truncated = if output.is_char_boundary(keep) {
@@ -449,5 +462,43 @@ mod tests {
     #[test]
     fn test_truncate_output_empty_input() {
         assert_eq!(truncate_output("", 1000), "");
+    }
+
+    // === truncate_output 境界ケーステスト ===
+
+    #[test]
+    fn test_truncate_output_max_length_equals_suffix_length() {
+        // サフィックス長（16）ちょうどの場合はサフィックスなしで切り詰め
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let result = truncate_output(input, 16);
+        assert_eq!(result, "abcdefghijklmnop");
+        assert!(result.len() <= 16);
+    }
+
+    #[test]
+    fn test_truncate_output_max_length_less_than_suffix() {
+        // サフィックス長未満の場合もサフィックスなしで切り詰め
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let result = truncate_output(input, 5);
+        assert_eq!(result, "abcde");
+        assert!(result.len() <= 5);
+    }
+
+    #[test]
+    fn test_truncate_output_max_length_one() {
+        let result = truncate_output("hello", 1);
+        assert_eq!(result, "h");
+    }
+
+    #[test]
+    fn test_truncate_output_small_max_length_utf8() {
+        // UTF-8マルチバイト文字（3バイト）で小さいmax_lengthの境界をテスト
+        assert_eq!(truncate_output("あいうえお", 3), "あ");
+        // 1バイトではマルチバイト文字の途中になるため空文字列
+        assert_eq!(truncate_output("あいうえお", 1), "");
+        // 4バイトではマルチバイト文字の途中になるため「あ」のみ
+        let result = truncate_output("あいうえお", 4);
+        assert!(result.len() <= 4);
+        assert_eq!(result, "あ");
     }
 }

@@ -138,13 +138,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let log_path = dir.path();
 
-        // Create an old log file (3 days ago)
+        // 3日前の古いログファイルを作成
         let old_file = log_path.join("claw-hooks.2020-01-01");
         fs::write(&old_file, "old log").unwrap();
         let three_days_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
         set_file_modified_time(&old_file, three_days_ago).unwrap();
 
-        // Create a recent log file
+        // 最近のログファイルを作成
         let recent_file = log_path.join("claw-hooks.2026-02-12");
         fs::write(&recent_file, "recent log").unwrap();
 
@@ -159,7 +159,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let log_path = dir.path();
 
-        // Create an old file that is NOT a claw-hooks log
+        // claw-hooksのログではない古いファイルを作成
         let other_file = log_path.join("other-app.log");
         fs::write(&other_file, "other log").unwrap();
         let three_days_ago = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
@@ -188,7 +188,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let log_path = dir.path();
 
-        // Create a subdirectory named like a log file
+        // ログファイル風の名前を持つサブディレクトリを作成
         let subdir = log_path.join("claw-hooks.subdir");
         fs::create_dir(&subdir).unwrap();
 

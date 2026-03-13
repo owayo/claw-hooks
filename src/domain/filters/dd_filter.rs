@@ -48,16 +48,16 @@ mod tests {
 
     #[test]
     fn test_contains_dd_command() {
-        // Simple dd commands
+        // 基本的な dd コマンド
         assert!(contains_dd_command("dd if=/dev/zero of=/dev/sda"));
         assert!(contains_dd_command("dd if=input.img of=output.img bs=4M"));
         assert!(!contains_dd_command("ls -la"));
         assert!(!contains_dd_command("echo dd"));
 
-        // Piped commands
+        // パイプコマンド
         assert!(contains_dd_command("cat file | dd of=output.img"));
 
-        // Chained commands
+        // チェーンコマンド
         assert!(contains_dd_command("sync && dd if=/dev/sda of=backup.img"));
     }
 

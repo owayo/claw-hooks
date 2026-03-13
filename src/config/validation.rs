@@ -153,7 +153,7 @@ mod tests {
     fn test_validate_rejects_invalid_regex() {
         let mut config = default_config();
         config.custom_filters.push(CustomFilter {
-            command: "[".to_string(), // Invalid regex
+            command: "[".to_string(), // 無効な正規表現
             args: vec![],
             message: "msg".to_string(),
         });
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_validate_project_skips_none_fields() {
-        // Only stop_hooks is set, custom_filters and extension_hooks are None
+        // stop_hooksのみ設定済み、custom_filtersとextension_hooksはNone
         let pc = ProjectConfig {
             rm_block: Some(false),
             stop_hooks: Some(vec![StopHook {

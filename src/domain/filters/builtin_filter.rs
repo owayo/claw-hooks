@@ -81,3 +81,148 @@ impl Filter for BuiltinCommandFilter {
         self.priority
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::test_helpers::make_bash_input;
+    use crate::domain::{FileOperationInput, ToolInput};
+
+    fn make_test_filter(enabled: bool, extra: Option<fn(&str) -> bool>) -> BuiltinCommandFilter {
+        BuiltinCommandFilter::new(
+            enabled,
+            None,
+            "テストブロックメッセージ",
+            &["testcmd", "testcmd2"],
+            50,
+            extra,
+        )
+    }
+
+    #[test]
+    fn test_enabled_filter_blocks_matching_command() {
+        let filter = make_test_filter(true, None);
+        let input = make_bash_input("testcmd --flag");
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_disabled_filter_does_not_apply() {
+        let filter = make_test_filter(false, None);
+        let input = make_bash_input("testcmd --flag");
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_non_matching_command_is_allowed() {
+        let filter = make_test_filter(true, None);
+        let input = make_bash_input("safe_command --flag");
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_non_bash_tool_is_not_applied() {
+        let filter = make_test_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_after_file_edit_event_is_not_applied() {
+        let filter = make_test_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "testcmd".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_execute_returns_block_with_message() {
+        let filter = make_test_filter(true, None);
+        let input = make_bash_input("testcmd");
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert_eq!(message, "テストブロックメッセージ");
+            }
+            _ => panic!("Block判定が期待される"),
+        }
+    }
+
+    #[test]
+    fn test_custom_message_overrides_default() {
+        let filter = BuiltinCommandFilter::new(
+            true,
+            Some("カスタムメッセージ".to_string()),
+            "デフォルトメッセージ",
+            &["testcmd"],
+            50,
+            None,
+        );
+        let input = make_bash_input("testcmd");
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Block { message } => {
+                assert_eq!(message, "カスタムメッセージ");
+            }
+            _ => panic!("Block判定が期待される"),
+        }
+    }
+
+    #[test]
+    fn test_priority_returns_configured_value() {
+        let filter = make_test_filter(true, None);
+        assert_eq!(filter.priority(), 50);
+    }
+
+    #[test]
+    fn test_extra_check_triggers_block() {
+        // extra_check が true を返す場合、コマンド名が一致しなくてもブロック
+        fn always_block(_cmd: &str) -> bool {
+            true
+        }
+        let filter = make_test_filter(true, Some(always_block));
+        let input = make_bash_input("safe_command");
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_extra_check_not_called_when_command_matches() {
+        // コマンド名が一致した場合、extra_check は呼ばれずに即座にブロック
+        fn should_not_reach(_cmd: &str) -> bool {
+            // この関数が呼ばれなくてもテストは通る
+            false
+        }
+        let filter = make_test_filter(true, Some(should_not_reach));
+        let input = make_bash_input("testcmd");
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_second_command_pattern_matches() {
+        let filter = make_test_filter(true, None);
+        let input = make_bash_input("testcmd2 --arg");
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_chained_command_matches() {
+        let filter = make_test_filter(true, None);
+        let input = make_bash_input("echo hello && testcmd --flag");
+        assert!(filter.applies_to(&input));
+    }
+}

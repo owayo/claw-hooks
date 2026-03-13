@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_execute_ignores_hook_failure_and_allows() {
-        // Non-existent command should fail but filter should still return Allow
+        // 存在しないコマンドは失敗するが、フィルターはAllowを返すべき
         let hooks = vec![StopHook {
             commands: vec!["nonexistent-command-xyz-abc-123".to_string()],
             condition: None,
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn test_multiple_hooks_both_fail_collects_all() {
         use crate::config::HookCondition;
-        // All conditional hooks run in parallel, both failures collected
+        // すべての条件付きフックが並列実行され、両方の失敗が収集される
         let hooks = vec![
             StopHook {
                 commands: vec!["sh -c 'echo first-error >&2; exit 1'".to_string()],
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn test_conditional_hook_multiple_commands_both_fail_collects_all() {
         use crate::config::HookCondition;
-        // All commands run in parallel, both failures collected
+        // すべてのコマンドが並列実行され、両方の失敗が収集される
         let hooks = vec![StopHook {
             commands: vec![
                 "sh -c 'echo first-error >&2; exit 1'".to_string(),
@@ -937,7 +937,7 @@ mod tests {
         let result = StopHookFilter::execute_command_tracked("sleep 10", 2, None);
         let elapsed = start.elapsed();
 
-        // Timeout should return explicit timeout output
+        // タイムアウト時は明示的なタイムアウト出力を返すべき
         assert!(result.is_ok(), "Timeout should return Ok");
         let result = result.unwrap();
         assert!(result.timed_out, "Output should indicate timeout result");
@@ -1019,13 +1019,13 @@ mod tests {
 
     #[test]
     fn test_execute_command_timeout_returns_timeout_notice() {
-        // Command that outputs then hangs: timeout should return Ok with notice
+        // 出力後にハングするコマンド: タイムアウト時はOkと通知を返すべき
         let result = StopHookFilter::execute_command_tracked(
             "sh -c 'echo before-timeout; sleep 30'",
             2,
             None,
         );
-        // Timeout is treated as Ok
+        // タイムアウトはOkとして扱われる
         assert!(result.is_ok(), "Timeout should return Ok");
         let result = result.unwrap();
         assert!(result.timed_out, "Expected tracked timeout output");
@@ -1046,8 +1046,8 @@ mod tests {
     #[test]
     fn test_stop_hook_timeout_mixed_fast_and_slow_conditional() {
         use crate::config::HookCondition;
-        // Two conditional commands in parallel: one fast success, one timeout
-        // Timeout is treated as success, so both should allow
+        // 2つの条件付きコマンドが並列実行: 1つは高速成功、1つはタイムアウト
+        // タイムアウトは成功として扱われるため、両方とも許可されるべき
         let hooks = vec![StopHook {
             commands: vec!["true".to_string(), "sleep 10".to_string()],
             condition: Some(HookCondition {
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_stop_hook_timeout_mixed_fast_and_slow_unconditional() {
-        // Unconditional: one fast, one slow. Both should complete/timeout without blocking
+        // 無条件: 1つは高速、1つは低速。両方ともブロックせずに完了/タイムアウトすべき
         let hooks = vec![StopHook {
             commands: vec!["echo fast".to_string(), "sleep 10".to_string()],
             condition: None,
@@ -1105,19 +1105,19 @@ mod tests {
 
     #[test]
     fn test_stop_hook_timeout_process_is_killed() {
-        // Use a marker file: the sleep process should be killed before it creates it
+        // マーカーファイルを使用: sleepプロセスはファイル作成前にkillされるべき
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-timeout-kill-{}", std::process::id()));
         let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
         let _ = std::fs::remove_file(&marker);
 
-        // Command: sleep 10 then create marker. If killed properly, marker won't exist
+        // コマンド: sleep 10後にマーカー作成。正しくkillされればマーカーは存在しない
         let cmd = format!("sh -c 'sleep 10; echo done > {}'", marker_path);
         let result = StopHookFilter::execute_command_tracked(&cmd, 2, None);
         assert!(result.is_ok(), "Timeout should return Ok");
         assert!(result.unwrap().timed_out, "Expected timeout kill");
 
-        // Give a moment for any zombie/orphan cleanup
+        // ゾンビ/孤児プロセスのクリーンアップを待つ
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         assert!(
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_passes_agent_message_env() {
-        // Verify CLAW_HOOKS_AGENT_MESSAGE is set when agent_message is provided
+        // agent_message指定時にCLAW_HOOKS_AGENT_MESSAGEが設定されることを検証
         let result = StopHookFilter::execute_command(
             "sh -c 'echo $CLAW_HOOKS_AGENT_MESSAGE'",
             60,
@@ -1173,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_no_agent_message_env_when_none() {
-        // Verify CLAW_HOOKS_AGENT_MESSAGE is not set when agent_message is None
+        // agent_messageがNoneの場合、CLAW_HOOKS_AGENT_MESSAGEが未設定であることを検証
         let result = StopHookFilter::execute_command(
             "sh -c 'echo \"${CLAW_HOOKS_AGENT_MESSAGE:-unset}\"'",
             60,
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn test_stop_hook_propagates_agent_message_to_child() {
         use crate::config::HookCondition;
-        // Conditional hook that echoes the agent message env var
+        // エージェントメッセージ環境変数をechoする条件付きフック
         let hooks = vec![StopHook {
             commands: vec![
                 "sh -c 'test \"$CLAW_HOOKS_AGENT_MESSAGE\" = \"hello from agent\"'".to_string(),
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn test_report_false_ignores_failure() {
         use crate::config::HookCondition;
-        // Hook with report=false should not block even on failure
+        // report=falseのフックは失敗してもブロックしないべき
         let hooks = vec![StopHook {
             commands: vec!["sh -c 'echo report-off-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
@@ -1297,7 +1297,7 @@ mod tests {
 
     #[test]
     fn test_report_true_without_condition_blocks_on_failure() {
-        // Hook without condition but report=true should block on failure
+        // 条件なしでreport=trueのフックは失敗時にブロックすべき
         let hooks = vec![StopHook {
             commands: vec!["sh -c 'echo explicit-report-error >&2; exit 1'".to_string()],
             condition: None,

@@ -39,6 +39,7 @@
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
+- 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000バイト）でAIエージェントのコンテキストウィンドウ溢れを防止、UTF-8境界安全な切り詰め
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
 
@@ -448,6 +449,10 @@ debug = false
 # このタイムアウトを超えたコマンドはkill（SIGKILL）されます
 # hook_timeout = 60
 
+# 出力最大長（バイト）（デフォルト: 1000、0 = 無制限）
+# AIエージェントのコンテキストウィンドウ溢れを防止
+# output_max_length = 1000
+
 # カスタムコマンドフィルター（正規表現対応）
 [[custom_filters]]
 command = "yarn"
@@ -549,7 +554,7 @@ condition = { file_exists = "tsconfig.json" }
 | `custom_filters` | **上書き** | プロジェクトの定義がグローバルを完全置換 |
 | `stop_hooks` | **マージ** | グローバルとプロジェクトの両方が実行される |
 | `rm_block`, `kill_block`, `dd_block` | **上書き** | プロジェクトの値が優先 |
-| `*_block_message`, `hook_timeout` | **上書き** | プロジェクトの値が優先 |
+| `*_block_message`, `hook_timeout`, `output_max_length` | **上書き** | プロジェクトの値が優先 |
 | `debug`, `log_path`, `nano_buddy` | **グローバル専用** | プロジェクト設定では使用不可 |
 
 省略されたフィールドはグローバルの値を維持します。空の配列（例: `custom_filters = []`）を設定すると、グローバルの値を明示的にクリアします。

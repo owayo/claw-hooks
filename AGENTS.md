@@ -16,10 +16,10 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
 2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
-4. **Extension Hooks**: Auto-format/lint only after file save/edit completes with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
+4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 6. **Subagent Events**: NanoBuddy notifications on subagent start
-7. **Output Normalization**: ANSI stripping, path prefix removal, and output length truncation for token efficiency
+7. **Output Normalization**: ANSI stripping, path prefix removal, and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields
 
 ## Project Structure

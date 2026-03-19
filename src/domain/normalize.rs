@@ -6,40 +6,29 @@
 /// デフォルトの出力最大長（文字数）。
 pub const DEFAULT_OUTPUT_MAX_LENGTH: usize = 1000;
 
-/// テキストを指定された最大長に切り詰める。
+/// テキストを指定された最大長（文字数）に切り詰める。
 /// サフィックスが収まる場合のみ省略メッセージ (`\n... (truncated)`) を末尾に付加する。
 /// `max_length` が 0 の場合は無制限（切り詰めなし）。
 pub fn truncate_output(output: &str, max_length: usize) -> String {
+    // バイト長 ≤ max_length なら文字数も必ず ≤ max_length（各文字は1バイト以上）
     if max_length == 0 || output.len() <= max_length {
+        return output.to_string();
+    }
+    // バイト長 > max_length の場合のみ、正確な文字数を算出する
+    let char_count = output.chars().count();
+    if char_count <= max_length {
         return output.to_string();
     }
 
     let suffix = "\n... (truncated)";
+    let suffix_chars = suffix.chars().count();
     // max_length がサフィックス長以下の場合はサフィックスなしで切り詰める
-    if max_length <= suffix.len() {
-        let end = if output.is_char_boundary(max_length) {
-            max_length
-        } else {
-            let mut e = max_length;
-            while e > 0 && !output.is_char_boundary(e) {
-                e -= 1;
-            }
-            e
-        };
-        return output[..end].to_string();
+    if max_length <= suffix_chars {
+        let truncated: String = output.chars().take(max_length).collect();
+        return truncated;
     }
-    let keep = max_length - suffix.len();
-
-    // UTF-8境界で安全に切り詰める
-    let truncated = if output.is_char_boundary(keep) {
-        &output[..keep]
-    } else {
-        let mut end = keep;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
-        }
-        &output[..end]
-    };
+    let keep = max_length - suffix_chars;
+    let truncated: String = output.chars().take(keep).collect();
 
     format!("{}{}", truncated, suffix)
 }
@@ -439,7 +428,7 @@ mod tests {
     fn test_truncate_output_exceeds_limit() {
         let input = "a".repeat(1500);
         let result = truncate_output(&input, 1000);
-        assert!(result.len() <= 1000);
+        assert!(result.chars().count() <= 1000);
         assert!(result.ends_with("... (truncated)"));
     }
 
@@ -450,13 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_output_utf8_boundary() {
-        // 日本語文字（3バイト each）でUTF-8境界を正しく処理することを確認
-        let input = "あ".repeat(500); // 1500 bytes
+    fn test_truncate_output_utf8_chars() {
+        // 日本語文字で文字数ベースの切り詰めを確認
+        let input = "あ".repeat(500); // 500文字, 1500バイト
         let result = truncate_output(&input, 100);
         assert!(result.ends_with("... (truncated)"));
-        // 不正なUTF-8にならないことを確認
-        assert!(result.is_char_boundary(result.len()));
+        assert!(result.chars().count() <= 100);
     }
 
     #[test]
@@ -467,21 +455,21 @@ mod tests {
     // === truncate_output 境界ケーステスト ===
 
     #[test]
-    fn test_truncate_output_max_length_equals_suffix_length() {
-        // サフィックス長（16）ちょうどの場合はサフィックスなしで切り詰め
+    fn test_truncate_output_max_length_equals_suffix_char_count() {
+        // サフィックス文字数（16文字）ちょうどの場合はサフィックスなしで切り詰め
         let input = "abcdefghijklmnopqrstuvwxyz";
         let result = truncate_output(input, 16);
         assert_eq!(result, "abcdefghijklmnop");
-        assert!(result.len() <= 16);
+        assert!(result.chars().count() <= 16);
     }
 
     #[test]
     fn test_truncate_output_max_length_less_than_suffix() {
-        // サフィックス長未満の場合もサフィックスなしで切り詰め
+        // サフィックス文字数未満の場合もサフィックスなしで切り詰め
         let input = "abcdefghijklmnopqrstuvwxyz";
         let result = truncate_output(input, 5);
         assert_eq!(result, "abcde");
-        assert!(result.len() <= 5);
+        assert!(result.chars().count() <= 5);
     }
 
     #[test]
@@ -491,14 +479,37 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_output_small_max_length_utf8() {
-        // UTF-8マルチバイト文字（3バイト）で小さいmax_lengthの境界をテスト
-        assert_eq!(truncate_output("あいうえお", 3), "あ");
-        // 1バイトではマルチバイト文字の途中になるため空文字列
-        assert_eq!(truncate_output("あいうえお", 1), "");
-        // 4バイトではマルチバイト文字の途中になるため「あ」のみ
-        let result = truncate_output("あいうえお", 4);
-        assert!(result.len() <= 4);
-        assert_eq!(result, "あ");
+    fn test_truncate_output_small_max_length_multibyte() {
+        // 文字数ベースの切り詰め: 3文字まで許可 → 3文字残る
+        assert_eq!(truncate_output("あいうえお", 3), "あいう");
+        // 1文字まで
+        assert_eq!(truncate_output("あいうえお", 1), "あ");
+        // 4文字まで
+        assert_eq!(truncate_output("あいうえお", 4), "あいうえ");
+    }
+
+    #[test]
+    fn test_truncate_output_emoji_4byte() {
+        // 4バイト絵文字でも文字数ベースで正しく切り詰められる
+        let input = "🎉🎊🎈🎁🎂🎃🎄🎅🎆🎇🎋🎌🎍🎎🎏🎐🎑🎒🎓🎠";
+        let result = truncate_output(input, 5);
+        assert_eq!(result.chars().count(), 5);
+        assert_eq!(result, "🎉🎊🎈🎁🎂");
+    }
+
+    #[test]
+    fn test_truncate_output_mixed_ascii_multibyte() {
+        // ASCII と日本語の混在
+        let input = "error: 型の不一致が発生しました。expected `u32`, got `String`";
+        let result = truncate_output(input, 20);
+        assert!(result.chars().count() <= 20);
+    }
+
+    #[test]
+    fn test_truncate_output_fastpath_ascii() {
+        // ASCII のみの場合、バイト長チェックで早期リターンする
+        let input = "a".repeat(999);
+        let result = truncate_output(&input, 1000);
+        assert_eq!(result, input);
     }
 }

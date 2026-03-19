@@ -39,7 +39,7 @@
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
-- 📏 **Output Truncation** - Configurable output length limit (default: 1000 bytes) to prevent AI agent context window overflow, with UTF-8 boundary-safe truncation
+- 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
 
@@ -451,7 +451,7 @@ debug = false
 # Commands exceeding this timeout will be killed (SIGKILL)
 # hook_timeout = 60
 
-# Output max length in bytes (default: 1000, 0 = unlimited)
+# Output max length in characters (default: 1000, 0 = unlimited)
 # Prevents AI agent context window overflow from large lint/typecheck output
 # output_max_length = 1000
 

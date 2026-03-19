@@ -1364,4 +1364,233 @@ mod tests {
         assert!(commands.contains(&"ls".to_string()));
         assert!(commands.contains(&"echo".to_string()));
     }
+
+    // === is_env_assignment_token のテスト ===
+
+    #[test]
+    fn test_is_env_assignment_valid() {
+        assert!(ShellParser::is_env_assignment_token("FOO=bar"));
+        assert!(ShellParser::is_env_assignment_token("A_B_C=value"));
+        assert!(ShellParser::is_env_assignment_token("_VAR=1"));
+        assert!(ShellParser::is_env_assignment_token("X="));
+    }
+
+    #[test]
+    fn test_is_env_assignment_invalid() {
+        assert!(!ShellParser::is_env_assignment_token("=nokey"));
+        assert!(!ShellParser::is_env_assignment_token("123=bad"));
+        assert!(!ShellParser::is_env_assignment_token(""));
+        assert!(!ShellParser::is_env_assignment_token("noequals"));
+        assert!(!ShellParser::is_env_assignment_token("a-b=val"));
+    }
+
+    // === is_timeout_duration_token のテスト ===
+
+    #[test]
+    fn test_is_timeout_duration_valid() {
+        assert!(ShellParser::is_timeout_duration_token("10"));
+        assert!(ShellParser::is_timeout_duration_token("3.5"));
+        assert!(ShellParser::is_timeout_duration_token("30s"));
+        assert!(ShellParser::is_timeout_duration_token("5m"));
+        assert!(ShellParser::is_timeout_duration_token("1h"));
+        assert!(ShellParser::is_timeout_duration_token("2d"));
+        assert!(ShellParser::is_timeout_duration_token("0"));
+        assert!(ShellParser::is_timeout_duration_token("0.5"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_invalid() {
+        assert!(!ShellParser::is_timeout_duration_token(""));
+        assert!(!ShellParser::is_timeout_duration_token("abc"));
+        assert!(!ShellParser::is_timeout_duration_token("10x"));
+        assert!(!ShellParser::is_timeout_duration_token("s"));
+        assert!(!ShellParser::is_timeout_duration_token("-1"));
+        assert!(!ShellParser::is_timeout_duration_token("NaN"));
+    }
+
+    // === unwrap_subshell のテスト ===
+
+    #[test]
+    fn test_unwrap_subshell_simple() {
+        assert_eq!(ShellParser::unwrap_subshell("(inner)"), Some("inner"));
+    }
+
+    #[test]
+    fn test_unwrap_subshell_with_spaces() {
+        assert_eq!(
+            ShellParser::unwrap_subshell("  (echo hello)  "),
+            Some("echo hello")
+        );
+    }
+
+    #[test]
+    fn test_unwrap_subshell_nested() {
+        assert_eq!(
+            ShellParser::unwrap_subshell("(echo $(pwd))"),
+            Some("echo $(pwd)")
+        );
+    }
+
+    #[test]
+    fn test_unwrap_subshell_not_wrapped() {
+        assert_eq!(ShellParser::unwrap_subshell("echo hello"), None);
+    }
+
+    #[test]
+    fn test_unwrap_subshell_unbalanced() {
+        assert_eq!(ShellParser::unwrap_subshell("(no close"), None);
+    }
+
+    #[test]
+    fn test_unwrap_subshell_middle_close() {
+        // 最外周の括弧が途中で閉じるケース → None
+        assert_eq!(ShellParser::unwrap_subshell("(a)(b)"), None);
+    }
+
+    // === extract_nested_command_fragments のテスト ===
+
+    #[test]
+    fn test_extract_nested_dollar_paren() {
+        let frags = ShellParser::extract_nested_command_fragments("echo $(rm -rf /tmp)");
+        assert_eq!(frags, vec!["rm -rf /tmp"]);
+    }
+
+    #[test]
+    fn test_extract_nested_backticks() {
+        let frags = ShellParser::extract_nested_command_fragments("echo `ls -la`");
+        assert_eq!(frags, vec!["ls -la"]);
+    }
+
+    #[test]
+    fn test_extract_nested_mixed() {
+        let frags = ShellParser::extract_nested_command_fragments("$(cmd1) and `cmd2`");
+        assert_eq!(frags, vec!["cmd1", "cmd2"]);
+    }
+
+    #[test]
+    fn test_extract_nested_none() {
+        let frags = ShellParser::extract_nested_command_fragments("plain text");
+        assert!(frags.is_empty());
+    }
+
+    #[test]
+    fn test_extract_nested_in_single_quotes_ignored() {
+        // シングルクォート内のコマンド置換は無視される
+        let frags = ShellParser::extract_nested_command_fragments("echo '$(dangerous)'");
+        assert!(frags.is_empty());
+    }
+
+    #[test]
+    fn test_extract_nested_dollar_paren_deep() {
+        let frags = ShellParser::extract_nested_command_fragments("$(echo $(inner))");
+        // 最外周の $() のみ抽出
+        assert_eq!(frags, vec!["echo $(inner)"]);
+    }
+
+    // === find_wrapped_command_index のテスト ===
+
+    #[test]
+    fn test_find_wrapped_sudo_user() {
+        let args: Vec<String> = vec!["-u", "root", "rm", "-rf", "/tmp"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_timeout_duration() {
+        let args: Vec<String> = vec!["10", "rm", "-rf", "/tmp"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("timeout", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_timeout_with_signal() {
+        let args: Vec<String> = vec!["--signal", "TERM", "10", "dd"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("timeout", &args),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_env_with_assignments() {
+        let args: Vec<String> = vec!["VAR=x", "FOO=y", "rm", "-rf"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("env", &args),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_double_dash() {
+        let args: Vec<String> = vec!["--", "rm", "-rf"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_empty_args() {
+        let args: Vec<String> = vec![];
+        assert_eq!(ShellParser::find_wrapped_command_index("sudo", &args), None);
+    }
+
+    #[test]
+    fn test_find_wrapped_only_flags() {
+        let args: Vec<String> = vec!["-n".to_string()];
+        assert_eq!(ShellParser::find_wrapped_command_index("sudo", &args), None);
+    }
+
+    // === parse_effective_command のテスト ===
+
+    #[test]
+    fn test_parse_effective_command_with_env_prefix() {
+        let tokens: Vec<String> = vec!["VAR=x", "FOO=y", "rm", "-rf", "/tmp"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let (cmd, args) = ShellParser::parse_effective_command(&tokens).unwrap();
+        assert_eq!(cmd, "rm");
+        assert_eq!(args, vec!["-rf", "/tmp"]);
+    }
+
+    #[test]
+    fn test_parse_effective_command_no_env() {
+        let tokens: Vec<String> = vec!["ls", "-la"].into_iter().map(String::from).collect();
+        let (cmd, args) = ShellParser::parse_effective_command(&tokens).unwrap();
+        assert_eq!(cmd, "ls");
+        assert_eq!(args, vec!["-la"]);
+    }
+
+    #[test]
+    fn test_parse_effective_command_all_env() {
+        let tokens: Vec<String> = vec!["A=1", "B=2"].into_iter().map(String::from).collect();
+        assert!(ShellParser::parse_effective_command(&tokens).is_none());
+    }
+
+    #[test]
+    fn test_parse_effective_command_empty() {
+        let tokens: Vec<String> = vec![];
+        assert!(ShellParser::parse_effective_command(&tokens).is_none());
+    }
 }

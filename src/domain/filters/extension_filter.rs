@@ -771,4 +771,72 @@ mod tests {
             _ => panic!("Expected Allow decision"),
         }
     }
+
+    // === extract_ext のテスト ===
+
+    #[test]
+    fn test_extract_ext_simple() {
+        assert_eq!(
+            ExtensionHookFilter::extract_ext("main.rs"),
+            Some("rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ext_multiple_dots() {
+        assert_eq!(
+            ExtensionHookFilter::extract_ext("file.test.spec.ts"),
+            Some("ts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ext_hidden_file() {
+        // .gitignore → 拡張子なし（stem が空）
+        assert_eq!(ExtensionHookFilter::extract_ext(".gitignore"), None);
+    }
+
+    #[test]
+    fn test_extract_ext_no_extension() {
+        assert_eq!(ExtensionHookFilter::extract_ext("Makefile"), None);
+    }
+
+    #[test]
+    fn test_extract_ext_trailing_dot() {
+        assert_eq!(
+            ExtensionHookFilter::extract_ext("file."),
+            Some("".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ext_path_with_dirs() {
+        assert_eq!(
+            ExtensionHookFilter::extract_ext("/usr/src/lib.rs"),
+            Some("rs".to_string())
+        );
+    }
+
+    // === get_matching_commands のテスト ===
+
+    #[test]
+    fn test_get_matching_commands_match() {
+        let filter = create_filter_with_go_hooks();
+        let cmds = filter.get_matching_commands("/tmp/file.go");
+        assert!(cmds.is_some());
+    }
+
+    #[test]
+    fn test_get_matching_commands_no_match() {
+        let filter = create_filter_with_go_hooks();
+        let cmds = filter.get_matching_commands("/tmp/file.rs");
+        assert!(cmds.is_none());
+    }
+
+    #[test]
+    fn test_get_matching_commands_hidden_file() {
+        let filter = create_filter_with_go_hooks();
+        let cmds = filter.get_matching_commands(".gitignore");
+        assert!(cmds.is_none());
+    }
 }

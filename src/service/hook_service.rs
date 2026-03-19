@@ -616,6 +616,37 @@ mod tests {
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
+    #[test]
+    fn test_process_before_command_write_does_not_run_extension_hooks() {
+        let config = Config {
+            extension_hooks: std::collections::BTreeMap::from([(
+                ".rs".to_string(),
+                vec!["echo lint {file}".to_string()],
+            )]),
+            ..Config::default()
+        };
+        let service = HookService::new(config, Format::Claude, false);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(FileOperationInput {
+                file_path: "/tmp/test.rs".to_string(),
+                content: Some("fn main() {}".to_string()),
+            }),
+            session_id: None,
+        };
+
+        match service.process(&input) {
+            Decision::Allow { additional_context } => {
+                assert!(
+                    additional_context.is_none(),
+                    "保存前イベントでは拡張子フックを実行してはならない"
+                );
+            }
+            _ => panic!("Expected Allow decision"),
+        }
+    }
+
     // === カスタムブロックメッセージテスト ===
 
     #[test]

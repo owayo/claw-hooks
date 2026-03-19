@@ -306,12 +306,9 @@ impl ExtensionHookFilter {
 
 impl Filter for ExtensionHookFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // BeforeCommand/AfterFileEdit イベントで Write, Edit, MultiEdit に適用
-        // Read 操作には適用しない
-        if !matches!(
-            input.event,
-            HookEvent::BeforeCommand | HookEvent::AfterFileEdit
-        ) {
+        // 拡張子フックは保存後のイベントにのみ適用する。
+        // 保存前に formatter/linter を実行すると、未保存内容ではなく旧内容を検査してしまう。
+        if input.event != HookEvent::AfterFileEdit {
             return false;
         }
 
@@ -375,10 +372,10 @@ mod tests {
         ExtensionHookFilter::new(BTreeMap::new(), false, 60)
     }
 
-    // applies_to tests
+    // applies_to のテスト
 
     #[test]
-    fn test_applies_to_before_command_with_write() {
+    fn test_does_not_apply_to_before_command_with_write() {
         let filter = create_filter_with_go_hooks();
 
         let input = HookInput {
@@ -391,7 +388,7 @@ mod tests {
             session_id: None,
         };
 
-        assert!(filter.applies_to(&input));
+        assert!(!filter.applies_to(&input));
     }
 
     #[test]
@@ -541,7 +538,7 @@ mod tests {
         assert!(!filter.applies_to(&input));
     }
 
-    // execute tests
+    // execute のテスト
 
     #[test]
     fn test_execute_returns_allow() {
@@ -558,7 +555,7 @@ mod tests {
         };
 
         let decision = filter.execute(&input);
-        // Extension hooks always allow (they're side effects, not filters)
+        // 拡張子フックは副作用であり、常に Allow を返す
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
@@ -568,7 +565,7 @@ mod tests {
         assert_eq!(filter.priority(), 100);
     }
 
-    // === validate_file_path tests ===
+    // === validate_file_path のテスト ===
 
     #[test]
     fn test_validate_file_path_rejects_path_traversal() {
@@ -606,7 +603,7 @@ mod tests {
         assert!(ExtensionHookFilter::validate_file_path("file with spaces.txt").is_ok());
     }
 
-    // === parse_command_template tests ===
+    // === parse_command_template のテスト ===
 
     #[test]
     fn test_parse_command_template_basic() {
@@ -650,7 +647,7 @@ mod tests {
         assert!(ExtensionHookFilter::parse_command_template("   ").is_err());
     }
 
-    // === Timeout tests ===
+    // === タイムアウトのテスト ===
 
     #[test]
     fn test_extension_hook_timeout_returns_allow_with_error_context() {
@@ -676,23 +673,23 @@ mod tests {
         let decision = filter.execute(&input);
         let elapsed = start.elapsed();
 
-        // Should still allow (extension hooks are side effects, not blockers)
+        // タイムアウトしても Allow のままにする
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "Extension hooks always allow even on timeout"
+            "拡張子フックはタイムアウト時も Allow のままにする"
         );
         assert!(
             elapsed.as_secs() < 5,
-            "Should timeout in ~2s, took {:?}",
+            "おおむね 2 秒でタイムアウトすべきだが {:?} かかった",
             elapsed
         );
         // エラーコンテキストに失敗が記載されるべき
         match decision {
             Decision::Allow { additional_context } => {
-                let ctx = additional_context.expect("Should have error context on timeout");
+                let ctx = additional_context.expect("タイムアウト時はエラーコンテキストが付くべき");
                 assert!(
                     ctx.contains("timed out") || ctx.contains("ERROR"),
-                    "Context should indicate timeout: {}",
+                    "コンテキストにタイムアウトが示されるべき: {}",
                     ctx
                 );
             }
@@ -726,12 +723,12 @@ mod tests {
         assert!(matches!(decision, Decision::Allow { .. }));
         assert!(
             elapsed.as_secs() < 5,
-            "Fast hook should complete quickly: {:?}",
+            "軽いフックは短時間で終わるべき: {:?}",
             elapsed
         );
     }
 
-    // === Output normalization tests ===
+    // === 出力正規化のテスト ===
 
     #[test]
     fn test_execute_normalizes_output() {
@@ -759,25 +756,17 @@ mod tests {
         let decision = filter.execute(&input);
         match decision {
             Decision::Allow { additional_context } => {
-                let ctx = additional_context.expect("Should have context");
-                // ANSI codes should be stripped
+                let ctx = additional_context.expect("出力コンテキストが付くべき");
+                // ANSI コードが除去されるべき
                 assert!(
                     !ctx.contains("\x1b"),
-                    "ANSI codes should be stripped: {}",
+                    "ANSI コードが除去されるべき: {}",
                     ctx
                 );
                 // 先頭の空白が除去されるべき
-                assert!(
-                    !ctx.contains("\n  "),
-                    "Leading whitespace should be stripped: {}",
-                    ctx
-                );
+                assert!(!ctx.contains("\n  "), "先頭空白が除去されるべき: {}", ctx);
                 // 連続する空行が圧縮されるべき
-                assert!(
-                    !ctx.contains("\n\n\n"),
-                    "Blank lines should be collapsed: {}",
-                    ctx
-                );
+                assert!(!ctx.contains("\n\n\n"), "連続空行が圧縮されるべき: {}", ctx);
             }
             _ => panic!("Expected Allow decision"),
         }

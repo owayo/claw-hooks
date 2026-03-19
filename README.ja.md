@@ -35,7 +35,7 @@
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`timeout --signal`、`command rm`、bash -c、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル変更時に外部ツール（フォーマッター、リンター）を実行、lint出力をAIエージェントに送信（Claude Codeのみ）
+- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力をAIエージェントに送信（Claude Codeのみ）
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
@@ -181,8 +181,10 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ルール:
 - 拡張子フックの各コマンドテンプレートには、`{file}` プレースホルダーを必ず1つだけ含める必要があります。
+- 拡張子フックは保存後・編集後イベント（`PostToolUse`、`afterFileEdit`、`post_write_code`、`AfterTool`）でのみ実行されます。
 - 親ディレクトリ遡りを含むパス（例: `../`）は安全のため拒否されます。
 - シェルのリダイレクトメタ文字（`<`, `>`）を含むパスは安全のため拒否されます。
+- 必須のコマンドやファイルパスを欠いた不正なエージェント入力は、fail-closed で拒否されます。
 
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出

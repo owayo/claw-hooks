@@ -407,7 +407,7 @@ impl FormatAdapter {
             .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e))
     }
 
-    // === Windsurf Format ===
+    // === Windsurf フォーマット ===
 
     fn parse_windsurf_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "🏄 Windsurf raw input");
@@ -415,14 +415,21 @@ impl FormatAdapter {
         let windsurf_input: WindsurfInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
 
-        // Windsurfのagent_action_nameを内部イベント型にマッピング
+        // Windsurf の agent_action_name を内部イベント型にマッピング
         let (event, tool_name, tool_input) = match windsurf_input.agent_action_name.as_str() {
             "pre_run_command" => {
-                let command = windsurf_input
-                    .tool_info
-                    .as_ref()
-                    .and_then(|ti| ti.command_line.clone())
-                    .unwrap_or_default();
+                let tool_info = windsurf_input.tool_info.as_ref().ok_or_else(|| {
+                    anyhow!("Missing tool_info for Windsurf action: pre_run_command")
+                })?;
+                let command = tool_info
+                    .command_line
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Missing tool_info.command_line for Windsurf action: pre_run_command"
+                        )
+                    })?;
                 (
                     HookEvent::BeforeCommand,
                     "Bash".to_string(),
@@ -433,11 +440,16 @@ impl FormatAdapter {
                 )
             }
             "post_write_code" => {
-                let file_path = windsurf_input
-                    .tool_info
-                    .as_ref()
-                    .and_then(|ti| ti.file_path.clone())
-                    .unwrap_or_default();
+                let tool_info = windsurf_input.tool_info.as_ref().ok_or_else(|| {
+                    anyhow!("Missing tool_info for Windsurf action: post_write_code")
+                })?;
+                let file_path = tool_info
+                    .file_path
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("Missing tool_info.file_path for Windsurf action: post_write_code")
+                    })?;
                 (
                     HookEvent::AfterFileEdit,
                     "Write".to_string(),
@@ -487,7 +499,8 @@ impl FormatAdapter {
     }
 
     fn format_windsurf_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop Block: return plain text for stderr output (Windsurf reads stderr on exit 2)
+        // Stop の Block は標準エラー向けにプレーンテキストを返す。
+        // Windsurf は終了コード 2 のとき stderr を読む。
         if event == HookEvent::Stop {
             if let Decision::Block { message } = decision {
                 let normalized = normalize_lint_output(message);
@@ -495,8 +508,8 @@ impl FormatAdapter {
             }
         }
 
-        // Windsurf uses the same output format as Claude Code (but without hookSpecificOutput)
-        // WindsurfはadditionalContextをサポートしないため、簡略化された出力を使用する
+        // Windsurf は Claude Code と同系統の出力形式を使うが、
+        // additionalContext / hookSpecificOutput はサポートしないため簡略化する。
         let output = match &self.truncate_decision(decision) {
             Decision::Allow { .. } => crate::domain::HookOutput {
                 decision: "approve".to_string(),
@@ -513,157 +526,159 @@ impl FormatAdapter {
     }
 }
 
-// === Claude Code Format Types ===
+// === Claude Code フォーマット型 ===
 
-/// Claude Code input format (latest specification).
-/// See: https://docs.anthropic.com/en/docs/claude-code/hooks
+/// Claude Code の入力フォーマット（現行仕様）。
+/// 参照: https://docs.anthropic.com/en/docs/claude-code/hooks
 #[derive(Debug, Deserialize)]
 struct ClaudeInput {
-    /// Hook event name: PreToolUse, PostToolUse, Stop, etc.
+    /// フックイベント名: PreToolUse, PostToolUse, Stop など
     hook_event_name: String,
 
-    /// Tool name (optional for Stop/Notification events)
+    /// ツール名（Stop/Notification イベントでは省略可）
     #[serde(default)]
     tool_name: Option<String>,
 
-    /// Tool input (optional for Stop/Notification events)
+    /// ツール入力（Stop/Notification イベントでは省略可）
     #[serde(default)]
     tool_input: Option<crate::domain::ToolInput>,
 
-    /// Session identifier
+    /// セッション識別子
     #[serde(default)]
     session_id: Option<String>,
 
-    /// Whether stop hooks are active in this session
+    /// このセッションで stop hooks が既に有効かどうか
     #[serde(default)]
     #[allow(dead_code)]
     stop_hook_active: Option<bool>,
 
-    /// Agent's last assistant message (Stop event)
+    /// エージェントの最後のメッセージ（Stop イベント）
     #[serde(default)]
     last_assistant_message: Option<String>,
 }
 
-/// Claude Code Stop event output format.
-/// Uses "reason" instead of "message" for Block decisions on Stop events.
-/// This tells Claude to not stop and follow the instructions in "reason".
+/// Claude Code の Stop イベント出力フォーマット。
+/// Stop イベントの Block 判定では "message" ではなく "reason" を使う。
+/// これにより Claude は停止せず、"reason" に従って続行する。
 #[derive(Debug, Serialize)]
 struct ClaudeStopOutput {
-    /// Decision: "approve" or "block"
+    /// 判定: "approve" または "block"
     decision: String,
-    /// Reason for blocking (tells the agent to fix the issues)
+    /// ブロック理由（エージェントへの修正指示）
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
 
-// === Cursor Format Types ===
+// === Cursor フォーマット型 ===
 
-/// Cursor input format - supports beforeShellExecution, afterFileEdit, stop, and subagent hooks.
+/// Cursor の入力フォーマット。
+/// beforeShellExecution、afterFileEdit、stop、subagent hooks に対応する。
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum CursorInput {
-    // NOTE: SubagentStop MUST come before SubagentStart because serde(untagged)
-    // tries variants in order. SubagentStop requires "status" (stricter),
-    // while SubagentStart would match any payload with just "subagent_type".
-    /// subagentStop hook - subagent has finished
+    // 注意: serde(untagged) は上から順に評価するため、
+    // SubagentStop は SubagentStart より前に置く必要がある。
+    // SubagentStop は "status" を要求するが、SubagentStart は
+    // "subagent_type" だけでも一致してしまうため。
+    /// subagentStop hook - サブエージェントの終了
     SubagentStop {
-        /// Subagent type
+        /// サブエージェント種別
         subagent_type: String,
-        /// Subagent completion status: "completed" or "error"
+        /// サブエージェント完了状態: "completed" または "error"
         #[serde(rename = "status")]
         subagent_status: String,
-        /// Subagent output/result
+        /// サブエージェント出力
         #[serde(default)]
         #[allow(dead_code)]
         result: Option<String>,
-        /// Duration in milliseconds
+        /// 実行時間（ミリ秒）
         #[serde(default)]
         duration: Option<u64>,
     },
-    /// subagentStart hook - subagent is being spawned
+    /// subagentStart hook - サブエージェント起動
     SubagentStart {
-        /// Subagent type: "generalPurpose", "explore", "shell", etc.
+        /// サブエージェント種別: "generalPurpose", "explore", "shell" など
         subagent_type: String,
-        /// Prompt given to the subagent
+        /// サブエージェントに渡されたプロンプト
         #[serde(default)]
         prompt: Option<String>,
-        /// Model used by the subagent
+        /// サブエージェントで使用したモデル
         #[serde(default)]
         #[allow(dead_code)]
         model: Option<String>,
     },
-    /// stop hook - agent loop has ended
+    /// stop hook - エージェントループ終了
     Stop {
-        /// Stop status: "completed", "aborted", or "error"
+        /// 停止状態: "completed", "aborted", "error"
         status: String,
-        /// Number of auto-followups triggered in this conversation
+        /// この会話で発生した自動フォローアップ回数
         #[serde(default)]
         loop_count: Option<u32>,
     },
-    /// beforeShellExecution hook - provides command to execute
+    /// beforeShellExecution hook - 実行対象コマンドを含む
     ShellExecution {
-        /// Command to execute
+        /// 実行するコマンド
         command: String,
-        /// Current working directory
+        /// 現在の作業ディレクトリ
         #[serde(default)]
         #[allow(dead_code)]
         cwd: Option<String>,
     },
-    /// afterFileEdit hook - provides edited file path
+    /// afterFileEdit hook - 編集されたファイルパスを含む
     FileEdit {
-        /// Path of the edited file
+        /// 編集されたファイルのパス
         #[serde(alias = "filePath")]
         file_path: String,
     },
 }
 
-/// Cursor Stop Block output format.
-/// Uses "followup_message" to instruct the agent to fix lint/typecheck issues.
+/// Cursor の Stop Block 出力フォーマット。
+/// "followup_message" でエージェントに lint/typecheck の修正を促す。
 #[derive(Debug, Serialize)]
 struct CursorStopOutput {
-    /// Message instructing the agent to continue and fix the issues
+    /// 続行して修正するよう促すメッセージ
     followup_message: String,
 }
 
-/// Cursor output format.
+/// Cursor の出力フォーマット。
 #[derive(Debug, Serialize)]
 struct CursorOutput {
-    /// Permission: "allow", "deny", or "ask"
+    /// 権限: "allow", "deny", "ask"
     permission: String,
-    /// Message shown to user (when denied)
+    /// ユーザー向けメッセージ（拒否時）
     #[serde(skip_serializing_if = "Option::is_none")]
     user_message: Option<String>,
-    /// Message for the agent (when denied)
+    /// エージェント向けメッセージ（拒否時）
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_message: Option<String>,
 }
 
-// === Windsurf Format Types ===
+// === Windsurf フォーマット型 ===
 
-/// Windsurf input format.
+/// Windsurf の入力フォーマット。
 #[derive(Debug, Deserialize)]
 struct WindsurfInput {
-    /// Action name: "pre_run_command", "post_write_code", etc.
+    /// アクション名: "pre_run_command", "post_write_code" など
     agent_action_name: String,
-    /// Tool-specific information
+    /// ツール固有情報
     #[serde(default)]
     tool_info: Option<WindsurfToolInfo>,
 }
 
-/// Windsurf tool info.
+/// Windsurf のツール固有情報。
 #[derive(Debug, Default, Deserialize)]
 struct WindsurfToolInfo {
-    /// Command line for pre_run_command
+    /// pre_run_command 用のコマンドライン
     #[serde(default)]
     command_line: Option<String>,
-    /// Current working directory
+    /// 現在の作業ディレクトリ
     #[serde(default)]
     #[allow(dead_code)]
     cwd: Option<String>,
-    /// File path for post_write_code
+    /// post_write_code 用のファイルパス
     #[serde(default)]
     file_path: Option<String>,
-    /// Response content for post_cascade_response
+    /// post_cascade_response 用のレスポンス本文
     #[serde(default)]
     response: Option<String>,
 }
@@ -712,7 +727,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_file_edit_camel_case() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        // Test with camelCase filePath (Cursor might use either)
+        // Cursor は camelCase の filePath を送る場合もある
         let input = r#"{"filePath":"/path/to/file.tsx"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
@@ -748,6 +763,38 @@ mod tests {
     }
 
     #[test]
+    fn test_windsurf_input_parsing_pre_run_command_without_tool_info_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"pre_run_command"}"#;
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("Missing tool_info"));
+    }
+
+    #[test]
+    fn test_windsurf_input_parsing_pre_run_command_without_command_line_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"pre_run_command","tool_info":{}}"#;
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("tool_info.command_line"));
+    }
+
+    #[test]
+    fn test_windsurf_input_parsing_post_write_code_without_tool_info_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"post_write_code"}"#;
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("Missing tool_info"));
+    }
+
+    #[test]
+    fn test_windsurf_input_parsing_post_write_code_with_empty_file_path_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"post_write_code","tool_info":{"file_path":"   "}}"#;
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("tool_info.file_path"));
+    }
+
+    #[test]
     fn test_cursor_output_allow() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
@@ -778,7 +825,7 @@ mod tests {
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // BeforeCommandにはhookSpecificOutputがない
+        // BeforeCommand には hookSpecificOutput がない
         assert!(!output.contains("hookSpecificOutput"));
     }
 
@@ -790,7 +837,7 @@ mod tests {
             .format_output(&decision, HookEvent::AfterFileEdit)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // hookSpecificOutput should be present for AfterFileEdit with context
+        // AfterFileEdit で追加コンテキストがある場合のみ hookSpecificOutput が付く
         assert!(output.contains("hookSpecificOutput"));
         assert!(output.contains("additionalContext"));
         assert!(output.contains("Lint warning: unused variable"));
@@ -945,11 +992,11 @@ mod tests {
         }
     }
 
-    // === Gemini CLI Format Tests ===
+    // === Gemini CLI フォーマットのテスト ===
 
     #[test]
     fn test_gemini_input_parsing_before_tool() {
-        // Gemini CLI公式のツール名run_shell_commandを使用
+        // Gemini CLI 公式のツール名 run_shell_command を使う
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -964,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_gemini_input_parsing_run_shell_command() {
-        // run_shell_command is the official Gemini CLI built-in tool name
+        // run_shell_command は Gemini CLI の公式組み込みツール名
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -988,7 +1035,7 @@ mod tests {
         let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
-        assert_eq!(result.tool_name, "Write"); // replace maps to Write
+        assert_eq!(result.tool_name, "Write"); // replace は Write として扱う
     }
 
     #[test]
@@ -1012,7 +1059,7 @@ mod tests {
     #[test]
     fn test_gemini_input_parsing_with_event_alias() {
         let adapter = FormatAdapter::new(Format::Gemini, 0);
-        // Gemini might use "event" instead of "hook_event_name"
+        // Gemini が "hook_event_name" の代わりに "event" を使う場合がある
         let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
@@ -1063,7 +1110,7 @@ mod tests {
         assert!(error_output.contains("fail-closed"));
     }
 
-    // === Windsurf Output Tests ===
+    // === Windsurf 出力のテスト ===
 
     #[test]
     fn test_windsurf_output_allow() {
@@ -1100,7 +1147,7 @@ mod tests {
             .format_output(&decision, HookEvent::AfterFileEdit)
             .unwrap();
         assert!(output.contains(r#""decision":"approve""#));
-        // Context should NOT appear in output (Windsurf doesn't support it)
+        // Windsurf は additionalContext をサポートしない
         assert!(!output.contains("hookSpecificOutput"));
         assert!(!output.contains("additionalContext"));
     }
@@ -1113,7 +1160,7 @@ mod tests {
         assert!(error_output.contains("fail-closed"));
     }
 
-    // === Task 4.1: Claude Code & Gemini CLI Stop Block Output ===
+    // === Claude Code / Gemini CLI の Stop Block 出力 ===
 
     #[test]
     fn test_claude_output_stop_block_uses_reason_field() {
@@ -1126,7 +1173,7 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        // Stop Block should use "reason" instead of "message"
+        // Stop の Block は "message" ではなく "reason" を使う
         assert!(output.contains(r#""decision":"block""#));
         assert!(output.contains(r#""reason":"#));
         assert!(!output.contains(r#""message""#));
@@ -1264,7 +1311,7 @@ mod tests {
         assert!(!reason.starts_with(' '));
     }
 
-    // === Task 4.2: Cursor & Windsurf Stop Block Output ===
+    // === Cursor / Windsurf の Stop Block 出力 ===
 
     #[test]
     fn test_cursor_output_stop_block_uses_followup_message() {
@@ -1278,7 +1325,8 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        // Stop Block should use "followup_message" instead of "permission"/"user_message"
+        // Stop の Block は "permission" / "user_message" ではなく
+        // "followup_message" を使う
         assert!(output.contains(r#""followup_message":"#));
         assert!(!output.contains(r#""permission""#));
         assert!(!output.contains(r#""user_message""#));
@@ -1291,7 +1339,7 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        // Stop Allowは標準のallow形式を使用すること
+        // Stop の Allow は標準の allow 形式を使う
         assert!(output.contains(r#""permission":"allow""#));
         assert!(!output.contains(r#""followup_message""#));
     }
@@ -1307,7 +1355,7 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let followup = parsed["followup_message"].as_str().unwrap();
-        // ANSI codes stripped, leading whitespace stripped, blank lines collapsed
+        // ANSI 除去、先頭空白除去、連続空行圧縮が効くこと
         assert!(followup.contains("error: type mismatch"));
         assert!(!followup.contains("\x1b"));
         assert!(!followup.starts_with(' '));
@@ -1341,7 +1389,7 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        // Stop Blockはstderr出力用にプレーンテキスト（JSONではない）を返すこと
+        // Stop の Block は stderr 向けにプレーンテキストを返す
         assert!(!output.starts_with('{'));
         assert!(output.contains("unused variable"));
     }
@@ -1352,7 +1400,7 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        // Stop Allowは標準のapprove形式を使用すること
+        // Stop の Allow は標準の approve 形式を使う
         assert!(output.contains(r#""decision":"approve""#));
     }
 
@@ -1363,7 +1411,7 @@ mod tests {
         let output = adapter
             .format_output(&Decision::Block { message }, HookEvent::Stop)
             .unwrap();
-        // ANSI codes stripped, leading whitespace stripped, blank lines collapsed
+        // ANSI 除去、先頭空白除去、連続空行圧縮が効くこと
         assert!(output.contains("error: unused"));
         assert!(!output.contains("\x1b"));
         assert!(output.contains("--> src/main.rs:1:1"));
@@ -1376,7 +1424,7 @@ mod tests {
         let decision = Decision::Block {
             message: "lint error".to_string(),
         };
-        // Cursor Stop Block should use exit code 0 (decision in JSON)
+        // Cursor の Stop Block は JSON 側で判定を返すため終了コード 0
         assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
     }
 
@@ -1386,7 +1434,7 @@ mod tests {
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        // Non-Stop Block should still use exit code 2
+        // Stop 以外の Block は従来どおり終了コード 2
         assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
     }
 
@@ -1417,7 +1465,7 @@ mod tests {
         assert!(!adapter.use_stderr(&block, HookEvent::Stop));
     }
 
-    // === SubagentStart/SubagentStop Tests ===
+    // === SubagentStart / SubagentStop のテスト ===
 
     #[test]
     fn test_claude_input_parsing_subagent_start() {
@@ -1462,7 +1510,7 @@ mod tests {
 
     #[test]
     fn test_claude_input_parsing_subagent_start_root_agent_type() {
-        // Claude Code sends agent_type at root level (not inside tool_input)
+        // Claude Code は agent_type を tool_input ではなくルートに置く場合がある
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input =
             r#"{"hook_event_name":"SubagentStart","agent_id":"aa1c090","agent_type":"readme-en"}"#;
@@ -1524,7 +1572,7 @@ mod tests {
         assert_eq!(
             result.event,
             HookEvent::SubagentStop,
-            "Should parse as SubagentStop, not SubagentStart"
+            "SubagentStart ではなく SubagentStop として解釈されるべき"
         );
         assert_eq!(result.tool_name, "SubagentStop");
         if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
@@ -1553,7 +1601,7 @@ mod tests {
         assert!(output.contains(r#""decision":"approve""#));
     }
 
-    // === Error Handling Tests ===
+    // === エラーハンドリングのテスト ===
 
     #[test]
     fn test_claude_parse_missing_tool_input_is_error() {
@@ -1649,84 +1697,84 @@ mod tests {
     }
 }
 
-// === Gemini CLI Format Types ===
+// === Gemini CLI フォーマット型 ===
 
-/// Gemini CLI input format.
-/// See: https://github.com/google-gemini/gemini-cli#hooks
-/// Base input schema includes: session_id, transcript_path, cwd, hook_event_name, timestamp
-/// Tool events add: tool_name, tool_input, mcp_context
+/// Gemini CLI の入力フォーマット。
+/// 参照: https://github.com/google-gemini/gemini-cli#hooks
+/// 基本スキーマには session_id、transcript_path、cwd、hook_event_name、timestamp が含まれる。
+/// ツールイベントでは tool_name、tool_input、mcp_context が追加される。
 #[derive(Debug, Deserialize)]
 struct GeminiInput {
-    /// Hook event name: BeforeTool, AfterTool, AfterAgent, etc.
+    /// フックイベント名: BeforeTool, AfterTool, AfterAgent など
     #[serde(alias = "event")]
     hook_event_name: String,
 
-    /// Tool name (optional for non-tool events)
+    /// ツール名（ツール以外のイベントでは省略可）
     #[serde(default)]
     tool_name: Option<String>,
 
-    /// Tool input (optional for non-tool events)
+    /// ツール入力（ツール以外のイベントでは省略可）
     #[serde(default)]
     tool_input: Option<crate::domain::ToolInput>,
 
-    /// Session identifier
+    /// セッション識別子
     #[serde(default)]
     session_id: Option<String>,
 
-    /// Current working directory (base input field)
+    /// 現在の作業ディレクトリ（基本入力フィールド）
     #[serde(default)]
     #[allow(dead_code)]
     cwd: Option<String>,
 
-    /// Absolute path to session transcript JSON (base input field)
+    /// セッショントランスクリプト JSON の絶対パス（基本入力フィールド）
     #[serde(default)]
     #[allow(dead_code)]
     transcript_path: Option<String>,
 
-    /// ISO 8601 execution time (base input field)
+    /// ISO 8601 形式の実行時刻（基本入力フィールド）
     #[serde(default)]
     #[allow(dead_code)]
     timestamp: Option<String>,
 
-    /// MCP context for MCP-based tools (optional)
+    /// MCP ベースツール向けのコンテキスト（任意）
     #[serde(default)]
     #[allow(dead_code)]
     mcp_context: Option<serde_json::Value>,
 
-    /// Tool response for AfterTool events
+    /// AfterTool イベントのツール応答
     #[serde(default)]
     #[allow(dead_code)]
     tool_response: Option<serde_json::Value>,
 
-    /// User prompt for BeforeAgent/AfterAgent events
+    /// BeforeAgent / AfterAgent イベントのユーザープロンプト
     #[serde(default)]
     #[allow(dead_code)]
     prompt: Option<String>,
 
-    /// Agent response for AfterAgent events
+    /// AfterAgent イベントのエージェント応答
     #[serde(default)]
     #[allow(dead_code)]
     prompt_response: Option<String>,
 
-    /// Stop hook active flag for AfterAgent events
+    /// AfterAgent イベントでの stop hook 有効フラグ
     #[serde(default)]
     #[allow(dead_code)]
     stop_hook_active: Option<bool>,
 }
 
-/// Gemini CLI output format.
+/// Gemini CLI の出力フォーマット。
 #[derive(Debug, Serialize)]
 struct GeminiOutput {
-    /// Decision: "allow" or "deny"
+    /// 判定: "allow" または "deny"
     decision: String,
 
-    /// Reason for denial (when decision is "deny")
+    /// 拒否理由（decision が "deny" のとき）
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
 
 impl FormatAdapter {
-    // === Gemini CLI Format ===
+    // === Gemini CLI フォーマット ===
 
     fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "♊ Gemini CLI raw input");
@@ -1782,12 +1830,12 @@ impl FormatAdapter {
             .tool_input
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
 
-        // Geminiのツール名を内部のツール名にマッピング
-        // See: https://ai.google.dev/gemini-api/docs/tools (built-in tools reference)
+        // Gemini のツール名を内部のツール名にマッピングする。
+        // 参照: https://ai.google.dev/gemini-api/docs/tools
         let tool_name = match raw_tool_name.as_str() {
             // シェル実行
             "shell" | "run_shell_command" | "execute_command" => "Bash".to_string(),
-            // File writing/editing (replace is used for editing existing files)
+            // ファイル書き込み・編集。replace は既存ファイル編集で使われる。
             "write_file" | "create_file" | "update_file" | "replace" | "edit_file" => {
                 "Write".to_string()
             }

@@ -35,7 +35,7 @@
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `sudo --user`, `timeout --signal`, `command rm`, bash -c, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) on file modifications, with lint output passed to AI agent (Claude Code only)
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to AI agent (Claude Code only)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
@@ -181,8 +181,10 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 Rules:
 - Each extension hook command template must contain exactly one `{file}` placeholder.
+- Extension hooks run only on post-save/post-edit events (`PostToolUse`, `afterFileEdit`, `post_write_code`, `AfterTool`).
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
+- Malformed agent payloads that omit required command/file fields are rejected fail-closed.
 
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection

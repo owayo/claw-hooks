@@ -4,6 +4,7 @@
 //! - Claude Code（デフォルト）
 //! - Cursor
 //! - Windsurf (Cascade)
+//! - Codex CLI
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,11 @@ impl FormatAdapter {
         }
     }
 
+    /// ログ出力用のプレフィックス（例: "✴️ Claude Code"）を返す。
+    fn log_prefix(&self) -> String {
+        format!("{} {}", self.format.emoji(), self.format.label())
+    }
+
     /// フォーマットに基づいて入力文字列をHookInputにパースする。
     pub fn parse_input(&self, input: &str) -> Result<HookInput> {
         match self.format {
@@ -35,6 +41,7 @@ impl FormatAdapter {
             Format::Cursor => self.parse_cursor_input(input),
             Format::Windsurf => self.parse_windsurf_input(input),
             Format::Gemini => self.parse_gemini_input(input),
+            Format::Codex => self.parse_codex_input(input),
         }
     }
 
@@ -46,6 +53,7 @@ impl FormatAdapter {
             Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
             Format::Gemini => self.format_gemini_output(decision),
+            Format::Codex => self.format_codex_output(decision),
         }
     }
 
@@ -113,6 +121,14 @@ impl FormatAdapter {
                 })
                 .to_string()
             }
+            Format::Codex => {
+                // Codex: Claude Code と同様のフォーマットをデフォルトとする
+                serde_json::json!({
+                    "decision": "block",
+                    "message": error_message
+                })
+                .to_string()
+            }
         }
     }
 
@@ -124,7 +140,7 @@ impl FormatAdapter {
     // === Claude Code フォーマット ===
 
     fn parse_claude_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "🤖 Claude Code raw input");
+        debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
         let claude_input: ClaudeInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
@@ -206,10 +222,10 @@ impl FormatAdapter {
         };
 
         debug!(
-            format = "claude",
+            agent = self.format.label(),
             event = ?event,
             tool_name = %tool_name,
-            "🤖 Claude Code parsed input"
+            "{} parsed input", self.log_prefix()
         );
 
         Ok(HookInput {
@@ -248,7 +264,7 @@ impl FormatAdapter {
     // === Cursor フォーマット ===
 
     fn parse_cursor_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "🖱️ Cursor raw input");
+        debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
         let cursor_input: CursorInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Cursor input: {}", e))?;
@@ -261,11 +277,11 @@ impl FormatAdapter {
                 ..
             } => {
                 debug!(
-                    format = "cursor",
+                    agent = self.format.label(),
                     hook_type = "subagentStart",
                     subagent_type = %subagent_type,
                     mapped_event = ?HookEvent::SubagentStart,
-                    "🖱️ Cursor parsed input"
+                    "{} parsed input", self.log_prefix()
                 );
 
                 Ok(HookInput {
@@ -287,12 +303,12 @@ impl FormatAdapter {
                 ..
             } => {
                 debug!(
-                    format = "cursor",
+                    agent = self.format.label(),
                     hook_type = "subagentStop",
                     subagent_type = %subagent_type,
                     status = %subagent_status,
                     mapped_event = ?HookEvent::SubagentStop,
-                    "🖱️ Cursor parsed input"
+                    "{} parsed input", self.log_prefix()
                 );
 
                 Ok(HookInput {
@@ -309,12 +325,12 @@ impl FormatAdapter {
             }
             CursorInput::Stop { status, loop_count } => {
                 debug!(
-                    format = "cursor",
+                    agent = self.format.label(),
                     hook_type = "stop",
                     status = %status,
                     loop_count = ?loop_count,
                     mapped_event = ?HookEvent::Stop,
-                    "🖱️ Cursor parsed input"
+                    "{} parsed input", self.log_prefix()
                 );
 
                 // CursorのstopフックはStopイベントに相当
@@ -333,13 +349,13 @@ impl FormatAdapter {
             }
             CursorInput::ShellExecution { command, cwd } => {
                 debug!(
-                    format = "cursor",
+                    agent = self.format.label(),
                     hook_type = "beforeShellExecution",
                     command = %command,
                     cwd = ?cwd,
                     mapped_event = ?HookEvent::BeforeCommand,
                     mapped_tool = "Bash",
-                    "🖱️ Cursor parsed input"
+                    "{} parsed input", self.log_prefix()
                 );
 
                 // CursorのbeforeShellExecutionはBashのBeforeCommandに相当
@@ -355,12 +371,12 @@ impl FormatAdapter {
             }
             CursorInput::FileEdit { file_path } => {
                 debug!(
-                    format = "cursor",
+                    agent = self.format.label(),
                     hook_type = "afterFileEdit",
                     file_path = %file_path,
                     mapped_event = ?HookEvent::AfterFileEdit,
                     mapped_tool = "Write",
-                    "🖱️ Cursor parsed input"
+                    "{} parsed input", self.log_prefix()
                 );
 
                 // CursorのafterFileEditはWriteのAfterFileEditに対応する
@@ -410,7 +426,7 @@ impl FormatAdapter {
     // === Windsurf フォーマット ===
 
     fn parse_windsurf_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "🏄 Windsurf raw input");
+        debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
         let windsurf_input: WindsurfInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
@@ -482,12 +498,12 @@ impl FormatAdapter {
         };
 
         debug!(
-            format = "windsurf",
+            agent = self.format.label(),
             agent_action_name = %windsurf_input.agent_action_name,
             mapped_event = ?event,
             mapped_tool = %tool_name,
             cwd = ?windsurf_input.tool_info.as_ref().and_then(|ti| ti.cwd.as_ref()),
-            "🏄 Windsurf parsed input"
+            "{} parsed input", self.log_prefix()
         );
 
         Ok(HookInput {
@@ -1777,7 +1793,7 @@ impl FormatAdapter {
     // === Gemini CLI フォーマット ===
 
     fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "♊ Gemini CLI raw input");
+        debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
         let gemini_input: GeminiInput = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
@@ -1802,10 +1818,10 @@ impl FormatAdapter {
             };
 
             debug!(
-                format = "gemini",
+                agent = self.format.label(),
                 raw_event = %raw_event,
                 mapped_event = ?event,
-                "♊ Gemini CLI parsed input (non-tool event)"
+                "{} parsed input (non-tool event)", self.log_prefix()
             );
 
             return Ok(HookInput {
@@ -1846,12 +1862,12 @@ impl FormatAdapter {
         };
 
         debug!(
-            format = "gemini",
+            agent = self.format.label(),
             raw_event = %raw_event,
             mapped_event = ?event,
             raw_tool_name = %raw_tool_name,
             mapped_tool = %tool_name,
-            "♊ Gemini CLI parsed input"
+            "{} parsed input", self.log_prefix()
         );
 
         Ok(HookInput {
@@ -1879,6 +1895,129 @@ impl FormatAdapter {
         };
         serde_json::to_string(&output)
             .map_err(|e| anyhow!("Failed to serialize Gemini output: {}", e))
+    }
+
+    // === Codex CLI フォーマット ===
+
+    fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
+        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+
+        // Codex CLI のJSON構造はまだ未公開のため、まずは生のJSONをログに出力し、
+        // Claude Code互換のフィールドがあればパースを試みる。
+        // フォールバックとして serde_json::Value でパースして柔軟に対応する。
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Codex input: {}", e))?;
+
+        debug!(parsed = %raw, "{} parsed JSON", self.log_prefix());
+
+        // イベント名の検出: "hook_event_name" または "event" フィールドを探す
+        let raw_event = raw
+            .get("hook_event_name")
+            .or_else(|| raw.get("event"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Stop")
+            .to_string();
+
+        let event = match raw_event.as_str() {
+            "Stop" | "stop" => HookEvent::Stop,
+            "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
+            "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
+            other => {
+                debug!(event = %other, "{} unknown event, treating as Stop", self.log_prefix());
+                HookEvent::Stop
+            }
+        };
+
+        if event == HookEvent::Stop {
+            let agent_message = raw
+                .get("last_assistant_message")
+                .or_else(|| raw.get("stop_reason"))
+                .or_else(|| raw.get("message"))
+                .or_else(|| raw.get("response"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let stop_hook_active = raw
+                .get("stop_hook_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            return Ok(HookInput {
+                event,
+                tool_name: "Stop".to_string(),
+                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                    status: None,
+                    loop_count: None,
+                    response: None,
+                    agent_message,
+                    stop_hook_active,
+                }),
+                session_id: raw
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+
+        // ツールイベント
+        let tool_name = raw
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let tool_input: crate::domain::ToolInput = if let Some(ti) = raw.get("tool_input") {
+            serde_json::from_value(ti.clone())
+                .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
+        } else {
+            // tool_input がなければコマンドフィールドを探す
+            let command = raw.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                command: command.to_string(),
+                timeout: None,
+            })
+        };
+
+        // Codex のツール名を内部のツール名にマッピング
+        let mapped_tool_name = match tool_name.as_str() {
+            "shell" | "run_command" | "execute" => "Bash".to_string(),
+            "write_file" | "create_file" | "edit_file" | "apply_patch" => "Write".to_string(),
+            "read_file" => "Read".to_string(),
+            other => other.to_string(),
+        };
+
+        debug!(
+            agent = self.format.label(),
+            raw_event = %raw_event,
+            mapped_event = ?event,
+            raw_tool_name = %tool_name,
+            mapped_tool = %mapped_tool_name,
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event,
+            tool_name: mapped_tool_name,
+            tool_input,
+            session_id: raw
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+    }
+
+    fn format_codex_output(&self, decision: &Decision) -> Result<String> {
+        // Codex CLI の出力フォーマットも未公開のため、
+        // Claude Code と同様のプレーンテキスト出力をデフォルトとする。
+        // JSON出力が必要と判明した場合は後で変更する。
+        match decision {
+            Decision::Allow { .. } => Ok(String::new()),
+            Decision::Block { message } => {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
+                Ok(truncated)
+            }
+        }
     }
 
     /// Decision のメッセージを output_max_length で切り詰める。

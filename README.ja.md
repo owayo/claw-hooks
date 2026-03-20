@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Gemini CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
+  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Gemini CLI・Codex CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
 </p>
 
 <p align="center">
@@ -41,7 +41,7 @@
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
-- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLIに対応
+- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLI、Codex CLIに対応
 
 ## なぜ claw-hooks？
 
@@ -302,7 +302,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | オプション | 短縮形 | 説明 |
 |-----------|--------|------|
-| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `gemini` |
+| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `gemini`, `codex` |
 | `--config` | `-c` | 設定ファイルのパス |
 | `--help` | `-h` | ヘルプを表示 |
 
@@ -320,6 +320,9 @@ claw-hooks hook --format windsurf
 
 # Gemini CLIフックを処理
 claw-hooks hook --format gemini
+
+# Codex CLIフックを処理
+claw-hooks hook --format codex
 
 # カスタム設定を使用
 claw-hooks hook --config /path/to/config.toml
@@ -425,6 +428,30 @@ claw-hooks hook --config /path/to/config.toml
   }
 }
 ```
+
+### Codex CLI
+
+`~/.codex/config.json`（ユーザー）に追加:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+> **注意**: Codex CLIのフック対応は実験的です。現在は`Stop`イベントのみ動作確認済みです。
 
 ## 設定
 
@@ -828,6 +855,30 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 - 許可: `{"decision":"allow"}`
 - 拒否: `{"decision":"deny","reason":"..."}`
 
+### Codex CLI (`--format codex`)
+
+`hook_event_name`フィールドを使用（Claude Code互換構造）:
+
+```jsonc
+// Stopイベント
+{
+  "hook_event_name": "Stop",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "...",
+  "transcript_path": "..."
+}
+```
+
+| hook_event_name | 内部マッピング |
+|-----------------|----------------|
+| `Stop` | Stop |
+
+> **注意**: Codex CLIのフック対応は実験的です。現在は`Stop`イベントのみ動作確認済みです。
+
 ### イベントマッピング
 
 ```mermaid
@@ -861,12 +912,14 @@ graph LR
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
         GE3[Gemini: AfterAgent]
+        CX3[Codex: Stop]
     end
     CH3[⏹️ Lint / 通知 / クリーンアップ]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3
     GE3 --> CH3
+    CX3 --> CH3
 ```
 
 ## 入出力リファレンス

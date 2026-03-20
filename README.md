@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI - Command blocking, auto-formatting, stop-time automation
+  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI - Command blocking, auto-formatting, stop-time automation
 </p>
 
 <p align="center">
@@ -41,7 +41,7 @@
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
-- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, and Gemini CLI
+- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI
 
 ## Why claw-hooks?
 
@@ -302,7 +302,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `gemini` |
+| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `gemini`, `codex` |
 | `--config` | `-c` | Path to configuration file |
 | `--help` | `-h` | Show help |
 
@@ -320,6 +320,9 @@ claw-hooks hook --format windsurf
 
 # Process Gemini CLI hooks
 claw-hooks hook --format gemini
+
+# Process Codex CLI hooks
+claw-hooks hook --format codex
 
 # Use custom config
 claw-hooks hook --config /path/to/config.toml
@@ -425,6 +428,30 @@ Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
   }
 }
 ```
+
+### Codex CLI
+
+Add to `~/.codex/config.json` (user):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+> **Note**: Codex CLI hooks support is experimental. Currently only the `Stop` event is confirmed.
 
 ## Configuration
 
@@ -828,6 +855,30 @@ Output format uses `allow`/`deny` instead of `approve`/`block`:
 - Allow: `{"decision":"allow"}`
 - Deny: `{"decision":"deny","reason":"..."}`
 
+### Codex CLI (`--format codex`)
+
+Uses `hook_event_name` field (Claude Code-compatible structure):
+
+```jsonc
+// Stop event
+{
+  "hook_event_name": "Stop",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "...",
+  "transcript_path": "..."
+}
+```
+
+| hook_event_name | Internal Mapping |
+|-----------------|------------------|
+| `Stop` | Stop |
+
+> **Note**: Codex CLI hooks support is experimental. Only the `Stop` event is confirmed so far.
+
 ### Event Mapping Summary
 
 ```mermaid
@@ -861,12 +912,14 @@ graph LR
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
         GE3[Gemini: AfterAgent]
+        CX3[Codex: Stop]
     end
     CH3[⏹️ Lint / notifications / cleanup]
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3
     GE3 --> CH3
+    CX3 --> CH3
 ```
 
 ## Input/Output Reference

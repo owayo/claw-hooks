@@ -3,12 +3,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Claude Code, Cursor, Windsurf, Gemini CLI 向けAIコーディングエージェントフックシステム
+/// Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI 向けAIコーディングエージェントフックシステム
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
     version,
-    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI",
+    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI",
     long_about = "A CLI tool that filters dangerous commands, suggests safer alternatives, \
                   and executes extension-based hooks for AI coding agents."
 )]
@@ -41,6 +41,32 @@ pub enum Format {
     Windsurf,
     /// Gemini CLI フォーマット
     Gemini,
+    /// Codex CLI フォーマット
+    Codex,
+}
+
+impl Format {
+    /// ログ出力用の絵文字プレフィックスを返す。
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            Format::Claude => "✴️",
+            Format::Cursor => "🖱️",
+            Format::Windsurf => "🏄",
+            Format::Gemini => "♊",
+            Format::Codex => "📜",
+        }
+    }
+
+    /// ログ出力用のエージェント名を返す。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Format::Claude => "Claude Code",
+            Format::Cursor => "Cursor",
+            Format::Windsurf => "Windsurf",
+            Format::Gemini => "Gemini CLI",
+            Format::Codex => "Codex CLI",
+        }
+    }
 }
 
 /// 利用可能なサブコマンド
@@ -110,6 +136,15 @@ mod tests {
         let cli = Cli::try_parse_from(["claw-hooks", "hook", "-f", "gemini"]).unwrap();
         match cli.command {
             Commands::Hook { format, .. } => assert_eq!(format, Format::Gemini),
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_hook_codex_format() {
+        let cli = Cli::try_parse_from(["claw-hooks", "hook", "-f", "codex"]).unwrap();
+        match cli.command {
+            Commands::Hook { format, .. } => assert_eq!(format, Format::Codex),
             _ => panic!("Expected Hook command"),
         }
     }

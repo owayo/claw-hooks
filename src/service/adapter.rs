@@ -61,6 +61,7 @@ impl FormatAdapter {
     /// 注意: エージェントごとに終了コードのセマンティクスが異なる。
     /// - Claude/Windsurf: 0 = 許可, 2 = ブロック
     /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
+    /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Gemini CLI: 0 = 成功（判定はJSON内）, 2 = システムエラーのみ
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
@@ -68,6 +69,11 @@ impl FormatAdapter {
                 // Gemini CLI: JSON出力が成功した場合は常に0を返す。
                 // 判定（allow/deny）はJSONレスポンスで伝達される。
                 // 終了コード2はシステムエラー専用（stderrがreasonとして使用される）。
+                0
+            }
+            Format::Codex => {
+                // Codex CLI: ブロック判定も stdout の JSON で解釈される。
+                // 非0終了コードだとフック失敗として扱われ、判定が無視される。
                 0
             }
             Format::Cursor if event == HookEvent::Stop => {
@@ -1617,6 +1623,69 @@ mod tests {
         assert!(output.contains(r#""decision":"approve""#));
     }
 
+    // === Codex CLI フォーマットのテスト ===
+
+    #[test]
+    fn test_codex_input_parsing_stop() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"session_id":"019d193e-b16a-70e2-bd83-dc692a870e9a","transcript_path":"/tmp/rollout.jsonl","cwd":"/Users/owa/GitHub/claw-hooks","hook_event_name":"Stop","model":"gpt-5.4","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}"#;
+        let result = adapter.parse_input(input).unwrap();
+
+        assert_eq!(result.event, HookEvent::Stop);
+        assert_eq!(result.tool_name, "Stop");
+        assert_eq!(
+            result.session_id,
+            Some("019d193e-b16a-70e2-bd83-dc692a870e9a".to_string())
+        );
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.agent_message, Some("OK".to_string()));
+            assert!(!stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_codex_output_allow_uses_approve_json() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["decision"], "approve");
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn test_codex_output_block_uses_reason_field() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "  \x1b[31merror\x1b[0m: unused variable  ".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["decision"], "block");
+        assert_eq!(parsed["reason"], "error: unused variable");
+        assert!(parsed.get("message").is_none());
+    }
+
+    #[test]
+    fn test_codex_exit_code_block_is_zero() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
+        assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
+    }
+
     // === エラーハンドリングのテスト ===
 
     #[test]
@@ -2007,17 +2076,23 @@ impl FormatAdapter {
     }
 
     fn format_codex_output(&self, decision: &Decision) -> Result<String> {
-        // Codex CLI の出力フォーマットも未公開のため、
-        // Claude Code と同様のプレーンテキスト出力をデフォルトとする。
-        // JSON出力が必要と判明した場合は後で変更する。
-        match decision {
-            Decision::Allow { .. } => Ok(String::new()),
+        // Codex CLI は decision/reason 形式の JSON を解釈する。
+        // Stop フックでは `{"decision":"block","reason":"..."}` により継続修正を促せる。
+        let output = match decision {
+            Decision::Allow { .. } => serde_json::json!({
+                "decision": "approve"
+            }),
             Decision::Block { message } => {
                 let normalized = normalize_lint_output(message);
                 let truncated = truncate_output(&normalized, self.output_max_length);
-                Ok(truncated)
+                serde_json::json!({
+                    "decision": "block",
+                    "reason": truncated
+                })
             }
-        }
+        };
+        serde_json::to_string(&output)
+            .map_err(|e| anyhow!("Failed to serialize Codex output: {}", e))
     }
 
     /// Decision のメッセージを output_max_length で切り詰める。

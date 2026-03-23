@@ -431,7 +431,7 @@ Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
 
 ### Codex CLI
 
-Add to `~/.codex/config.json` (user):
+Add to `~/.codex/hooks.json` (user):
 
 ```json
 {
@@ -876,6 +876,12 @@ Uses `hook_event_name` field (Claude Code-compatible structure):
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
 | `Stop` | Stop |
+
+Output format uses `approve`/`block` with a `reason` field for blocks:
+- Allow: `{"decision":"approve"}`
+- Block: `{"decision":"block","reason":"..."}`
+
+Hooks should exit with status `0` for both allow and block decisions. A non-zero exit code is treated by Codex CLI as a hook failure, not as a block.
 
 > **Note**: Codex CLI hooks support is experimental. Only the `Stop` event is confirmed so far.
 

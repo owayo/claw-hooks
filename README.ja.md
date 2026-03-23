@@ -431,7 +431,7 @@ claw-hooks hook --config /path/to/config.toml
 
 ### Codex CLI
 
-`~/.codex/config.json`（ユーザー）に追加:
+`~/.codex/hooks.json`（ユーザー）に追加:
 
 ```json
 {
@@ -876,6 +876,12 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 | hook_event_name | 内部マッピング |
 |-----------------|----------------|
 | `Stop` | Stop |
+
+出力形式は、許可時に `approve`、ブロック時に `reason` 付き `block` を使用します:
+- 許可: `{"decision":"approve"}`
+- ブロック: `{"decision":"block","reason":"..."}`
+
+Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
 
 > **注意**: Codex CLIのフック対応は実験的です。現在は`Stop`イベントのみ動作確認済みです。
 

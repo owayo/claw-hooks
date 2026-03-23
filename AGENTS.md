@@ -33,7 +33,7 @@ src/
 │   ├── service.rs       # Config loader & generator
 │   └── validation.rs    # Validation (regex, extensions, stop hooks)
 ├── service/             # Service layer
-│   ├── adapter.rs       # Agent format conversion (Claude/Cursor/Windsurf/Gemini)
+│   ├── adapter.rs       # Agent format conversion (Claude/Cursor/Windsurf/Gemini/Codex)
 │   └── hook_service.rs  # Hook processing orchestration
 ├── domain/              # Domain layer
 │   ├── types.rs         # Domain types (HookEvent, ToolInput, Decision)
@@ -115,6 +115,11 @@ cargo run -- version     # Show version
 ### Gemini CLI
 - Supports BeforePrompt event
 - Use `--format gemini` when testing
+
+### Codex CLI
+- Supports `Stop` event hooks (currently confirmed)
+- Use `--format codex` when testing
+- Block decisions must be returned via stdout JSON; non-zero exit codes are treated as hook failures
 
 ## README Update Rules
 

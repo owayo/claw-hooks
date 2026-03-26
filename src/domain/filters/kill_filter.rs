@@ -14,13 +14,16 @@ const KILL_COMMANDS: &[&str] = &[
 ];
 
 /// xargs 経由の kill コマンドが含まれるか判定する。
+/// xargs の最初の非フラグ引数が実際に実行されるコマンドであるため、
+/// それのみを検査する（後続引数はコマンドの引数であり実行対象ではない）。
 fn contains_xargs_kill(command: &str) -> bool {
     for segment in command.split('|') {
         let trimmed = segment.trim();
         if trimmed.starts_with("xargs") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            for part in parts.iter().skip(1) {
-                if !part.starts_with('-') && KILL_COMMANDS.contains(part) {
+            // xargs の最初の非フラグ引数 = 実行されるコマンド
+            if let Some(cmd) = parts.iter().skip(1).find(|a| !a.starts_with('-')) {
+                if KILL_COMMANDS.contains(cmd) {
                     return true;
                 }
             }
@@ -193,5 +196,12 @@ mod tests {
     #[test]
     fn test_contains_kill_command_with_nohup_wrapper() {
         assert!(contains_kill_command("nohup kill -9 1234 &"));
+    }
+
+    #[test]
+    fn test_xargs_non_kill_command_not_blocked() {
+        // xargs が実行するコマンドが kill でない場合はブロックしない
+        assert!(!contains_kill_command("ps | xargs echo kill"));
+        assert!(!contains_kill_command("find . | xargs grep kill"));
     }
 }

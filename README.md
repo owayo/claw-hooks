@@ -976,6 +976,14 @@ The `additionalContext` field passes lint warnings/errors to Claude Code, allowi
 
 Gemini CLI expects exit code `0` for all decisions, including blocks. The `decision` field in the JSON response determines whether the action is allowed or denied.
 
+**Codex CLI** (different semantics):
+| Code | Meaning |
+|------|---------|
+| `0` | Success (decision in JSON: `approve` or `block`) |
+| non-zero | Hook failure (decision is ignored) |
+
+Codex CLI expects exit code `0` for all decisions, including blocks. A non-zero exit code is treated as a hook infrastructure failure, and any block decision in stdout JSON is ignored.
+
 ## Performance
 
 | Metric | Value |

@@ -923,6 +923,23 @@ fn test_gemini_empty_input_is_fail_closed() {
     );
 }
 
+#[test]
+fn test_codex_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "codex");
+
+    // Codex CLI: 非0終了コードはフック失敗扱いで判定が無視されるため、
+    // エラー時も0を返し、block判定はJSON内で伝達する
+    assert_eq!(
+        exit_code, 0,
+        "Codex empty input should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
 // === ラッパー・サブシェル検出テスト ===
 
 #[test]

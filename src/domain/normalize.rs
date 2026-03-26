@@ -33,19 +33,37 @@ pub fn truncate_output(output: &str, max_length: usize) -> String {
     format!("{}{}", truncated, suffix)
 }
 
-/// テキストからANSIエスケープコード（色、スタイル、カーソル制御）を除去する。
+/// テキストからANSIエスケープコード（色、スタイル、カーソル制御、OSCハイパーリンク等）を除去する。
 pub fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // CSIシーケンス: ESC [ ... 終端バイト (0x40-0x7e)
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
+            match chars.next() {
+                Some('[') => {
+                    // CSIシーケンス: ESC [ ... 終端バイト (0x40-0x7e)
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
                     }
                 }
+                Some(']') => {
+                    // OSCシーケンス: ESC ] ... (BEL または ESC \ で終端)
+                    // 例: ハイパーリンク \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.next() == Some('\\') {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    // その他のエスケープシーケンス（SS2/SS3等）: ESCのみ除去
+                }
+                None => {}
             }
         } else {
             result.push(c);
@@ -389,11 +407,35 @@ mod tests {
 
     #[test]
     fn test_strip_ansi_codes_incomplete_sequence() {
-        // ESCの後に '[' が続かない場合
+        // ESCの後に '[' が続かない場合（SS2/SS3等の2文字エスケープシーケンス）
         let input = "text\x1bXmore";
         let result = strip_ansi_codes(input);
-        // ESCは消費され、'X'はCSIではないため'X'は失われ、'more'が残る
+        // ESCとそれに続く1文字はエスケープシーケンスとして除去される
         assert_eq!(result, "textmore");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_hyperlink() {
+        // OSC-8 ハイパーリンク: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
+        let input = "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "click here");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_bel_terminated() {
+        // BEL (0x07) で終端する OSC シーケンス
+        let input = "before\x1b]0;window title\x07after";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "beforeafter");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_mixed_csi_and_osc() {
+        // CSI と OSC が混在するケース
+        let input = "\x1b[31m\x1b]8;;https://doc.rust-lang.org\x1b\\E0308\x1b]8;;\x1b\\\x1b[0m";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "E0308");
     }
 
     #[test]

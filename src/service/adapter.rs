@@ -1785,6 +1785,34 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Claude, 0);
         assert_eq!(adapter.error_exit_code(), 2);
     }
+
+    #[test]
+    fn test_error_exit_code_codex_returns_zero() {
+        // Codex CLI: 非0終了コードはフック失敗として扱われ判定が無視されるため、
+        // エラー時も0を返しJSON内のblock判定を有効にする
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_error_exit_code_gemini_returns_zero() {
+        // Gemini CLI: 非0終了コードはシステムエラー扱いで判定が無視されるため、
+        // エラー時も0を返しJSON内のdeny判定を有効にする
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_error_exit_code_cursor_returns_two() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
+
+    #[test]
+    fn test_error_exit_code_windsurf_returns_two() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
 }
 
 // === Gemini CLI フォーマット型 ===

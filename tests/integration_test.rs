@@ -910,8 +910,12 @@ fn test_windsurf_empty_input_is_fail_closed() {
 fn test_gemini_empty_input_is_fail_closed() {
     let (stdout, _stderr, exit_code) = run_hook_with_format("", "gemini");
 
-    // Gemini uses exit 0 but decision should be deny
-    assert_eq!(exit_code, 2, "Gemini empty input should fail");
+    // Gemini: 非0終了コードはフック失敗扱いで判定が無視されるため、
+    // エラー時も0を返し、deny判定はJSON内で伝達する
+    assert_eq!(
+        exit_code, 0,
+        "Gemini empty input should exit 0 with deny in JSON"
+    );
     assert!(
         stdout.contains("fail-closed"),
         "Output should indicate fail-closed: {}",

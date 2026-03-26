@@ -1,6 +1,6 @@
 //! フックイベント処理サービス。
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Read as _, Write};
 use std::process;
 
 use anyhow::Result;
@@ -42,11 +42,9 @@ impl HookService {
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
 
-        // stdin から全入力を読み取り
+        // stdin から全入力を読み取り（改行を保持して正確なJSONを維持）
         let mut input = String::new();
-        for line in stdin.lock().lines() {
-            input.push_str(&line?);
-        }
+        stdin.lock().read_to_string(&mut input)?;
 
         // トレースモード: 生の入力を即座に stderr に出力
         if self.trace {

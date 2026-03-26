@@ -138,9 +138,14 @@ impl FormatAdapter {
         }
     }
 
-    /// エラー時の終了コードを取得する（フェイルクローズド = ブロック = 終了コード2）。
+    /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
+    /// Codex/Gemini: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
+    /// Claude/Cursor/Windsurf: 終了コード2でブロックを表現する。
     pub fn error_exit_code(&self) -> i32 {
-        2 // Decision::Blockの終了コードと同じ
+        match self.format {
+            Format::Codex | Format::Gemini => 0,
+            _ => 2,
+        }
     }
 
     // === Claude Code フォーマット ===

@@ -436,9 +436,19 @@ claw-hooks hook --config /path/to/config.toml
 ```json
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -450,8 +460,6 @@ claw-hooks hook --config /path/to/config.toml
   }
 }
 ```
-
-> **注意**: Codex CLIのフック対応は実験的です。現在は`Stop`イベントのみ動作確認済みです。
 
 ## 設定
 
@@ -860,6 +868,19 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 `hook_event_name`フィールドを使用（Claude Code互換構造）:
 
 ```jsonc
+// PreToolUseイベント
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_use_id": "...",
+  "tool_input": { "command": "rm -rf /tmp/test" }
+}
+```
+
+```jsonc
 // Stopイベント
 {
   "hook_event_name": "Stop",
@@ -874,7 +895,11 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 ```
 
 | hook_event_name | 内部マッピング |
-|-----------------|----------------|
+|-----------------|------------------|
+| `SessionStart` | SessionStart（パススルー） |
+| `UserPromptSubmit` | UserPromptSubmit（パススルー） |
+| `PreToolUse` | BeforeCommand |
+| `PostToolUse` | AfterFileEdit |
 | `Stop` | Stop |
 
 出力形式は、許可時に `approve`、ブロック時に `reason` 付き `block` を使用します:
@@ -882,8 +907,6 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 - ブロック: `{"decision":"block","reason":"..."}`
 
 Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
-
-> **注意**: Codex CLIのフック対応は実験的です。現在は`Stop`イベントのみ動作確認済みです。
 
 ### イベントマッピング
 
@@ -894,24 +917,28 @@ graph LR
         CU1[Cursor: beforeShellExecution]
         WS1[Windsurf: pre_run_command]
         GE1[Gemini: BeforeTool + run_shell_command]
+        CX1[Codex: PreToolUse + Bash]
     end
     CH1[🛡️ 検証・代替ツール提案]
     CC1 --> CH1
     CU1 --> CH1
     WS1 --> CH1
     GE1 --> CH1
+    CX1 --> CH1
 
     subgraph ファイル保存後
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
+        CX2[Codex: PostToolUse + Bash]
     end
     CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
+    CX2 --> CH2
 
     subgraph エージェント終了
         CC3[Claude: Stop]

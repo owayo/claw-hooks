@@ -117,9 +117,10 @@ cargo run -- version     # Show version
 - Use `--format gemini` when testing
 
 ### Codex CLI
-- Supports `Stop` event hooks (currently confirmed)
+- Supports all 5 hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
 - Use `--format codex` when testing
 - Block decisions must be returned via stdout JSON; non-zero exit codes are treated as hook failures
+- Official docs: https://developers.openai.com/codex/hooks
 
 ## README Update Rules
 

@@ -436,9 +436,19 @@ Add to `~/.codex/hooks.json` (user):
 ```json
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -450,8 +460,6 @@ Add to `~/.codex/hooks.json` (user):
   }
 }
 ```
-
-> **Note**: Codex CLI hooks support is experimental. Currently only the `Stop` event is confirmed.
 
 ## Configuration
 
@@ -860,6 +868,19 @@ Output format uses `allow`/`deny` instead of `approve`/`block`:
 Uses `hook_event_name` field (Claude Code-compatible structure):
 
 ```jsonc
+// PreToolUse event
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_use_id": "...",
+  "tool_input": { "command": "rm -rf /tmp/test" }
+}
+```
+
+```jsonc
 // Stop event
 {
   "hook_event_name": "Stop",
@@ -875,6 +896,10 @@ Uses `hook_event_name` field (Claude Code-compatible structure):
 
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
+| `SessionStart` | SessionStart (passthrough) |
+| `UserPromptSubmit` | UserPromptSubmit (passthrough) |
+| `PreToolUse` | BeforeCommand |
+| `PostToolUse` | AfterFileEdit |
 | `Stop` | Stop |
 
 Output format uses `approve`/`block` with a `reason` field for blocks:
@@ -882,8 +907,6 @@ Output format uses `approve`/`block` with a `reason` field for blocks:
 - Block: `{"decision":"block","reason":"..."}`
 
 Hooks should exit with status `0` for both allow and block decisions. A non-zero exit code is treated by Codex CLI as a hook failure, not as a block.
-
-> **Note**: Codex CLI hooks support is experimental. Only the `Stop` event is confirmed so far.
 
 ### Event Mapping Summary
 
@@ -894,24 +917,28 @@ graph LR
         CU1[Cursor: beforeShellExecution]
         WS1[Windsurf: pre_run_command]
         GE1[Gemini: BeforeTool + run_shell_command]
+        CX1[Codex: PreToolUse + Bash]
     end
     CH1[🛡️ Validate & suggest alternatives]
     CC1 --> CH1
     CU1 --> CH1
     WS1 --> CH1
     GE1 --> CH1
+    CX1 --> CH1
 
     subgraph After File Save
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
+        CX2[Codex: PostToolUse + Bash]
     end
     CH2[🔧 Run commands by extension]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
+    CX2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]

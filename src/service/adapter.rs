@@ -128,10 +128,10 @@ impl FormatAdapter {
                 .to_string()
             }
             Format::Codex => {
-                // Codex: Claude Code と同様のフォーマットをデフォルトとする
+                // Codex CLI は "reason" フィールドでブロック理由を受け取る
                 serde_json::json!({
                     "decision": "block",
-                    "message": error_message
+                    "reason": error_message
                 })
                 .to_string()
             }
@@ -163,6 +163,17 @@ impl FormatAdapter {
             "PreToolUse" => HookEvent::BeforeCommand,
             "PostToolUse" => HookEvent::AfterFileEdit,
             "Stop" => HookEvent::Stop,
+            "SessionStart" | "UserPromptSubmit" | "SessionEnd" | "Notification" => {
+                // これらのイベントは claw-hooks の処理対象外（パススルー）
+                return Ok(HookInput {
+                    event: HookEvent::SessionStart, // パススルー用
+                    tool_name: raw_event,
+                    tool_input: claude_input
+                        .tool_input
+                        .unwrap_or(crate::domain::ToolInput::Other(serde_json::json!({}))),
+                    session_id: claude_input.session_id,
+                });
+            }
             "SubagentStart" => HookEvent::SubagentStart,
             "SubagentStop" => HookEvent::SubagentStop,
             other => return Err(anyhow!("Unknown Claude event: {}", other)),
@@ -1691,6 +1702,113 @@ mod tests {
         assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
     }
 
+    #[test]
+    fn test_codex_input_parsing_session_start() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "abc-123",
+            "source": "startup",
+            "cwd": "/tmp",
+            "model": "gpt-5.4"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SessionStart);
+        assert_eq!(result.tool_name, "SessionStart");
+        assert_eq!(result.session_id, Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_codex_input_parsing_user_prompt_submit() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "abc-123",
+            "turn_id": "turn-1",
+            "prompt": "fix the bug"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::UserPromptSubmit);
+        assert_eq!(result.tool_name, "UserPromptSubmit");
+    }
+
+    #[test]
+    fn test_codex_input_parsing_pre_tool_use() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /tmp"},
+            "session_id": "abc-123"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_input_parsing_post_tool_use() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls -la"},
+            "tool_response": "file1.txt\nfile2.txt"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_error_output_uses_reason() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let error_output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&error_output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
+        // "message" フィールドは存在しないこと
+        assert!(parsed.get("message").is_none());
+    }
+
+    #[test]
+    fn test_codex_error_exit_code_is_zero() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    // === Claude Code SessionStart/UserPromptSubmit パススルーテスト ===
+
+    #[test]
+    fn test_claude_session_start_passthrough() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "sess-123"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SessionStart);
+        assert_eq!(result.tool_name, "SessionStart");
+    }
+
+    #[test]
+    fn test_claude_user_prompt_submit_passthrough() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "sess-123"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SessionStart);
+        assert_eq!(result.tool_name, "UserPromptSubmit");
+    }
+
     // === エラーハンドリングのテスト ===
 
     #[test]
@@ -2000,13 +2118,11 @@ impl FormatAdapter {
     }
 
     // === Codex CLI フォーマット ===
+    // 公式ドキュメント: https://developers.openai.com/codex/hooks
 
     fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
-        // Codex CLI のJSON構造はまだ未公開のため、まずは生のJSONをログに出力し、
-        // Claude Code互換のフィールドがあればパースを試みる。
-        // フォールバックとして serde_json::Value でパースして柔軟に対応する。
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Codex input: {}", e))?;
 
@@ -2022,6 +2138,8 @@ impl FormatAdapter {
 
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
+            "SessionStart" | "session_start" => HookEvent::SessionStart,
+            "UserPromptSubmit" | "user_prompt_submit" => HookEvent::UserPromptSubmit,
             "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
             "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
             other => {
@@ -2029,6 +2147,32 @@ impl FormatAdapter {
                 HookEvent::Stop
             }
         };
+
+        // SessionStart: パススルーイベント
+        if event == HookEvent::SessionStart {
+            return Ok(HookInput {
+                event,
+                tool_name: "SessionStart".to_string(),
+                tool_input: crate::domain::ToolInput::Other(raw.clone()),
+                session_id: raw
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+
+        // UserPromptSubmit: パススルーイベント
+        if event == HookEvent::UserPromptSubmit {
+            return Ok(HookInput {
+                event,
+                tool_name: "UserPromptSubmit".to_string(),
+                tool_input: crate::domain::ToolInput::Other(raw.clone()),
+                session_id: raw
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
 
         if event == HookEvent::Stop {
             let agent_message = raw

@@ -147,6 +147,8 @@ impl HookService {
             HookEvent::BeforeCommand => self.handle_before_command(input),
             HookEvent::AfterFileEdit => self.handle_after_file_edit(input),
             HookEvent::Stop => self.handle_stop(input),
+            HookEvent::SessionStart => self.handle_session_start(input),
+            HookEvent::UserPromptSubmit => self.handle_user_prompt_submit(input),
             HookEvent::BeforePrompt => self.handle_before_prompt(input),
             HookEvent::SubagentStart | HookEvent::SubagentStop => self.handle_subagent(input),
         }
@@ -188,6 +190,22 @@ impl HookService {
 
         // フィルターチェーン経由で Stop フックを実行
         self.filter_chain.execute(input)
+    }
+
+    /// SessionStart イベントの処理（Codex CLI / Claude Code）。
+    fn handle_session_start(&self, _input: &HookInput) -> Decision {
+        debug!("Handling SessionStart event");
+
+        // SessionStart は現在パススルーイベント
+        Decision::allow()
+    }
+
+    /// UserPromptSubmit イベントの処理（Codex CLI / Claude Code）。
+    fn handle_user_prompt_submit(&self, _input: &HookInput) -> Decision {
+        debug!("Handling UserPromptSubmit event");
+
+        // UserPromptSubmit は現在パススルーイベント
+        Decision::allow()
     }
 
     /// BeforePrompt イベントの処理（Gemini CLI のみ）。
@@ -305,6 +323,32 @@ mod tests {
             event: HookEvent::BeforePrompt,
             tool_name: "BeforePrompt".to_string(),
             tool_input: ToolInput::Other(serde_json::json!({})),
+            session_id: None,
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_session_start_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::SessionStart,
+            tool_name: "SessionStart".to_string(),
+            tool_input: ToolInput::Other(serde_json::json!({"source": "startup"})),
+            session_id: Some("session-abc".to_string()),
+        };
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_process_user_prompt_submit_allows() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::UserPromptSubmit,
+            tool_name: "UserPromptSubmit".to_string(),
+            tool_input: ToolInput::Other(serde_json::json!({"prompt": "hello"})),
             session_id: None,
         };
         let decision = service.process(&input);

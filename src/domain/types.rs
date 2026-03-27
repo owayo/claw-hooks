@@ -16,6 +16,7 @@ pub enum HookEvent {
     /// - Cursor: `ShellExecution`
     /// - Windsurf: `pre_run_command`
     /// - Gemini CLI: `BeforeTool`
+    /// - Codex CLI: `PreToolUse`
     BeforeCommand,
 
     /// ファイル編集後（拡張フックの対象）。
@@ -25,6 +26,7 @@ pub enum HookEvent {
     /// - Cursor: `FileEdit`
     /// - Windsurf: `post_write_code`
     /// - Gemini CLI: `AfterTool`
+    /// - Codex CLI: `PostToolUse`
     AfterFileEdit,
 
     /// エージェントループ停止。
@@ -34,7 +36,22 @@ pub enum HookEvent {
     /// - Cursor: `Stop`
     /// - Windsurf: `post_cascade_response`
     /// - Gemini CLI: `AfterAgent`
+    /// - Codex CLI: `Stop`
     Stop,
+
+    /// セッション開始（パススルーイベント）。
+    ///
+    /// 外部イベント名:
+    /// - Codex CLI: `SessionStart`
+    /// - Claude Code: `SessionStart`（パススルー）
+    SessionStart,
+
+    /// ユーザープロンプト送信（パススルーイベント）。
+    ///
+    /// 外部イベント名:
+    /// - Codex CLI: `UserPromptSubmit`
+    /// - Claude Code: `UserPromptSubmit`（パススルー）
+    UserPromptSubmit,
 
     /// ユーザープロンプト送信前（Gemini CLI のみ）。
     ///
@@ -318,6 +335,8 @@ mod tests {
         assert_eq!(HookEvent::BeforeCommand, HookEvent::BeforeCommand);
         assert_eq!(HookEvent::AfterFileEdit, HookEvent::AfterFileEdit);
         assert_eq!(HookEvent::Stop, HookEvent::Stop);
+        assert_eq!(HookEvent::SessionStart, HookEvent::SessionStart);
+        assert_eq!(HookEvent::UserPromptSubmit, HookEvent::UserPromptSubmit);
         assert_eq!(HookEvent::BeforePrompt, HookEvent::BeforePrompt);
         assert_eq!(HookEvent::SubagentStart, HookEvent::SubagentStart);
         assert_eq!(HookEvent::SubagentStop, HookEvent::SubagentStop);
@@ -325,6 +344,7 @@ mod tests {
         assert_ne!(HookEvent::BeforeCommand, HookEvent::AfterFileEdit);
         assert_ne!(HookEvent::BeforeCommand, HookEvent::Stop);
         assert_ne!(HookEvent::BeforeCommand, HookEvent::BeforePrompt);
+        assert_ne!(HookEvent::SessionStart, HookEvent::UserPromptSubmit);
         assert_ne!(HookEvent::SubagentStart, HookEvent::SubagentStop);
     }
 
@@ -351,6 +371,11 @@ mod tests {
         assert_eq!(format!("{:?}", HookEvent::BeforeCommand), "BeforeCommand");
         assert_eq!(format!("{:?}", HookEvent::AfterFileEdit), "AfterFileEdit");
         assert_eq!(format!("{:?}", HookEvent::Stop), "Stop");
+        assert_eq!(format!("{:?}", HookEvent::SessionStart), "SessionStart");
+        assert_eq!(
+            format!("{:?}", HookEvent::UserPromptSubmit),
+            "UserPromptSubmit"
+        );
         assert_eq!(format!("{:?}", HookEvent::BeforePrompt), "BeforePrompt");
         assert_eq!(format!("{:?}", HookEvent::SubagentStart), "SubagentStart");
         assert_eq!(format!("{:?}", HookEvent::SubagentStop), "SubagentStop");

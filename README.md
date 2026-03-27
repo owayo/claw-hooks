@@ -896,8 +896,6 @@ Uses `hook_event_name` field (Claude Code-compatible structure):
 
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
-| `SessionStart` | SessionStart (passthrough) |
-| `UserPromptSubmit` | UserPromptSubmit (passthrough) |
 | `PreToolUse` | BeforeCommand |
 | `PostToolUse` | AfterFileEdit |
 | `Stop` | Stop |

@@ -166,7 +166,7 @@ impl FormatAdapter {
             "SessionStart" | "UserPromptSubmit" | "SessionEnd" | "Notification" => {
                 // これらのイベントは claw-hooks の処理対象外（パススルー）
                 return Ok(HookInput {
-                    event: HookEvent::SessionStart, // パススルー用
+                    event: HookEvent::BeforePrompt, // パススルー用
                     tool_name: raw_event,
                     tool_input: claude_input
                         .tool_input
@@ -1703,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_input_parsing_session_start() {
+    fn test_codex_input_parsing_session_start_passthrough() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{
             "hook_event_name": "SessionStart",
@@ -1714,13 +1714,13 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::SessionStart);
+        // SessionStart は処理対象外 → BeforePrompt（パススルー）にマッピング
+        assert_eq!(result.event, HookEvent::BeforePrompt);
         assert_eq!(result.tool_name, "SessionStart");
-        assert_eq!(result.session_id, Some("abc-123".to_string()));
     }
 
     #[test]
-    fn test_codex_input_parsing_user_prompt_submit() {
+    fn test_codex_input_parsing_user_prompt_submit_passthrough() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{
             "hook_event_name": "UserPromptSubmit",
@@ -1730,8 +1730,22 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::UserPromptSubmit);
+        // UserPromptSubmit は処理対象外 → BeforePrompt（パススルー）にマッピング
+        assert_eq!(result.event, HookEvent::BeforePrompt);
         assert_eq!(result.tool_name, "UserPromptSubmit");
+    }
+
+    #[test]
+    fn test_codex_unknown_event_passthrough() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "SomeNewEvent",
+            "session_id": "abc-123"
+        }"#;
+
+        // 未知イベントは Stop にフォールバックせず、パススルーになること
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
     }
 
     #[test]
@@ -1781,7 +1795,7 @@ mod tests {
         assert_eq!(adapter.error_exit_code(), 0);
     }
 
-    // === Claude Code SessionStart/UserPromptSubmit パススルーテスト ===
+    // === Claude Code パススルーイベントテスト ===
 
     #[test]
     fn test_claude_session_start_passthrough() {
@@ -1792,7 +1806,7 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::SessionStart);
+        assert_eq!(result.event, HookEvent::BeforePrompt);
         assert_eq!(result.tool_name, "SessionStart");
     }
 
@@ -1805,7 +1819,7 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::SessionStart);
+        assert_eq!(result.event, HookEvent::BeforePrompt);
         assert_eq!(result.tool_name, "UserPromptSubmit");
     }
 
@@ -2138,41 +2152,27 @@ impl FormatAdapter {
 
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
-            "SessionStart" | "session_start" => HookEvent::SessionStart,
-            "UserPromptSubmit" | "user_prompt_submit" => HookEvent::UserPromptSubmit,
             "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
             "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
+            // claw-hooks の処理対象外イベント: パススルーで Allow を返す
+            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt, // パススルー用
+                    tool_name: raw_event,
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id: None,
+                });
+            }
             other => {
-                debug!(event = %other, "{} unknown event, treating as Stop", self.log_prefix());
-                HookEvent::Stop
+                debug!(event = %other, "{} unknown event, treating as passthrough", self.log_prefix());
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt, // パススルー用
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id: None,
+                });
             }
         };
-
-        // SessionStart: パススルーイベント
-        if event == HookEvent::SessionStart {
-            return Ok(HookInput {
-                event,
-                tool_name: "SessionStart".to_string(),
-                tool_input: crate::domain::ToolInput::Other(raw.clone()),
-                session_id: raw
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            });
-        }
-
-        // UserPromptSubmit: パススルーイベント
-        if event == HookEvent::UserPromptSubmit {
-            return Ok(HookInput {
-                event,
-                tool_name: "UserPromptSubmit".to_string(),
-                tool_input: crate::domain::ToolInput::Other(raw.clone()),
-                session_id: raw
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            });
-        }
 
         if event == HookEvent::Stop {
             let agent_message = raw

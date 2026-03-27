@@ -896,8 +896,6 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
-| `SessionStart` | SessionStart（パススルー） |
-| `UserPromptSubmit` | UserPromptSubmit（パススルー） |
 | `PreToolUse` | BeforeCommand |
 | `PostToolUse` | AfterFileEdit |
 | `Stop` | Stop |

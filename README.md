@@ -865,7 +865,7 @@ Output format uses `allow`/`deny` instead of `approve`/`block`:
 
 ### Codex CLI (`--format codex`)
 
-Uses `hook_event_name` field (Claude Code-compatible structure):
+Uses `hook_event_name` field:
 
 ```jsonc
 // PreToolUse event
@@ -877,6 +877,20 @@ Uses `hook_event_name` field (Claude Code-compatible structure):
   "tool_name": "Bash",
   "tool_use_id": "...",
   "tool_input": { "command": "rm -rf /tmp/test" }
+}
+```
+
+```jsonc
+// PostToolUse event (current Codex runtime emits Bash only)
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_use_id": "...",
+  "tool_input": { "command": "cargo test" },
+  "tool_response": "..."
 }
 ```
 
@@ -896,9 +910,13 @@ Uses `hook_event_name` field (Claude Code-compatible structure):
 
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
+| `SessionStart` | BeforePrompt (pass-through) |
+| `UserPromptSubmit` | BeforePrompt (pass-through) |
 | `PreToolUse` | BeforeCommand |
-| `PostToolUse` | AfterFileEdit |
+| `PostToolUse` | AfterFileEdit (pass-through for Bash output) |
 | `Stop` | Stop |
+
+Current Codex hooks match `PreToolUse` and `PostToolUse` on `Bash` only. `claw-hooks` keeps `PostToolUse` compatible, but extension hooks still run only for file-write events such as Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, and Gemini `write_file`.
 
 Output format uses `approve`/`block` with a `reason` field for blocks:
 - Allow: `{"decision":"approve"}`
@@ -929,14 +947,12 @@ graph LR
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
-        CX2[Codex: PostToolUse + Bash]
     end
     CH2[🔧 Run commands by extension]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
-    CX2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]
@@ -952,6 +968,8 @@ graph LR
     GE3 --> CH3
     CX3 --> CH3
 ```
+
+Codex `PostToolUse` is omitted from the "After File Save" flow because the current runtime emits Bash output only, not file-write payloads.
 
 ## Input/Output Reference
 

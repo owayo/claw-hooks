@@ -7,7 +7,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.3.105
+- **Version**: 26.3.107
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
@@ -120,6 +120,8 @@ cargo run -- version     # Show version
 - Supports all 5 hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
 - Use `--format codex` when testing
 - Block decisions must be returned via stdout JSON; non-zero exit codes are treated as hook failures
+- Missing required Codex fields must be treated as fail-closed parse errors
+- Current Codex `PreToolUse` / `PostToolUse` hooks match `Bash` only, so do not document `PostToolUse` as a file-save hook
 - Official docs: https://developers.openai.com/codex/hooks
 
 ## README Update Rules

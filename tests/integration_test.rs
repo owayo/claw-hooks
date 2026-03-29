@@ -1,14 +1,14 @@
-//! Integration tests for claw-hooks CLI.
+//! claw-hooks CLI の統合テスト。
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Helper to run claw-hooks with JSON input and return (stdout, stderr, exit_code).
+/// JSON入力で claw-hooks を実行し、`(stdout, stderr, exit_code)` を返す。
 fn run_hook(json_input: &str) -> (String, String, i32) {
     run_hook_with_format(json_input, "claude")
 }
 
-/// Helper to run claw-hooks with JSON input and specific format.
+/// JSON入力で指定フォーマットの claw-hooks を実行する。
 fn run_hook_with_format(json_input: &str, format: &str) -> (String, String, i32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
         .arg("run")
@@ -936,6 +936,48 @@ fn test_codex_empty_input_is_fail_closed() {
     assert!(
         stdout.contains("fail-closed"),
         "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_missing_hook_event_name_is_fail_closed() {
+    let input = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex missing hook_event_name should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("Missing hook_event_name field"),
+        "Output should mention the missing required field: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_missing_tool_input_is_fail_closed() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex missing tool_input should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("Missing tool_input field"),
+        "Output should mention the missing required field: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should indicate block: {}",
         stdout
     );
 }

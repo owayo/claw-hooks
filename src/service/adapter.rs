@@ -1779,6 +1779,51 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_parse_missing_hook_event_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"}
+        }"#;
+
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_codex_parse_missing_tool_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_input": {"command": "ls"}
+        }"#;
+
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_codex_parse_missing_tool_input_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash"
+        }"#;
+
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
+    fn test_codex_parse_missing_tool_input_command_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {}
+        }"#;
+
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
     fn test_codex_error_output_uses_reason() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let error_output = adapter.format_error("test error");
@@ -2142,13 +2187,19 @@ impl FormatAdapter {
 
         debug!(parsed = %raw, "{} parsed JSON", self.log_prefix());
 
-        // イベント名の検出: "hook_event_name" または "event" フィールドを探す
+        // イベント名は必須。互換性のため "event" エイリアスも受け付ける。
         let raw_event = raw
             .get("hook_event_name")
             .or_else(|| raw.get("event"))
             .and_then(|v| v.as_str())
-            .unwrap_or("Stop")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
             .to_string();
+
+        let session_id = raw
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
@@ -2160,7 +2211,7 @@ impl FormatAdapter {
                     event: HookEvent::BeforePrompt, // パススルー用
                     tool_name: raw_event,
                     tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id: None,
+                    session_id,
                 });
             }
             other => {
@@ -2169,7 +2220,7 @@ impl FormatAdapter {
                     event: HookEvent::BeforePrompt, // パススルー用
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id: None,
+                    session_id,
                 });
             }
         };
@@ -2198,45 +2249,53 @@ impl FormatAdapter {
                     agent_message,
                     stop_hook_active,
                 }),
-                session_id: raw
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                session_id,
             });
         }
 
         // ツールイベント
-        let tool_name = raw
+        let raw_tool_name = raw
             .get("tool_name")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing tool_name field"))?
             .to_string();
 
-        let tool_input: crate::domain::ToolInput = if let Some(ti) = raw.get("tool_input") {
-            serde_json::from_value(ti.clone())
-                .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
-        } else {
-            // tool_input がなければコマンドフィールドを探す
-            let command = raw.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                command: command.to_string(),
-                timeout: None,
-            })
-        };
-
         // Codex のツール名を内部のツール名にマッピング
-        let mapped_tool_name = match tool_name.as_str() {
+        let mapped_tool_name = match raw_tool_name.as_str() {
             "shell" | "run_command" | "execute" => "Bash".to_string(),
             "write_file" | "create_file" | "edit_file" | "apply_patch" => "Write".to_string(),
             "read_file" => "Read".to_string(),
             other => other.to_string(),
         };
 
+        let raw_tool_input = raw
+            .get("tool_input")
+            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+        let tool_input = match mapped_tool_name.as_str() {
+            "Bash" => {
+                let command = raw_tool_input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
+                crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                    command: command.to_string(),
+                    timeout: None,
+                })
+            }
+            "Write" | "Edit" | "MultiEdit" | "Read" => {
+                serde_json::from_value(raw_tool_input.clone())
+                    .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
+            }
+            _ => crate::domain::ToolInput::Other(raw_tool_input.clone()),
+        };
+
         debug!(
             agent = self.format.label(),
             raw_event = %raw_event,
             mapped_event = ?event,
-            raw_tool_name = %tool_name,
+            raw_tool_name = %raw_tool_name,
             mapped_tool = %mapped_tool_name,
             "{} parsed input", self.log_prefix()
         );
@@ -2245,10 +2304,7 @@ impl FormatAdapter {
             event,
             tool_name: mapped_tool_name,
             tool_input,
-            session_id: raw
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            session_id,
         })
     }
 

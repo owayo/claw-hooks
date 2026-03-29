@@ -865,7 +865,7 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 
 ### Codex CLI (`--format codex`)
 
-`hook_event_name`フィールドを使用（Claude Code互換構造）:
+`hook_event_name` フィールドを使用:
 
 ```jsonc
 // PreToolUseイベント
@@ -877,6 +877,20 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
   "tool_name": "Bash",
   "tool_use_id": "...",
   "tool_input": { "command": "rm -rf /tmp/test" }
+}
+```
+
+```jsonc
+// PostToolUseイベント（現行の Codex ランタイムは Bash のみを返す）
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_use_id": "...",
+  "tool_input": { "command": "cargo test" },
+  "tool_response": "..."
 }
 ```
 
@@ -896,9 +910,13 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
+| `SessionStart` | BeforePrompt（パススルー） |
+| `UserPromptSubmit` | BeforePrompt（パススルー） |
 | `PreToolUse` | BeforeCommand |
-| `PostToolUse` | AfterFileEdit |
+| `PostToolUse` | AfterFileEdit（Bash 出力のパススルー） |
 | `Stop` | Stop |
+
+現行の Codex Hooks は `PreToolUse` / `PostToolUse` ともに `Bash` のみを対象にします。`claw-hooks` は互換性のため `PostToolUse` を受け付けますが、拡張子フックを実行するのは Claude の `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `write_file` のようなファイル書き込みイベントだけです。
 
 出力形式は、許可時に `approve`、ブロック時に `reason` 付き `block` を使用します:
 - 許可: `{"decision":"approve"}`
@@ -929,14 +947,12 @@ graph LR
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
-        CX2[Codex: PostToolUse + Bash]
     end
     CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
-    CX2 --> CH2
 
     subgraph エージェント終了
         CC3[Claude: Stop]
@@ -952,6 +968,8 @@ graph LR
     GE3 --> CH3
     CX3 --> CH3
 ```
+
+Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル保存後」フローには含めていません。
 
 ## 入出力リファレンス
 

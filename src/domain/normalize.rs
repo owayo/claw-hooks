@@ -36,32 +36,40 @@ pub fn truncate_output(output: &str, max_length: usize) -> String {
 /// テキストからANSIエスケープコード（色、スタイル、カーソル制御、OSCハイパーリンク等）を除去する。
 pub fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars();
+    let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            match chars.next() {
+            match chars.peek() {
                 Some('[') => {
+                    chars.next(); // '[' を消費
                     // CSIシーケンス: ESC [ ... 終端バイト (0x40-0x7e)
-                    for c in chars.by_ref() {
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
                         if ('\x40'..='\x7e').contains(&c) {
                             break;
                         }
                     }
                 }
                 Some(']') => {
+                    chars.next(); // ']' を消費
                     // OSCシーケンス: ESC ] ... (BEL または ESC \ で終端)
                     // 例: ハイパーリンク \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
                     while let Some(c) = chars.next() {
                         if c == '\x07' {
                             break;
                         }
-                        if c == '\x1b' && chars.next() == Some('\\') {
+                        if c == '\x1b' {
+                            // STターミネータ (ESC \) の場合は '\' を消費
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            // ESC \ 以外でもOSCシーケンスを終了
                             break;
                         }
                     }
                 }
                 Some(_) => {
-                    // その他のエスケープシーケンス（SS2/SS3等）: ESCのみ除去
+                    chars.next(); // ESC後の1文字を消費 (SS2/SS3等)
                 }
                 None => {}
             }

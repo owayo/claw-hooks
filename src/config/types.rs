@@ -1009,4 +1009,67 @@ mod tests {
         let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
         assert!(wrapper.stop_hooks[0].should_report());
     }
+
+    // === command_in_path 追加テスト ===
+
+    #[test]
+    fn test_command_in_path_empty_string() {
+        assert!(!HookCondition::command_in_path(""));
+    }
+
+    #[test]
+    fn test_command_in_path_absolute_path_existing() {
+        // /bin/sh は Unix システムに存在するはず
+        assert!(HookCondition::command_in_path("/bin/sh"));
+    }
+
+    #[test]
+    fn test_command_in_path_absolute_path_nonexistent() {
+        assert!(!HookCondition::command_in_path(
+            "/nonexistent/path/to/command"
+        ));
+    }
+
+    #[test]
+    fn test_command_in_path_relative_path_with_slash() {
+        // "./nonexistent" はコンポーネント数 > 1 で直接ファイル存在チェック
+        assert!(!HookCondition::command_in_path("./nonexistent-cmd"));
+    }
+
+    #[test]
+    fn test_command_in_path_known_command() {
+        // "echo" は PATH に存在するはず（ビルトインだが通常 /bin/echo もある）
+        // 代わりに "sh" を使う（確実に存在）
+        assert!(HookCondition::command_in_path("sh"));
+    }
+
+    #[test]
+    fn test_command_in_path_spaces_only() {
+        // スペースのみの文字列はコマンドとして無効
+        assert!(!HookCondition::command_in_path("   "));
+    }
+
+    // === HookCondition AND ロジックの境界テスト ===
+
+    #[test]
+    fn test_hook_condition_both_none_is_satisfied() {
+        let condition = HookCondition {
+            file_exists: None,
+            command_exists: None,
+        };
+        // 任意のパスで条件を満たす
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(condition.is_satisfied(cwd));
+    }
+
+    #[test]
+    fn test_hook_condition_file_exists_with_subdirectory() {
+        // サブディレクトリ内のファイルを確認
+        let condition = HookCondition {
+            file_exists: Some("src/main.rs".to_string()),
+            command_exists: None,
+        };
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(condition.is_satisfied(cwd));
+    }
 }

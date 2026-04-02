@@ -846,4 +846,105 @@ mod tests {
         let cmds = filter.get_matching_commands(".gitignore");
         assert!(cmds.is_none());
     }
+
+    // === パストラバーサル検証の追加テスト ===
+
+    #[test]
+    fn test_validate_file_path_complex_traversal() {
+        // 複雑なパストラバーサルパターンを正しく検出する
+        assert!(ExtensionHookFilter::validate_file_path("/a/b/../../etc/passwd").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("./../../secret").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("src/../../../etc/hosts").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_dot_dot_in_filename_is_ok() {
+        // ".." がディレクトリコンポーネントではなくファイル名の一部の場合は許可
+        // Path::components() は "..test" を Normal("..test") として扱う
+        assert!(ExtensionHookFilter::validate_file_path("..test.go").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_path_null_byte() {
+        assert!(ExtensionHookFilter::validate_file_path("file\0.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_pipe() {
+        assert!(ExtensionHookFilter::validate_file_path("file|cat.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_ampersand() {
+        assert!(ExtensionHookFilter::validate_file_path("file&rm.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_semicolon() {
+        assert!(ExtensionHookFilter::validate_file_path("file;rm.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_backtick() {
+        assert!(ExtensionHookFilter::validate_file_path("file`id`.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_dollar_sign() {
+        assert!(ExtensionHookFilter::validate_file_path("file$(id).go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_newline() {
+        assert!(ExtensionHookFilter::validate_file_path("file\n.go").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_valid_paths() {
+        // 正常なパスが許可されること
+        assert!(ExtensionHookFilter::validate_file_path("/src/main.go").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("src/main.go").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("file with spaces.go").is_ok());
+        assert!(ExtensionHookFilter::validate_file_path("/Users/dev/project/日本語.go").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_path_dash_prefix() {
+        // '-' で始まるパスはフラグと解釈される可能性があるため拒否
+        assert!(ExtensionHookFilter::validate_file_path("-file.go").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("--help.go").is_err());
+    }
+
+    // === parse_command_template 追加テスト ===
+
+    #[test]
+    fn test_parse_command_template_file_as_executable() {
+        // {file} がプログラム名として使用された場合はエラー
+        let result = ExtensionHookFilter::parse_command_template("{file}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_command_template_empty() {
+        let result = ExtensionHookFilter::parse_command_template("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_command_template_inline_config_placeholder() {
+        // --config={file} のようなインラインプレースホルダー
+        let result = ExtensionHookFilter::parse_command_template("tool --config={file}");
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.program, "tool");
+        assert!(parsed.inline_template.is_some());
+        assert_eq!(parsed.inline_template.as_deref(), Some("--config={file}"));
+    }
+
+    #[test]
+    fn test_parse_command_template_no_placeholder_is_error() {
+        // {file} が含まれないテンプレートはエラー
+        let result = ExtensionHookFilter::parse_command_template("echo hello");
+        assert!(result.is_err());
+    }
 }

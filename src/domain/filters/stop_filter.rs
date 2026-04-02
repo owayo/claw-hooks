@@ -1491,4 +1491,106 @@ mod tests {
             _ => panic!("Expected Block decision"),
         }
     }
+
+    // === クロスプロセスループ防止テスト ===
+
+    #[test]
+    fn test_cross_process_loop_prevention_env_var() {
+        // CLAW_HOOKS_STOP_ACTIVE=1 が設定されている場合、すべてのフックがスキップされる
+        // SAFETY: このテストはシングルスレッドで実行され、環境変数は直後に復元される
+        unsafe {
+            std::env::set_var(STOP_ACTIVE_ENV, "1");
+        }
+
+        let hooks = vec![StopHook {
+            commands: vec!["sh -c 'echo should-not-run >&2; exit 1'".to_string()],
+            condition: Some(crate::config::HookCondition {
+                command_exists: None,
+                file_exists: Some("Cargo.toml".to_string()),
+            }),
+            stage: None,
+            report: Some(true),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 60);
+        let decision = filter.execute(&make_stop_input());
+
+        // SAFETY: 環境変数の復元
+        unsafe {
+            std::env::remove_var(STOP_ACTIVE_ENV);
+        }
+
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "環境変数によりフックがスキップされ Allow を返すべき, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_stop_active_env_propagated_to_child() {
+        // execute_command_tracked が子プロセスに CLAW_HOOKS_STOP_ACTIVE=1 を設定することを検証
+        let result = StopHookFilter::execute_command(
+            &format!("sh -c 'echo ${}' ", STOP_ACTIVE_ENV),
+            60,
+            None,
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.trim() == "1",
+            "子プロセスに CLAW_HOOKS_STOP_ACTIVE=1 が設定されるべき, got: {}",
+            stdout.trim()
+        );
+    }
+
+    #[test]
+    fn test_build_reason_stdout_only() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256), // exit code 1
+            stdout: b"lint error found".to_vec(),
+            stderr: Vec::new(),
+        };
+        let reason = StopHookFilter::build_reason("cargo clippy", &output);
+        assert!(reason.contains("lint error found"));
+        assert!(reason.contains("cargo clippy"));
+    }
+
+    #[test]
+    fn test_build_reason_stderr_only() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: b"compile error".to_vec(),
+        };
+        let reason = StopHookFilter::build_reason("cargo build", &output);
+        assert!(reason.contains("compile error"));
+    }
+
+    #[test]
+    fn test_build_reason_both_stdout_and_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: b"stdout content".to_vec(),
+            stderr: b"stderr content".to_vec(),
+        };
+        let reason = StopHookFilter::build_reason("cmd", &output);
+        assert!(reason.contains("stdout content"));
+        assert!(reason.contains("stderr content"));
+    }
+
+    #[test]
+    fn test_build_reason_empty_output() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let reason = StopHookFilter::build_reason("cmd", &output);
+        assert!(reason.contains("Stop hook failed: cmd"));
+    }
 }

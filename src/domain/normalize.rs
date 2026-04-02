@@ -695,4 +695,99 @@ mod tests {
         assert!(!result.starts_with('\n'));
         assert_eq!(result, "error: something failed\nat line 42");
     }
+
+    // === common_directory_prefix マルチバイトパステスト ===
+
+    #[test]
+    fn test_common_directory_prefix_multibyte_directory() {
+        // マルチバイト文字を含むディレクトリパスでも正しく動作する
+        let paths = vec![
+            "/Users/田中/project/src/main.rs",
+            "/Users/田中/project/tests/test.rs",
+        ];
+        assert_eq!(common_directory_prefix(&paths), "/Users/田中/project/");
+    }
+
+    #[test]
+    fn test_common_directory_prefix_multibyte_diverge_at_dir() {
+        // マルチバイト文字のディレクトリ名が異なる場合
+        let paths = vec!["/home/太郎/code/file.rs", "/home/花子/code/file.rs"];
+        assert_eq!(common_directory_prefix(&paths), "/home/");
+    }
+
+    #[test]
+    fn test_common_directory_prefix_emoji_directory() {
+        // 絵文字を含むディレクトリ名
+        let paths = vec!["/data/🎉project/src/a.rs", "/data/🎉project/src/b.rs"];
+        assert_eq!(common_directory_prefix(&paths), "/data/🎉project/src/");
+    }
+
+    // === extract_absolute_paths 追加テスト ===
+
+    #[test]
+    fn test_extract_absolute_paths_multiple() {
+        let text = "/usr/src/main.rs:10 and /usr/src/lib.rs:20";
+        let paths = extract_absolute_paths(text);
+        assert_eq!(paths, vec!["/usr/src/main.rs", "/usr/src/lib.rs"]);
+    }
+
+    #[test]
+    fn test_extract_absolute_paths_no_deep_path() {
+        // スラッシュ1つだけのパスは除外
+        let text = "/tmp:10";
+        let paths = extract_absolute_paths(text);
+        assert!(paths.is_empty());
+    }
+
+    // === strip_ansi_codes CSI境界テスト ===
+
+    #[test]
+    fn test_strip_ansi_codes_csi_unterminated() {
+        // CSIシーケンスが終端なしで入力が終わる場合
+        let input = "text\x1b[31";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_csi_empty_sequence() {
+        // CSI直後に終端文字が来る場合（ESC [ @）
+        let input = "text\x1b[@more";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "textmore");
+    }
+
+    // === normalize_lint_output E2E テスト ===
+
+    #[test]
+    fn test_normalize_complex_rust_output() {
+        // Rust コンパイラ出力に似た複雑な入力
+        let input = "\x1b[1;31merror[E0308]\x1b[0m: mismatched types\n  \x1b[1;34m-->\x1b[0m /Users/dev/project/src/main.rs:10:5\n   |\n10 |     let x: u32 = \"hello\";\n   |                  ^^^^^^^ expected `u32`, found `&str`";
+        let result = normalize_lint_output(input);
+        // ANSI除去されること
+        assert!(!result.contains("\x1b["));
+        // エラー情報が保持されること
+        assert!(result.contains("error[E0308]"));
+        assert!(result.contains("mismatched types"));
+    }
+
+    #[test]
+    fn test_normalize_whitespace_only_lines() {
+        // スペースのみの行は空行として扱われる
+        let input = "line1\n   \n   \nline2";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "line1\n\nline2");
+    }
+
+    // === truncate_output サフィックス境界テスト ===
+
+    #[test]
+    fn test_truncate_output_suffix_exactly_fits() {
+        // max_length がサフィックス文字数+1のとき、1文字+サフィックスで出力される
+        let suffix = "\n... (truncated)"; // 16文字
+        let input = "abcdefghijklmnopqrstuvwxyz"; // 26文字
+        let result = truncate_output(input, 17);
+        assert_eq!(result, format!("a{}", suffix));
+        assert_eq!(result.chars().count(), 17);
+    }
 }

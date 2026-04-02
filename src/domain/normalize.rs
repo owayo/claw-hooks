@@ -600,4 +600,99 @@ mod tests {
         let result = truncate_output(&input, 1000);
         assert_eq!(result, input);
     }
+
+    // === truncate_output 追加テスト ===
+
+    #[test]
+    fn test_truncate_output_ascii_within_limit() {
+        // 制限内のテキストはそのまま返される
+        let input = "hello world";
+        assert_eq!(truncate_output(input, 100), "hello world");
+    }
+
+    #[test]
+    fn test_truncate_output_ascii_exceeds_limit() {
+        // 制限超過時はサフィックス付きで切り詰められる
+        let input = "a".repeat(50);
+        let result = truncate_output(&input, 30);
+        // サフィックス "\n... (truncated)" は16文字 → 30 - 16 = 14文字保持
+        let expected = format!("{}\n... (truncated)", "a".repeat(14));
+        assert_eq!(result, expected);
+        assert_eq!(result.chars().count(), 30);
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte_chars() {
+        // 日本語テキストが文字境界で正しく切り詰められる
+        let input = "あいうえお"; // 5文字
+        let result = truncate_output(input, 3);
+        // max_length(3) <= suffix_chars(16) なのでサフィックスなし
+        assert_eq!(result, "あいう");
+    }
+
+    #[test]
+    fn test_truncate_output_emoji() {
+        // 絵文字を含むテキストが文字数ベースで正しく切り詰められる
+        let input = "hello 🎉🎊🎈"; // 9文字
+        let result = truncate_output(input, 8);
+        // max_length(8) <= suffix_chars(16) なのでサフィックスなし
+        assert_eq!(result, "hello 🎉🎊");
+        assert_eq!(result.chars().count(), 8);
+    }
+
+    #[test]
+    fn test_truncate_output_zero_limit() {
+        // max_length 0 は無制限を意味し、テキストはそのまま返される
+        let input = "some text";
+        assert_eq!(truncate_output(input, 0), "some text");
+    }
+
+    #[test]
+    fn test_truncate_output_empty_input_returns_empty() {
+        // 空文字列は空文字列を返す
+        assert_eq!(truncate_output("", 10), "");
+        assert_eq!(truncate_output("", 0), "");
+    }
+
+    // === strip_ansi_codes 追加テスト ===
+
+    #[test]
+    fn test_strip_ansi_codes_256_color() {
+        // 256色エスケープシーケンスの除去
+        let input = "\x1b[38;5;196mred\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "red");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_truecolor() {
+        // 24ビットTrueColorエスケープシーケンスの除去
+        let input = "\x1b[38;2;255;0;0mred\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "red");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_multiple_params() {
+        // 複数パラメータ（太字+赤+下線）のCSIシーケンス除去
+        let input = "\x1b[1;31;4mbold red underline\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "bold red underline");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_empty_params() {
+        // パラメータなしのCSIシーケンス（ESC [ m）も正しく除去される
+        let input = "\x1b[mtext";
+        assert_eq!(strip_ansi_codes(input), "text");
+    }
+
+    // === normalize_lint_output 追加テスト ===
+
+    #[test]
+    fn test_normalize_leading_blank_lines_removed() {
+        // 先頭の空行が除去されることを確認
+        let input = "\n\n\n  error: something failed\n  at line 42";
+        let result = normalize_lint_output(input);
+        // 先頭に空行が残らない
+        assert!(!result.starts_with('\n'));
+        assert_eq!(result, "error: something failed\nat line 42");
+    }
 }

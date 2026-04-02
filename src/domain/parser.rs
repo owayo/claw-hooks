@@ -1593,4 +1593,76 @@ mod tests {
         let tokens: Vec<String> = vec![];
         assert!(ShellParser::parse_effective_command(&tokens).is_none());
     }
+
+    // === parse_shell_tokens の追加テスト ===
+
+    #[test]
+    fn test_parse_shell_tokens_empty_input() {
+        // 空文字列は空のベクタを返す
+        let tokens = parse_shell_tokens("");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_whitespace_only_mixed() {
+        // スペースとタブのみの入力は空のベクタを返す
+        let tokens = parse_shell_tokens("  \t  ");
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_single_quotes() {
+        // シングルクォート内のスペースはトークンを分割しない
+        let tokens = parse_shell_tokens("echo 'hello world'");
+        assert_eq!(tokens, vec!["echo", "hello world"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_double_quotes() {
+        // ダブルクォート内のスペースはトークンを分割しない
+        let tokens = parse_shell_tokens("echo \"hello world\"");
+        assert_eq!(tokens, vec!["echo", "hello world"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_escaped_space_in_token() {
+        // バックスラッシュでエスケープされたスペースはトークンを分割しない
+        let tokens = parse_shell_tokens("echo hello\\ world");
+        assert_eq!(tokens, vec!["echo", "hello world"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_mixed_quotes_separate() {
+        // シングルクォートとダブルクォートが混在する場合それぞれ独立したトークンになる
+        let tokens = parse_shell_tokens("echo 'hello' \"world\"");
+        assert_eq!(tokens, vec!["echo", "hello", "world"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_unmatched_single_quote() {
+        // 閉じられていないシングルクォートでも残りの文字列をトークンとして返す
+        let tokens = parse_shell_tokens("echo 'hello");
+        assert_eq!(tokens, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_unmatched_double_quote() {
+        // 閉じられていないダブルクォートでも残りの文字列をトークンとして返す
+        let tokens = parse_shell_tokens("echo \"hello");
+        assert_eq!(tokens, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_unicode() {
+        // Unicode文字（日本語）を正しくトークン分割する
+        let tokens = parse_shell_tokens("echo こんにちは 世界");
+        assert_eq!(tokens, vec!["echo", "こんにちは", "世界"]);
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_consecutive_spaces() {
+        // 連続するスペースは無視してトークンを正しく分割する
+        let tokens = parse_shell_tokens("echo   hello    world");
+        assert_eq!(tokens, vec!["echo", "hello", "world"]);
+    }
 }

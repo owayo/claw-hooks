@@ -437,6 +437,78 @@ mod tests {
         assert_eq!(result, "echo ");
     }
 
+    // === strip_quoted_content 個別テストケース ===
+
+    #[test]
+    fn test_strip_quoted_content_double_quotes() {
+        // ダブルクォート内の内容が除去される
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo "hello world""#);
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_single_quotes() {
+        // シングルクォート内の内容が除去される
+        let result = CustomCommandFilter::strip_quoted_content("echo 'hello world'");
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_mixed_quotes() {
+        // ダブルクォートとシングルクォートが混在する場合、両方の内容が除去される
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo "hello" 'world'"#);
+        assert_eq!(result, "echo  ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_escaped_quote() {
+        // エスケープされたダブルクォートはクォート開始とみなされない
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo \"hello"#);
+        assert_eq!(result, "echo hello");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_unmatched_single_quote() {
+        // 閉じられていないシングルクォート以降の内容はすべて消費される
+        let result = CustomCommandFilter::strip_quoted_content("echo 'hello");
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_unmatched_double_quote() {
+        // 閉じられていないダブルクォート以降の内容はすべて消費される
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo "hello"#);
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_empty_quotes_both() {
+        // 空のダブルクォートとシングルクォートが除去される
+        let result = CustomCommandFilter::strip_quoted_content("echo \"\" ''");
+        assert_eq!(result, "echo  ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_nested_single_in_double() {
+        // ダブルクォート内のシングルクォートはクォート開始とみなされない
+        let result = CustomCommandFilter::strip_quoted_content(r#"echo "it's ok""#);
+        assert_eq!(result, "echo ");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_no_quotes_passthrough() {
+        // クォートが存在しない場合、入力がそのまま返される
+        let result = CustomCommandFilter::strip_quoted_content("echo hello");
+        assert_eq!(result, "echo hello");
+    }
+
+    #[test]
+    fn test_strip_quoted_content_backslash_at_end_of_string() {
+        // 文字列末尾のバックスラッシュはエスケープ対象なしでスキップされる
+        let result = CustomCommandFilter::strip_quoted_content("echo \\");
+        assert_eq!(result, "echo ");
+    }
+
     // === Priority and Filter trait tests ===
 
     #[test]

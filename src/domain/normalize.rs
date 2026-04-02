@@ -59,11 +59,12 @@ pub fn strip_ansi_codes(input: &str) -> String {
                             break;
                         }
                         if c == '\x1b' {
-                            // STターミネータ (ESC \) の場合は '\' を消費
+                            // ST (ESC \) なら '\' まで消費する。
+                            // それ以外のESCは不正なOSC終端とみなし、後続文字は
+                            // 消費せず外側のループで通常文字として再処理する。
                             if chars.peek() == Some(&'\\') {
                                 chars.next();
                             }
-                            // ESC \ 以外でもOSCシーケンスを終了
                             break;
                         }
                     }
@@ -444,6 +445,43 @@ mod tests {
         let input = "\x1b[31m\x1b]8;;https://doc.rust-lang.org\x1b\\E0308\x1b]8;;\x1b\\\x1b[0m";
         let result = strip_ansi_codes(input);
         assert_eq!(result, "E0308");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_invalid_escape_preserves_following_char() {
+        // OSC内でESCの後に\以外の文字が来た場合、後続文字が消費されないことを検証
+        let input = "before\x1b]0;window title\x1bXafter";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "beforeXafter");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_unterminated() {
+        // BELもSTも無いOSCシーケンスはEOFまで消費される
+        let input = "text\x1b]0;unterminated";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_osc_followed_by_csi() {
+        // OSC後にCSIが続く場合、OSCが終了しCSIも除去される
+        // OSC内のESCは消費されるが、後続の[0mは通常文字として残る
+        let input = "text\x1b]0;title\x1b[0mmore";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text[0mmore");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_empty_input() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_only_escape() {
+        // ESCだけの入力
+        let result = strip_ansi_codes("\x1b");
+        assert_eq!(result, "");
     }
 
     #[test]

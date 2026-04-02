@@ -597,6 +597,13 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_file_path_rejects_newline_and_null() {
+        assert!(ExtensionHookFilter::validate_file_path("file\nname.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file\rname.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file\0name.rs").is_err());
+    }
+
+    #[test]
     fn test_validate_file_path_accepts_safe_paths() {
         assert!(ExtensionHookFilter::validate_file_path("/path/to/file.go").is_ok());
         assert!(ExtensionHookFilter::validate_file_path("relative/path.rs").is_ok());

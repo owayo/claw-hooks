@@ -2397,6 +2397,216 @@ mod tests {
         // 元のメッセージがそのまま含まれていること
         assert_eq!(message, long_message);
     }
+
+    // === Windsurf Stop Block 出力テスト ===
+
+    #[test]
+    fn test_windsurf_output_stop_block_returns_plain_text() {
+        // Windsurf の Stop Block は JSON ではなくプレーンテキスト（stderr 用）
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "cargo clippy failed\nerror: unused variable".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        // JSON ではなくプレーンテキストであること
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_err());
+        assert!(output.contains("unused variable"));
+    }
+
+    #[test]
+    fn test_windsurf_output_stop_allow_returns_json() {
+        // Windsurf の Stop Allow は通常の JSON フォーマット
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "approve");
+    }
+
+    #[test]
+    fn test_windsurf_output_stop_block_normalizes_ansi() {
+        // Windsurf Stop Block でも ANSI コード除去が効くこと
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "\x1b[31merror\x1b[0m: failed".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        assert!(!output.contains("\x1b"));
+        assert!(output.contains("error: failed"));
+    }
+
+    // === Codex Stop 出力テスト ===
+
+    #[test]
+    fn test_codex_output_stop_block_uses_reason() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint errors found".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(
+            parsed["reason"]
+                .as_str()
+                .unwrap()
+                .contains("lint errors found")
+        );
+    }
+
+    #[test]
+    fn test_codex_output_stop_allow() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "approve");
+        assert!(parsed.get("reason").is_none());
+    }
+
+    // === exit_code エッジケーステスト ===
+
+    #[test]
+    fn test_windsurf_exit_code_stop_block_is_two() {
+        // Windsurf Stop Block は exit_code 2 で stderr を使う
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let code = adapter.exit_code(
+            &Decision::Block {
+                message: "errors".to_string(),
+            },
+            HookEvent::Stop,
+        );
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn test_claude_exit_code_stop_block_is_two() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let code = adapter.exit_code(
+            &Decision::Block {
+                message: "errors".to_string(),
+            },
+            HookEvent::Stop,
+        );
+        assert_eq!(code, 2);
+    }
+
+    // === use_stderr エッジケーステスト ===
+
+    #[test]
+    fn test_codex_use_stderr_always_false() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        assert!(!adapter.use_stderr(
+            &Decision::Block {
+                message: "err".to_string()
+            },
+            HookEvent::Stop,
+        ));
+        assert!(!adapter.use_stderr(&Decision::allow(), HookEvent::BeforeCommand));
+    }
+
+    #[test]
+    fn test_gemini_use_stderr_always_false() {
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        assert!(!adapter.use_stderr(
+            &Decision::Block {
+                message: "err".to_string()
+            },
+            HookEvent::Stop,
+        ));
+    }
+
+    #[test]
+    fn test_cursor_use_stderr_always_false() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        assert!(!adapter.use_stderr(
+            &Decision::Block {
+                message: "err".to_string()
+            },
+            HookEvent::Stop,
+        ));
+    }
+
+    // === Codex 入力パースエッジケース ===
+
+    #[test]
+    fn test_codex_input_empty_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let err = adapter.parse_input("{}").unwrap_err();
+        assert!(err.to_string().contains("hook_event_name"));
+    }
+
+    #[test]
+    fn test_codex_input_invalid_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let err = adapter.parse_input("not json").unwrap_err();
+        assert!(err.to_string().contains("parse"));
+    }
+
+    // === output_max_length が各フォーマットの Stop 出力に効くことを確認 ===
+
+    #[test]
+    fn test_output_max_length_truncates_windsurf_stop_block() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 100);
+        let long_message = "e".repeat(500);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: long_message.clone(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        assert!(output.len() < long_message.len());
+    }
+
+    #[test]
+    fn test_output_max_length_truncates_codex_stop_block() {
+        let adapter = FormatAdapter::new(Format::Codex, 100);
+        let long_message = "e".repeat(500);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: long_message.clone(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.len() < long_message.len());
+    }
+
+    #[test]
+    fn test_output_max_length_truncates_cursor_stop_block() {
+        let adapter = FormatAdapter::new(Format::Cursor, 100);
+        let long_message = "e".repeat(500);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: long_message.clone(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let followup = parsed["followup_message"].as_str().unwrap();
+        assert!(followup.len() < long_message.len());
+    }
 }
 
 // === Gemini CLI フォーマット型 ===

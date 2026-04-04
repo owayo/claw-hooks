@@ -537,4 +537,107 @@ commands = ["echo project"]
         assert!(config.rm_block);
         assert!(config.kill_block);
     }
+
+    // === reject_global_only_keys 追加エッジケース ===
+
+    #[test]
+    fn test_reject_global_only_keys_allows_key_in_value() {
+        // 値に "debug" を含むが、キーではないため許可
+        let content = r#"rm_block_message = "debug mode is disabled""#;
+        let path = PathBuf::from("test.toml");
+        assert!(ConfigService::reject_global_only_keys(content, &path).is_ok());
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_detects_log_path() {
+        let content = "log_path = \"/tmp/logs\"\n";
+        let path = PathBuf::from("test.toml");
+        let err = ConfigService::reject_global_only_keys(content, &path).unwrap_err();
+        assert!(err.to_string().contains("log_path"));
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_detects_nano_buddy() {
+        let content = "nano_buddy = true\n";
+        let path = PathBuf::from("test.toml");
+        let err = ConfigService::reject_global_only_keys(content, &path).unwrap_err();
+        assert!(err.to_string().contains("nano_buddy"));
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_allows_empty_content() {
+        let content = "";
+        let path = PathBuf::from("test.toml");
+        assert!(ConfigService::reject_global_only_keys(content, &path).is_ok());
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_allows_section_headers() {
+        // セクションヘッダーは無視される
+        let content = "[custom_filters]\ncommand = \"debug\"\n";
+        let path = PathBuf::from("test.toml");
+        assert!(ConfigService::reject_global_only_keys(content, &path).is_ok());
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_detects_with_tab() {
+        // タブ + キーの組み合わせも検出する
+        let content = "\tdebug = true\n";
+        let path = PathBuf::from("test.toml");
+        assert!(ConfigService::reject_global_only_keys(content, &path).is_err());
+    }
+
+    // === load_inner 追加テスト ===
+
+    #[test]
+    fn test_load_inner_with_none_project_dir() {
+        // プロジェクト検索ディレクトリがNoneの場合、プロジェクト設定はマージされない
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "rm_block = true\nkill_block = true\ndd_block = true\n",
+        )
+        .unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+        assert!(config.rm_block);
+    }
+
+    #[test]
+    fn test_load_project_config_validates_extension_hooks_missing_placeholder() {
+        // {file} プレースホルダーなしの拡張子フック → バリデーションエラー
+        let dir = tempfile::TempDir::new().unwrap();
+        let project_path = dir.path().join(".claw-hooks.toml");
+        fs::write(
+            &project_path,
+            "[extension_hooks]\n\".rs\" = [\"rustfmt\"]\n",
+        )
+        .unwrap();
+
+        let err = ConfigService::load_project_config(&project_path).unwrap_err();
+        let err_msg = format!("{:#}", err);
+        let placeholder = "{file}";
+        assert!(
+            err_msg.contains(placeholder),
+            "エラーメッセージにplaceholder関連の記述がない: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_load_project_config_validates_extension_key_prefix() {
+        // 拡張子キーは '.' で始まる必要がある
+        let dir = tempfile::TempDir::new().unwrap();
+        let project_path = dir.path().join(".claw-hooks.toml");
+        fs::write(
+            &project_path,
+            "[extension_hooks]\nrs = [\"rustfmt {file}\"]\n",
+        )
+        .unwrap();
+
+        let err = ConfigService::load_project_config(&project_path).unwrap_err();
+        let err_msg = format!("{:#}", err);
+        assert!(err_msg.contains("must start with"));
+    }
 }

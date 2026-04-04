@@ -1072,4 +1072,195 @@ mod tests {
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(condition.is_satisfied(cwd));
     }
+
+    // === merge_project のテスト ===
+
+    #[test]
+    fn test_merge_project_none_fields_preserve_global() {
+        // None フィールドはグローバル設定を維持する
+        let mut config = Config {
+            rm_block: true,
+            kill_block: true,
+            dd_block: true,
+            hook_timeout: 120,
+            ..Default::default()
+        };
+
+        let project = ProjectConfig::default(); // 全フィールド None
+        config.merge_project(&project);
+
+        assert!(config.rm_block);
+        assert!(config.kill_block);
+        assert!(config.dd_block);
+        assert_eq!(config.hook_timeout, 120);
+    }
+
+    #[test]
+    fn test_merge_project_overrides_bool_fields() {
+        // Some(false) でグローバルの true を上書きできる
+        let mut config = Config {
+            rm_block: true,
+            kill_block: true,
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            rm_block: Some(false),
+            kill_block: Some(false),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert!(!config.rm_block);
+        assert!(!config.kill_block);
+        assert!(config.dd_block); // 未指定のため変更なし
+    }
+
+    #[test]
+    fn test_merge_project_overrides_message_fields() {
+        // カスタムメッセージの上書き
+        let mut config = Config {
+            rm_block_message: Some("global msg".to_string()),
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            rm_block_message: Some("project msg".to_string()),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.rm_block_message, Some("project msg".to_string()));
+    }
+
+    #[test]
+    fn test_merge_project_custom_filters_replace_global() {
+        // custom_filters は置換（extend ではない）
+        let mut config = Config {
+            custom_filters: vec![CustomFilter {
+                command: "npm".to_string(),
+                args: vec!["install".to_string()],
+                message: "use pnpm".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            custom_filters: Some(vec![CustomFilter {
+                command: "yarn".to_string(),
+                args: vec!["add".to_string()],
+                message: "use pnpm".to_string(),
+            }]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.custom_filters.len(), 1);
+        assert_eq!(config.custom_filters[0].command, "yarn");
+    }
+
+    #[test]
+    fn test_merge_project_extension_hooks_replace_global() {
+        // extension_hooks は置換（extend ではない）
+        let mut config = Config {
+            extension_hooks: BTreeMap::from([
+                ("rs".to_string(), vec!["rustfmt {file}".to_string()]),
+                ("ts".to_string(), vec!["prettier {file}".to_string()]),
+            ]),
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            extension_hooks: Some(BTreeMap::from([(
+                "py".to_string(),
+                vec!["black {file}".to_string()],
+            )])),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        // グローバルの rs, ts は消え、プロジェクトの py のみ
+        assert_eq!(config.extension_hooks.len(), 1);
+        assert!(config.extension_hooks.contains_key("py"));
+    }
+
+    #[test]
+    fn test_merge_project_stop_hooks_extend_global() {
+        // stop_hooks は extend（グローバル + プロジェクト両方を実行）
+        let mut config = Config {
+            stop_hooks: vec![StopHook {
+                commands: vec!["echo global".to_string()],
+                condition: None,
+                stage: None,
+                report: None,
+            }],
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            stop_hooks: Some(vec![StopHook {
+                commands: vec!["echo project".to_string()],
+                condition: None,
+                stage: None,
+                report: None,
+            }]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.stop_hooks.len(), 2);
+        assert_eq!(config.stop_hooks[0].commands[0], "echo global");
+        assert_eq!(config.stop_hooks[1].commands[0], "echo project");
+    }
+
+    #[test]
+    fn test_merge_project_empty_custom_filters_clears_global() {
+        // Some(vec![]) で明示的にグローバルを空にできる
+        let mut config = Config {
+            custom_filters: vec![CustomFilter {
+                command: "npm".to_string(),
+                args: vec!["install".to_string()],
+                message: "use pnpm".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            custom_filters: Some(vec![]),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert!(config.custom_filters.is_empty());
+    }
+
+    #[test]
+    fn test_merge_project_hook_timeout_override() {
+        let config_default = Config::default();
+        assert_eq!(config_default.hook_timeout, 60); // デフォルト確認
+
+        let mut config = Config::default();
+        let project = ProjectConfig {
+            hook_timeout: Some(300),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.hook_timeout, 300);
+    }
+
+    #[test]
+    fn test_merge_project_output_max_length_override() {
+        let default_max = Config::default().output_max_length;
+
+        let mut config = Config::default();
+        let project = ProjectConfig {
+            output_max_length: Some(5000),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.output_max_length, 5000);
+        assert_ne!(config.output_max_length, default_max);
+    }
 }

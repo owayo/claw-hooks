@@ -193,4 +193,67 @@ mod tests {
     fn test_contains_rm_command_with_nohup_wrapper() {
         assert!(contains_rm_command("nohup rm -rf /tmp/test &"));
     }
+
+    // === ファクトリ関数テスト ===
+
+    #[test]
+    fn test_new_rm_filter_default_message() {
+        let filter = make_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm file.txt".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        match filter.execute(&input) {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("rm/rmdir"),
+                    "デフォルトメッセージに rm/rmdir が含まれるべき: {}",
+                    message
+                );
+            }
+            _ => panic!("Block判定が期待される"),
+        }
+    }
+
+    #[test]
+    fn test_new_rm_filter_priority() {
+        let filter = make_filter(true, None);
+        assert_eq!(filter.priority(), 20);
+    }
+
+    // === 偽陽性テスト ===
+
+    #[test]
+    fn test_no_false_positive_for_similar_commands() {
+        // rm を部分文字列として含むが rm コマンドではないもの
+        assert!(!contains_rm_command("chrome --headless"));
+        assert!(!contains_rm_command("grep rm file.txt"));
+        assert!(!contains_rm_command("farm build"));
+        assert!(!contains_rm_command("format output.txt"));
+    }
+
+    #[test]
+    fn test_rm_with_complex_flags() {
+        assert!(contains_rm_command("rm --verbose --force -r dir/"));
+        assert!(contains_rm_command("rm -i file.txt"));
+        assert!(contains_rm_command("rm --preserve-root=all -rf /"));
+    }
+
+    #[test]
+    fn test_rm_in_multiple_chained_commands() {
+        assert!(contains_rm_command(
+            "echo start && ls && rm -rf tmp && echo done"
+        ));
+    }
+
+    #[test]
+    fn test_rm_with_timeout_wrapper() {
+        assert!(contains_rm_command("timeout 30 rm -rf /tmp/test"));
+        assert!(contains_rm_command("timeout --signal TERM 10 rm file"));
+    }
 }

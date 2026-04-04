@@ -204,4 +204,78 @@ mod tests {
         assert!(!contains_kill_command("ps | xargs echo kill"));
         assert!(!contains_kill_command("find . | xargs grep kill"));
     }
+
+    // === ファクトリ関数テスト ===
+
+    #[test]
+    fn test_new_kill_filter_default_message() {
+        let filter = make_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "kill 1234".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        match filter.execute(&input) {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("kill"),
+                    "デフォルトメッセージに kill が含まれるべき: {}",
+                    message
+                );
+                assert!(
+                    message.contains("safe-kill"),
+                    "デフォルトメッセージに safe-kill が含まれるべき: {}",
+                    message
+                );
+            }
+            _ => panic!("Block判定が期待される"),
+        }
+    }
+
+    #[test]
+    fn test_new_kill_filter_priority() {
+        let filter = make_filter(true, None);
+        assert_eq!(filter.priority(), 10);
+    }
+
+    // === 偽陽性テスト ===
+
+    #[test]
+    fn test_no_false_positive_for_similar_commands() {
+        assert!(!contains_kill_command("skill check"));
+        assert!(!contains_kill_command("overkill mode"));
+        assert!(!contains_kill_command("grep killall docs.txt"));
+    }
+
+    // === xargs 追加テスト ===
+
+    #[test]
+    fn test_contains_xargs_kill_direct() {
+        assert!(contains_xargs_kill("ps | xargs kill"));
+        assert!(contains_xargs_kill("pgrep node | xargs kill -9"));
+        assert!(contains_xargs_kill("ps | xargs pkill"));
+        assert!(contains_xargs_kill("ps | xargs killall"));
+        assert!(contains_xargs_kill("ps | xargs taskkill"));
+    }
+
+    #[test]
+    fn test_contains_xargs_kill_with_flags() {
+        assert!(contains_xargs_kill("ps | xargs -n1 kill"));
+        assert!(contains_xargs_kill("ps | xargs -P4 kill"));
+    }
+
+    #[test]
+    fn test_contains_xargs_kill_non_kill() {
+        assert!(!contains_xargs_kill("find . | xargs echo"));
+        assert!(!contains_xargs_kill("find . | xargs rm"));
+    }
+
+    #[test]
+    fn test_kill_with_timeout_wrapper() {
+        assert!(contains_kill_command("timeout 10 kill -9 1234"));
+    }
 }

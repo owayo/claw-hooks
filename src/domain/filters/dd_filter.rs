@@ -160,4 +160,75 @@ mod tests {
     fn test_contains_dd_command_in_subshell() {
         assert!(contains_dd_command("(cd /dev && dd if=zero of=sda)"));
     }
+
+    // === ファクトリ関数テスト ===
+
+    #[test]
+    fn test_new_dd_filter_default_message() {
+        let filter = make_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "dd if=/dev/zero of=/dev/sda".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        match filter.execute(&input) {
+            Decision::Block { message } => {
+                assert!(
+                    message.contains("dd"),
+                    "デフォルトメッセージに dd が含まれるべき: {}",
+                    message
+                );
+            }
+            _ => panic!("Block判定が期待される"),
+        }
+    }
+
+    #[test]
+    fn test_new_dd_filter_priority() {
+        let filter = make_filter(true, None);
+        assert_eq!(filter.priority(), 15);
+    }
+
+    // === 偽陽性テスト ===
+
+    #[test]
+    fn test_no_false_positive_for_similar_commands() {
+        // dd を部分文字列として含むが dd コマンドではないもの
+        assert!(!contains_dd_command("add file.txt"));
+        assert!(!contains_dd_command("address 192.168.1.1"));
+        assert!(!contains_dd_command("oddly enough"));
+    }
+
+    // === 追加のバリエーションテスト ===
+
+    #[test]
+    fn test_dd_with_various_options() {
+        assert!(contains_dd_command(
+            "dd status=progress if=/dev/zero of=/dev/sda"
+        ));
+        assert!(contains_dd_command(
+            "dd conv=fsync if=input.img of=output.img"
+        ));
+        assert!(contains_dd_command(
+            "dd bs=1M count=100 if=/dev/urandom of=/tmp/data"
+        ));
+    }
+
+    #[test]
+    fn test_dd_in_multiple_chained_commands() {
+        assert!(contains_dd_command(
+            "dd if=/dev/zero of=a && dd if=/dev/zero of=b"
+        ));
+    }
+
+    #[test]
+    fn test_dd_with_timeout_wrapper() {
+        assert!(contains_dd_command(
+            "timeout 60 dd if=/dev/zero of=/dev/sda bs=4M"
+        ));
+    }
 }

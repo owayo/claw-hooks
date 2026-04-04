@@ -273,4 +273,94 @@ mod tests {
             assert_eq!(v["sid"], sid);
         }
     }
+
+    // === encode_ext 境界値テスト ===
+
+    #[test]
+    fn test_encode_ext_exactly_8_bytes() {
+        // 8バイトちょうどの拡張子がすべてエンコードされることを確認
+        let ext = "12345678";
+        let encoded = encode_ext(ext);
+        assert_ne!(encoded, 0);
+        // 各バイトが正しい位置にあることを確認
+        assert_eq!((encoded & 0xFF) as u8, b'1');
+        assert_eq!(((encoded >> 56) & 0xFF) as u8, b'8');
+    }
+
+    #[test]
+    fn test_encode_ext_over_8_bytes_truncates() {
+        // 9バイト以上の拡張子は8バイトまでで切り詰められる
+        let ext_8 = "12345678";
+        let ext_9 = "123456789";
+        assert_eq!(encode_ext(ext_8), encode_ext(ext_9));
+    }
+
+    #[test]
+    fn test_encode_ext_single_char() {
+        // 1バイト文字のエンコード
+        let encoded = encode_ext("a");
+        assert_eq!(encoded, b'a' as u64);
+    }
+
+    #[test]
+    fn test_encode_ext_multibyte_utf8() {
+        // マルチバイトUTF-8はバイト単位でエンコードされる
+        let encoded = encode_ext("あ");
+        assert_ne!(encoded, 0);
+        // "あ" は UTF-8 で 3 バイト（0xE3, 0x81, 0x82）
+        assert_eq!((encoded & 0xFF) as u8, 0xE3);
+        assert_eq!(((encoded >> 8) & 0xFF) as u8, 0x81);
+        assert_eq!(((encoded >> 16) & 0xFF) as u8, 0x82);
+    }
+
+    // === 通知関数パニックなしテスト ===
+
+    #[test]
+    fn test_notify_extension_hook_empty_string() {
+        // 空文字列でもパニックしない
+        notify_extension_hook("");
+    }
+
+    #[test]
+    fn test_notify_subagent_with_session_id() {
+        // session_id 付きでもパニックしない
+        notify_subagent_start("explore", Some("session-abc-123"));
+        notify_subagent_stop("explore", Some("session-abc-123"));
+    }
+
+    #[test]
+    fn test_notify_subagent_with_empty_type() {
+        // 空文字列の subagent_type でもパニックしない
+        notify_subagent_start("", None);
+        notify_subagent_stop("", None);
+    }
+
+    // === format_subagent_object 追加テスト ===
+
+    #[test]
+    fn test_format_subagent_object_empty_strings() {
+        #[cfg(target_os = "macos")]
+        {
+            let result = macos::format_subagent_object("", None);
+            assert_eq!(result, "");
+
+            let result = macos::format_subagent_object("", Some(""));
+            let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(v["type"], "");
+            assert_eq!(v["sid"], "");
+        }
+    }
+
+    #[test]
+    fn test_format_subagent_object_long_strings() {
+        #[cfg(target_os = "macos")]
+        {
+            let long_type = "a".repeat(1000);
+            let long_sid = "b".repeat(1000);
+            let result = macos::format_subagent_object(&long_type, Some(&long_sid));
+            let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(v["type"], long_type);
+            assert_eq!(v["sid"], long_sid);
+        }
+    }
 }

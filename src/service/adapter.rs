@@ -1990,6 +1990,413 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         assert_eq!(adapter.error_exit_code(), 2);
     }
+
+    // === exit_code のテスト ===
+
+    #[test]
+    fn test_gemini_exit_code_allow_always_zero() {
+        // Gemini CLI: 判定はJSON内で伝達されるため、Allow時も常に0
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        assert_eq!(
+            adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
+            0
+        );
+    }
+
+    #[test]
+    fn test_gemini_exit_code_block_always_zero() {
+        // Gemini CLI: Block時もJSON内で伝達されるため常に0
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
+    }
+
+    #[test]
+    fn test_codex_exit_code_allow_always_zero() {
+        // Codex CLI: Allow時は常に0
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        assert_eq!(
+            adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
+            0
+        );
+    }
+
+    #[test]
+    fn test_codex_exit_code_block_always_zero() {
+        // Codex CLI: Block時もstdout JSONで判定を返すため常に0
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
+    }
+
+    #[test]
+    fn test_claude_exit_code_allow_before_command_zero() {
+        // Claude: Allow + BeforeCommand → 0
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        assert_eq!(
+            adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
+            0
+        );
+    }
+
+    #[test]
+    fn test_claude_exit_code_block_before_command_two() {
+        // Claude: Block + BeforeCommand → 2
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+    }
+
+    #[test]
+    fn test_cursor_exit_code_allow_stop_zero() {
+        // Cursor: Stop イベントの Allow は常に0
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        assert_eq!(adapter.exit_code(&Decision::allow(), HookEvent::Stop), 0);
+    }
+
+    #[test]
+    fn test_cursor_exit_code_block_before_command_two() {
+        // Cursor: BeforeCommand の Block → 2
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+    }
+
+    #[test]
+    fn test_windsurf_exit_code_block_before_command_two() {
+        // Windsurf: BeforeCommand の Block → 2
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+    }
+
+    // === error_exit_code のテスト ===
+
+    #[test]
+    fn test_error_exit_code_codex_zero() {
+        // Codex: エラー時も0（JSON内でblock判定を有効にするため）
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_error_exit_code_gemini_zero() {
+        // Gemini: エラー時も0（JSON内でdeny判定を有効にするため）
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_error_exit_code_claude_two() {
+        // Claude: エラー時は2
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
+
+    #[test]
+    fn test_error_exit_code_cursor_two() {
+        // Cursor: エラー時は2
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
+
+    #[test]
+    fn test_error_exit_code_windsurf_two() {
+        // Windsurf: エラー時は2
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert_eq!(adapter.error_exit_code(), 2);
+    }
+
+    // === use_stderr のテスト ===
+
+    #[test]
+    fn test_windsurf_use_stderr_stop_block_true() {
+        // Windsurf + Stop + Block → stderr を使用する
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let decision = Decision::Block {
+            message: "lint error".to_string(),
+        };
+        assert!(adapter.use_stderr(&decision, HookEvent::Stop));
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_stop_allow_false() {
+        // Windsurf + Stop + Allow → stderr を使用しない
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert!(!adapter.use_stderr(&Decision::allow(), HookEvent::Stop));
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_before_command_block_false() {
+        // Windsurf + BeforeCommand + Block → stderr を使用しない（Stop以外）
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert!(!adapter.use_stderr(&decision, HookEvent::BeforeCommand));
+    }
+
+    #[test]
+    fn test_claude_use_stderr_stop_block_false() {
+        // Claude + Stop + Block → stderr を使用しない
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let decision = Decision::Block {
+            message: "error".to_string(),
+        };
+        assert!(!adapter.use_stderr(&decision, HookEvent::Stop));
+    }
+
+    // === format_error のテスト ===
+
+    #[test]
+    fn test_format_error_claude_contains_block_and_message() {
+        // Claude: "block" と "message" を含む
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let output = adapter.format_error("test error");
+        assert!(output.contains("block"));
+        assert!(output.contains("message"));
+        assert!(output.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_format_error_cursor_contains_deny_and_user_message() {
+        // Cursor: "deny" と "user_message" を含む
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let output = adapter.format_error("test error");
+        assert!(output.contains("deny"));
+        assert!(output.contains("user_message"));
+        assert!(output.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_format_error_codex_contains_block_and_reason() {
+        // Codex: "block" と "reason" を含む
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter.format_error("test error");
+        assert!(output.contains("block"));
+        assert!(output.contains("reason"));
+        assert!(output.contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_format_error_all_formats_contain_fail_closed() {
+        // すべてのフォーマットで "fail-closed" を含む
+        for format in [
+            Format::Claude,
+            Format::Cursor,
+            Format::Windsurf,
+            Format::Gemini,
+            Format::Codex,
+        ] {
+            let adapter = FormatAdapter::new(format, 0);
+            let output = adapter.format_error("some error");
+            assert!(
+                output.contains("fail-closed"),
+                "{:?} の format_error に fail-closed が含まれていない",
+                format
+            );
+        }
+    }
+
+    // === Codex CLI のテスト ===
+
+    #[test]
+    fn test_codex_input_pre_tool_use_bash_maps_to_before_command() {
+        // Codex: PreToolUse + Bash → BeforeCommand
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hello"},
+            "session_id": "test-session"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+        if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
+            assert_eq!(bash.command, "echo hello");
+        } else {
+            panic!("Expected Bash tool input");
+        }
+    }
+
+    #[test]
+    fn test_codex_input_post_tool_use_bash_maps_to_after_file_edit() {
+        // Codex: PostToolUse + Bash → AfterFileEdit（現在は Bash のみ対応）
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat file.txt"},
+            "tool_response": "file contents"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_input_stop_event() {
+        // Codex: Stop イベント
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "Stop",
+            "session_id": "test-session",
+            "stop_hook_active": true,
+            "last_assistant_message": "Done"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        assert_eq!(result.tool_name, "Stop");
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(stop.stop_hook_active);
+            assert_eq!(stop.agent_message, Some("Done".to_string()));
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_codex_output_allow() {
+        // Codex: Allow出力 → "approve" を含む
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "approve");
+    }
+
+    #[test]
+    fn test_codex_output_block() {
+        // Codex: Block出力 → "block" と "reason" を含む
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "dangerous command".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(
+            parsed["reason"]
+                .as_str()
+                .unwrap()
+                .contains("dangerous command")
+        );
+    }
+
+    #[test]
+    fn test_codex_error_format() {
+        // Codex: エラーフォーマット → "block" と "reason" と "fail-closed" を含む
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter.format_error("parse failed");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.contains("parse failed"));
+        assert!(reason.contains("fail-closed"));
+    }
+
+    // === Claude パススルーイベントのテスト ===
+
+    #[test]
+    fn test_claude_session_start_maps_to_before_prompt() {
+        // SessionStart → BeforePrompt にマップ
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name": "SessionStart", "session_id": "s1"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "SessionStart");
+    }
+
+    #[test]
+    fn test_claude_user_prompt_submit_maps_to_before_prompt() {
+        // UserPromptSubmit → BeforePrompt にマップ
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name": "UserPromptSubmit", "session_id": "s1"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "UserPromptSubmit");
+    }
+
+    #[test]
+    fn test_claude_session_end_maps_to_before_prompt() {
+        // SessionEnd → BeforePrompt にマップ
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name": "SessionEnd", "session_id": "s1"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "SessionEnd");
+    }
+
+    #[test]
+    fn test_claude_notification_maps_to_before_prompt() {
+        // Notification → BeforePrompt にマップ
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name": "Notification", "session_id": "s1"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "Notification");
+    }
+
+    // === output_max_length のテスト ===
+
+    #[test]
+    fn test_output_max_length_truncates_long_output() {
+        // max_length > 0 のとき長い出力が切り詰められる
+        let adapter = FormatAdapter::new(Format::Claude, 20);
+        let long_message = "a".repeat(100);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: long_message.clone(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let message = parsed["message"].as_str().unwrap();
+        // 元のメッセージより短く切り詰められていること
+        assert!(
+            message.len() < long_message.len(),
+            "メッセージが切り詰められていない: {} >= {}",
+            message.len(),
+            long_message.len()
+        );
+    }
+
+    #[test]
+    fn test_output_max_length_zero_no_truncation() {
+        // max_length = 0 のとき出力が切り詰められない
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let long_message = "a".repeat(10000);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: long_message.clone(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let message = parsed["message"].as_str().unwrap();
+        // 元のメッセージがそのまま含まれていること
+        assert_eq!(message, long_message);
+    }
 }
 
 // === Gemini CLI フォーマット型 ===

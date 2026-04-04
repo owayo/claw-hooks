@@ -1665,4 +1665,403 @@ mod tests {
         let tokens = parse_shell_tokens("echo   hello    world");
         assert_eq!(tokens, vec!["echo", "hello", "world"]);
     }
+
+    // ========================================================================
+    // wrapper_flag_takes_arg のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_u_takes_arg() {
+        // sudo -u は値を取るフラグ
+        assert!(ShellParser::wrapper_flag_takes_arg("sudo", "-u"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_n_no_arg() {
+        // sudo -n は値を取らないフラグ
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-n"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_long_user() {
+        // sudo --user は値を取るロングフラグ
+        assert!(ShellParser::wrapper_flag_takes_arg("sudo", "--user"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_long_user_inline() {
+        // --user=root はインライン値なので追加引数不要（false）
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "--user=root"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_uroot_concatenated() {
+        // -uroot は値が連結されているので追加引数不要（false）
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-uroot"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_timeout_signal() {
+        // timeout --signal は値を取る
+        assert!(ShellParser::wrapper_flag_takes_arg("timeout", "--signal"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_timeout_kill_after() {
+        // timeout --kill-after は値を取る
+        assert!(ShellParser::wrapper_flag_takes_arg(
+            "timeout",
+            "--kill-after"
+        ));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_env_u() {
+        // env -u は値を取る
+        assert!(ShellParser::wrapper_flag_takes_arg("env", "-u"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_doas_u() {
+        // doas -u は値を取る
+        assert!(ShellParser::wrapper_flag_takes_arg("doas", "-u"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_nice_n() {
+        // nice -n は値を取る
+        assert!(ShellParser::wrapper_flag_takes_arg("nice", "-n"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_unknown_wrapper() {
+        // 未知のラッパーはフラグを返さない
+        assert!(!ShellParser::wrapper_flag_takes_arg("unknown", "-u"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("unknown", "--flag"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_double_dash() {
+        // -- はフラグとして扱わない
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "--"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_single_dash() {
+        // - はフラグとして扱わない
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-"));
+    }
+
+    // ========================================================================
+    // find_wrapped_command_index のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_find_wrapped_command_index_sudo_rm() {
+        // sudo rm -rf / → コマンド位置は 0 ("rm")
+        let args: Vec<String> = vec!["rm", "-rf", "/"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_sudo_u_root_rm() {
+        // sudo -u root rm -rf / → コマンド位置は 2 ("rm")
+        let args: Vec<String> = vec!["-u", "root", "rm", "-rf", "/"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_sudo_double_dash() {
+        // sudo -- rm → -- 後の位置
+        let args: Vec<String> = vec!["--", "rm"].into_iter().map(String::from).collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_env_assignment() {
+        // env VAR=value rm → 環境変数代入をスキップ
+        let args: Vec<String> = vec!["VAR=value", "rm"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("env", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_timeout_numeric() {
+        // timeout 10 rm → 制限時間トークンをスキップ
+        let args: Vec<String> = vec!["10", "rm"].into_iter().map(String::from).collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("timeout", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_timeout_with_suffix() {
+        // timeout 30s rm → サフィックス付き制限時間
+        let args: Vec<String> = vec!["30s", "rm"].into_iter().map(String::from).collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("timeout", &args),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_timeout_signal_and_duration() {
+        // timeout --signal TERM 10 rm → フラグ+制限時間をスキップ
+        let args: Vec<String> = vec!["--signal", "TERM", "10", "rm"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("timeout", &args),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_empty_args() {
+        // 引数がない場合 → None
+        let args: Vec<String> = vec![];
+        assert_eq!(ShellParser::find_wrapped_command_index("sudo", &args), None);
+    }
+
+    // ========================================================================
+    // is_timeout_duration_token のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_is_timeout_duration_token_integer() {
+        // 整数の制限時間
+        assert!(ShellParser::is_timeout_duration_token("10"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_float() {
+        // 小数の制限時間
+        assert!(ShellParser::is_timeout_duration_token("0.5"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_suffix_s() {
+        // 秒サフィックス
+        assert!(ShellParser::is_timeout_duration_token("30s"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_suffix_m() {
+        // 分サフィックス
+        assert!(ShellParser::is_timeout_duration_token("5m"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_suffix_h() {
+        // 時間サフィックス
+        assert!(ShellParser::is_timeout_duration_token("2h"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_suffix_d() {
+        // 日サフィックス
+        assert!(ShellParser::is_timeout_duration_token("1d"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_empty() {
+        // 空文字列は無効
+        assert!(!ShellParser::is_timeout_duration_token(""));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_alphabetic() {
+        // アルファベット文字列は無効
+        assert!(!ShellParser::is_timeout_duration_token("abc"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_negative() {
+        // 負数は無効
+        assert!(!ShellParser::is_timeout_duration_token("-1"));
+    }
+
+    #[test]
+    fn test_is_timeout_duration_token_suffix_only() {
+        // サフィックスのみは無効
+        assert!(!ShellParser::is_timeout_duration_token("s"));
+    }
+
+    // ========================================================================
+    // is_env_assignment_token のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_is_env_assignment_token_valid() {
+        // 正常な環境変数代入
+        assert!(ShellParser::is_env_assignment_token("VAR=value"));
+    }
+
+    #[test]
+    fn test_is_env_assignment_token_underscore_prefix() {
+        // アンダースコアで始まる変数名
+        assert!(ShellParser::is_env_assignment_token("_VAR=value"));
+    }
+
+    #[test]
+    fn test_is_env_assignment_token_alphanumeric() {
+        // 英数字の変数名
+        assert!(ShellParser::is_env_assignment_token("A123=x"));
+    }
+
+    #[test]
+    fn test_is_env_assignment_token_empty_name() {
+        // 空の変数名は無効
+        assert!(!ShellParser::is_env_assignment_token("=value"));
+    }
+
+    #[test]
+    fn test_is_env_assignment_token_digit_start() {
+        // 数字で始まる変数名は無効
+        assert!(!ShellParser::is_env_assignment_token("123=value"));
+    }
+
+    #[test]
+    fn test_is_env_assignment_token_no_equals() {
+        // = がない場合は無効
+        assert!(!ShellParser::is_env_assignment_token("rm"));
+    }
+
+    // ========================================================================
+    // unwrap_subshell のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_unwrap_subshell_wrapped_command() {
+        // 単純なサブシェル
+        assert_eq!(ShellParser::unwrap_subshell("(ls -la)"), Some("ls -la"));
+    }
+
+    #[test]
+    fn test_unwrap_subshell_plain_command() {
+        // サブシェルでない場合
+        assert_eq!(ShellParser::unwrap_subshell("ls -la"), None);
+    }
+
+    #[test]
+    fn test_unwrap_subshell_multiple_groups() {
+        // 複数の括弧グループがある場合
+        assert_eq!(ShellParser::unwrap_subshell("(a) && (b)"), None);
+    }
+
+    #[test]
+    fn test_unwrap_subshell_unclosed() {
+        // 閉じられていない括弧
+        assert_eq!(ShellParser::unwrap_subshell("(unclosed"), None);
+    }
+
+    #[test]
+    fn test_unwrap_subshell_quoted_paren() {
+        // クォート内の括弧は無視される
+        let result = ShellParser::unwrap_subshell("(ls 'a)' -la)");
+        assert!(result.is_some());
+    }
+
+    // ========================================================================
+    // extract_nested_command_fragments のテスト
+    // ========================================================================
+
+    #[test]
+    fn test_extract_nested_fragments_dollar_paren() {
+        // $() 形式のコマンド置換
+        let fragments = ShellParser::extract_nested_command_fragments("echo $(rm -rf /)");
+        assert_eq!(fragments, vec!["rm -rf /"]);
+    }
+
+    #[test]
+    fn test_extract_nested_fragments_backtick() {
+        // バッククォート形式のコマンド置換
+        let fragments = ShellParser::extract_nested_command_fragments("echo `rm -rf /`");
+        assert_eq!(fragments, vec!["rm -rf /"]);
+    }
+
+    #[test]
+    fn test_extract_nested_fragments_no_substitution() {
+        // コマンド置換なし
+        let fragments = ShellParser::extract_nested_command_fragments("echo hello");
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn test_extract_nested_fragments_empty_substitution() {
+        // 空のコマンド置換
+        let fragments = ShellParser::extract_nested_command_fragments("echo $()");
+        assert!(fragments.is_empty());
+    }
+
+    // ========================================================================
+    // process_wrapper_args の統合テスト（extract_commands 経由）
+    // ========================================================================
+
+    #[test]
+    fn test_process_wrapper_sudo_rm() {
+        // sudo rm -rf / → "sudo" と "rm" の両方を含む
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sudo rm -rf /");
+        assert!(commands.contains(&"sudo".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_process_wrapper_sudo_u_root_bash_c() {
+        // sudo -u root bash -c 'rm -rf /' → "rm" を含む（ネストラッパー + shell -c）
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sudo -u root bash -c 'rm -rf /'");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "commands should contain 'rm', got: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_timeout_signal_rm() {
+        // timeout --signal TERM 10 rm -f /tmp/file → "rm" を含む
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("timeout --signal TERM 10 rm -f /tmp/file");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "commands should contain 'rm', got: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_process_wrapper_env_command_rm() {
+        // env VAR=value command rm -f → "rm" を含む
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("env VAR=value command rm -f");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "commands should contain 'rm', got: {:?}",
+            commands
+        );
+    }
 }

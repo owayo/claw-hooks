@@ -113,7 +113,7 @@ cargo run -- version     # Show version
 - Use `--format cursor` or `--format windsurf` when testing
 
 ### Gemini CLI
-- Supports BeforePrompt event
+- Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events
 - Use `--format gemini` when testing
 
 ### Codex CLI

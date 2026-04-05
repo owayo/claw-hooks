@@ -790,4 +790,105 @@ mod tests {
         assert_eq!(result, format!("a{}", suffix));
         assert_eq!(result.chars().count(), 17);
     }
+
+    // === truncate_output マルチバイト文字テスト ===
+
+    #[test]
+    fn test_truncate_output_multibyte_within_limit() {
+        // マルチバイト文字（3バイト/文字）で文字数がmax_length以下なら切り詰めない
+        let input = "あいうえお"; // 5文字, 15バイト
+        let result = truncate_output(input, 10);
+        assert_eq!(result, "あいうえお");
+    }
+
+    #[test]
+    fn test_truncate_output_emoji_within_limit() {
+        // エモジ（4バイト/文字）で文字数がmax_length以下なら切り詰めない
+        let input = "😀😀😀"; // 3文字, 12バイト
+        let result = truncate_output(input, 5);
+        assert_eq!(result, "😀😀😀");
+    }
+
+    #[test]
+    fn test_truncate_output_multibyte_exceeds_limit() {
+        // マルチバイト文字で文字数がmax_lengthを超える場合は切り詰める
+        // サフィックス "\n... (truncated)" は16文字なので、max_length=20 で確認
+        let input = "あいうえおかきくけこさしすせそたちつてと"; // 20文字
+        let result = truncate_output(input, 10);
+        // max_length=10 < サフィックス長16 のため、サフィックスなしで10文字に切り詰め
+        assert_eq!(result.chars().count(), 10);
+        assert_eq!(result, "あいうえおかきくけこ");
+    }
+
+    #[test]
+    fn test_truncate_output_max_length_equals_suffix_length() {
+        // max_length がサフィックス長と同じ場合、サフィックスなしで切り詰め
+        let input = "abcdefghijklmnopqrstuvwxyz"; // 26文字
+        let suffix_len = "\n... (truncated)".chars().count(); // 16
+        let result = truncate_output(input, suffix_len);
+        assert_eq!(result.chars().count(), suffix_len);
+        assert!(!result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_truncate_output_max_length_one_no_suffix() {
+        // max_length = 1 の場合、サフィックスが収まらないので文字だけ切り詰め
+        let input = "abcdef";
+        let result = truncate_output(input, 1);
+        assert_eq!(result, "a");
+    }
+
+    // === strip_ansi_codes 不正シーケンステスト ===
+
+    #[test]
+    fn test_strip_ansi_codes_unterminated_csi() {
+        // 終端文字なしの CSI シーケンス（入力が途中で終了）
+        let input = "text\x1b[31";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_unterminated_osc() {
+        // BEL も ST もなしの OSC シーケンス（入力が途中で終了）
+        let input = "text\x1b]8;;url";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_bare_escape_at_end() {
+        // 文字列末尾の孤立 ESC
+        let input = "text\x1b";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_consecutive_escape_sequences() {
+        // 連続する複数の ANSI シーケンス
+        let input = "\x1b[1m\x1b[31m\x1b[4mhello\x1b[0m";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "hello");
+    }
+
+    // === normalize_lint_output エッジケース ===
+
+    #[test]
+    fn test_normalize_lint_output_empty_input() {
+        assert_eq!(normalize_lint_output(""), "");
+    }
+
+    #[test]
+    fn test_normalize_lint_output_only_whitespace() {
+        assert_eq!(normalize_lint_output("   \n  \t  \n  "), "");
+    }
+
+    #[test]
+    fn test_normalize_lint_output_single_path_no_stripping() {
+        // 絶対パスが1つだけの場合はプレフィックス除去しない
+        let input = "error: /Users/dev/project/src/main.rs:10: type error";
+        let result = normalize_lint_output(input);
+        assert!(result.contains("/Users/dev/project/src/main.rs"));
+    }
 }

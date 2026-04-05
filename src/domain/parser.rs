@@ -2064,4 +2064,149 @@ mod tests {
             commands
         );
     }
+
+    // === エッジケーステスト ===
+
+    #[test]
+    fn test_extract_commands_empty_string() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("");
+        assert!(
+            commands.is_empty(),
+            "空文字列からはコマンドが抽出されないべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_only_whitespace_and_tabs() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("   \t  ");
+        assert!(
+            commands.is_empty(),
+            "空白のみからはコマンドが抽出されないべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_deeply_nested_subshells() {
+        // 3層のネストされたサブシェル
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("bash -c 'sh -c \"bash -c rm\"'");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "深いネストでも rm を検出すべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_null_byte_in_command() {
+        // NULL バイトを含むコマンド（パーサーがクラッシュしないこと）
+        let mut parser = ShellParser::new();
+        let _commands = parser.extract_commands("echo hello\0world");
+        // パニックしなければ成功
+    }
+
+    #[test]
+    fn test_extract_commands_very_long_pipeline() {
+        // 長いパイプライン
+        let mut parser = ShellParser::new();
+        let cmd = (0..50)
+            .map(|i| format!("cmd{}", i))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let commands = parser.extract_commands(&cmd);
+        assert!(
+            !commands.is_empty(),
+            "長いパイプラインからもコマンドを抽出すべき"
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_mixed_quote_styles() {
+        // シングルクォートとダブルクォートの混在
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r#"echo "hello 'world'" && rm -f test"#);
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "混合クォートでも rm を検出すべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_consecutive_semicolons() {
+        // 連続するセミコロン
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo a ;; echo b ; rm file");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "連続セミコロンでも rm を検出すべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_heredoc() {
+        // ヒアドキュメント内のコマンドは実行されない
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("cat <<EOF\nrm -rf /\nEOF");
+        // ヒアドキュメント内の rm は実際のコマンドではない
+        // cat のみが抽出されるのが理想
+        assert!(
+            commands.contains(&"cat".to_string()),
+            "ヒアドキュメントで cat を検出すべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_comment_ignored() {
+        // コメント後のコマンドは無視されるべき
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo hello # rm -rf /");
+        assert!(
+            !commands.contains(&"rm".to_string()),
+            "コメント内の rm は検出すべきでない: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_backgrounded_command() {
+        // バックグラウンド実行コマンド
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("rm -f file &");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "バックグラウンド実行でも rm を検出すべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_command_strings_empty() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_command_strings("");
+        assert!(
+            commands.is_empty(),
+            "空文字列からはコマンド文字列が抽出されないべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_command_strings_with_args() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_command_strings("npm install lodash");
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.contains("npm") && c.contains("install")),
+            "npm install を含むコマンド文字列が抽出されるべき: {:?}",
+            commands
+        );
+    }
 }

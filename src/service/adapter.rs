@@ -2607,6 +2607,235 @@ mod tests {
         let followup = parsed["followup_message"].as_str().unwrap();
         assert!(followup.len() < long_message.len());
     }
+
+    // === Claude Code 入力パースのエッジケース ===
+
+    #[test]
+    fn test_claude_input_missing_tool_name_is_error() {
+        // PreToolUse で tool_name が無い場合はエラー
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(
+            err.to_string().contains("tool_name"),
+            "tool_name 欠落エラーのメッセージが不適切: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_claude_input_missing_tool_input_is_error() {
+        // PreToolUse で tool_input が無い場合はエラー
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(
+            err.to_string().contains("tool_input"),
+            "tool_input 欠落エラーのメッセージが不適切: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_claude_input_unknown_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"UnknownEvent","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown Claude event"),
+            "未知イベントのエラーメッセージが不適切: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_claude_input_invalid_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let err = adapter.parse_input("{invalid json}").unwrap_err();
+        assert!(
+            err.to_string().contains("parse"),
+            "JSON パースエラーのメッセージが不適切: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_claude_input_passthrough_events() {
+        // SessionStart, UserPromptSubmit, SessionEnd, Notification はパススルー
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        for event_name in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "SessionEnd",
+            "Notification",
+        ] {
+            let input = format!(r#"{{"hook_event_name":"{}"}}"#, event_name);
+            let result = adapter.parse_input(&input).unwrap();
+            assert_eq!(
+                result.event,
+                HookEvent::BeforePrompt,
+                "パススル���イベント {} は BeforePrompt にマッピングされるべき",
+                event_name
+            );
+            assert_eq!(result.tool_name, event_name);
+        }
+    }
+
+    // === Windsurf 入力パースのエッジケース ===
+
+    #[test]
+    fn test_windsurf_input_unknown_action_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown Windsurf action"),
+            "未知アクションのエラーメッセージが不適切: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_windsurf_input_pre_run_command_empty_command_is_error() {
+        // コマンドが空文字列の場合はエラー
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":""}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("command_line"));
+    }
+
+    #[test]
+    fn test_windsurf_input_post_cascade_response_without_response() {
+        // response フィールドがなくても Stop として処理できること
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+    }
+
+    // === Codex 入力パースのエッジケース ===
+
+    #[test]
+    fn test_codex_input_empty_event_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":""}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("hook_event_name"));
+    }
+
+    #[test]
+    fn test_codex_input_missing_tool_name_for_tool_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("tool_name"));
+    }
+
+    #[test]
+    fn test_codex_input_missing_command_in_bash_tool_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn test_codex_input_unknown_event_passthrough() {
+        // 未知のイベントはパススルーとして処理される
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"FutureEvent","data":"test"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "FutureEvent");
+    }
+
+    #[test]
+    fn test_codex_input_stop_with_stop_hook_active() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input =
+            r#"{"hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"done"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert!(stop.stop_hook_active);
+            assert_eq!(stop.agent_message, Some("done".to_string()));
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    // === format_error の各フォーマット出力テスト ===
+
+    #[test]
+    fn test_format_error_claude_is_valid_json() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["message"].as_str().unwrap().contains("test error"));
+    }
+
+    #[test]
+    fn test_format_error_cursor_is_valid_json() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["permission"], "deny");
+        assert!(
+            parsed["user_message"]
+                .as_str()
+                .unwrap()
+                .contains("test error")
+        );
+    }
+
+    #[test]
+    fn test_format_error_gemini_is_valid_json() {
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "deny");
+        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
+    }
+
+    #[test]
+    fn test_format_error_codex_is_valid_json() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
+    }
+
+    #[test]
+    fn test_format_error_windsurf_is_valid_json() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let output = adapter.format_error("test error");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["message"].as_str().unwrap().contains("test error"));
+    }
+
+    // === Gemini 入力パースのエッジケース ===
+
+    #[test]
+    fn test_gemini_input_session_start_passthrough() {
+        // SessionStart, SessionEnd, Notification 等は未対応（エラーになるべき）
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let input = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
+        let err = adapter.parse_input(input);
+        assert!(err.is_err(), "Gemini の未対応イベントはエラーになるべき");
+    }
+
+    #[test]
+    fn test_gemini_input_before_tool_with_mcp_context() {
+        // MCP コンテキスト付きのツールイベント
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"},"mcp_context":{"server":"test"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+    }
 }
 
 // === Gemini CLI フォーマット型 ===

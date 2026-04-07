@@ -839,7 +839,7 @@ impl ShellParser {
         if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
             if let Some(command_index) = Self::find_wrapped_command_index(&cmd, &args) {
                 commands.push(args[command_index].clone());
-                let remaining: Vec<String> = args[command_index..].to_vec();
+                let remaining: Vec<String> = args[command_index + 1..].to_vec();
                 if !remaining.is_empty() {
                     let remaining_str = remaining.join(" ");
                     commands.extend(self.extract_commands_from_segment_fallback(&remaining_str));
@@ -2208,5 +2208,70 @@ mod tests {
             "npm install を含むコマンド文字列が抽出されるべき: {:?}",
             commands
         );
+    }
+
+    // --- フォールバックパーサー: ラッパーコマンド展開のテスト ---
+
+    #[test]
+    fn test_fallback_wrapper_no_duplicate_command() {
+        // ラッパー展開でコマンドが二重追加されないことを確認
+        let parser = ShellParser::new();
+        let commands = parser.extract_commands_from_segment_fallback("sudo rm -rf /tmp");
+        let rm_count = commands.iter().filter(|c| *c == "rm").count();
+        assert_eq!(
+            rm_count, 1,
+            "rm は1回だけ抽出されるべき（二重追加バグの回帰テスト）: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_fallback_nested_wrappers_no_duplicate() {
+        // 二重ラッパーでもコマンドが重複しない
+        let parser = ShellParser::new();
+        let commands = parser.extract_commands_from_segment_fallback("timeout 10 sudo rm -rf /tmp");
+        let rm_count = commands.iter().filter(|c| *c == "rm").count();
+        assert_eq!(rm_count, 1, "二重ラッパーでも rm は1回だけ: {:?}", commands);
+    }
+
+    #[test]
+    fn test_fallback_wrapper_command_only_no_args() {
+        // ラッパーの直後にコマンドだけで引数なし（境界ケース）
+        let parser = ShellParser::new();
+        let commands = parser.extract_commands_from_segment_fallback("sudo rm");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "sudo rm から rm が抽出されるべき: {:?}",
+            commands
+        );
+        let rm_count = commands.iter().filter(|c| *c == "rm").count();
+        assert_eq!(rm_count, 1, "rm は1回だけ: {:?}", commands);
+    }
+
+    #[test]
+    fn test_fallback_env_wrapper_with_assignment() {
+        // env VAR=x を経由したコマンド抽出
+        let parser = ShellParser::new();
+        let commands =
+            parser.extract_commands_from_segment_fallback("env HOME=/tmp rm -rf /var/data");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "env ラッパー経由で rm が抽出されるべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_fallback_wrapper_with_remaining_args() {
+        // ラッパー展開後の残り引数が正しく処理される
+        let parser = ShellParser::new();
+        let commands = parser.extract_commands_from_segment_fallback("sudo -u root rm -rf /var");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "sudo -u root 経由で rm が抽出されるべき: {:?}",
+            commands
+        );
+        let rm_count = commands.iter().filter(|c| *c == "rm").count();
+        assert_eq!(rm_count, 1, "rm は1回だけ: {:?}", commands);
     }
 }

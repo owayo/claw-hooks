@@ -60,8 +60,7 @@ impl HookService {
             error!("No input received from stdin");
             // セキュリティ: フェイルクローズ - 入力がない場合はブロック
             let output_json = self.adapter.format_error("No input received from stdin");
-            writeln!(stdout, "{}", output_json)?;
-            stdout.flush()?; // パイプのためexit前にフラッシュ
+            self.write_error_output(&mut stdout, &output_json)?;
             process::exit(self.adapter.error_exit_code());
         }
 
@@ -88,8 +87,7 @@ impl HookService {
                 // 適切なフォーマットでエラーを出力
                 // セキュリティ: フェイルクローズ終了コード（2 = block）
                 let output_json = self.adapter.format_error(&error_msg);
-                writeln!(stdout, "{}", output_json)?;
-                stdout.flush()?; // パイプのためexit前にフラッシュ
+                self.write_error_output(&mut stdout, &output_json)?;
                 process::exit(self.adapter.error_exit_code());
             }
         };
@@ -196,6 +194,23 @@ impl HookService {
 
         // BeforePrompt は現在パススルーイベント
         Decision::allow()
+    }
+
+    /// フェイルクローズ時のエラー出力を適切なストリームに書き込む。
+    ///
+    /// Windsurf はブロック時に exit code 2 + stderr からメッセージを読むため、
+    /// フェイルクローズパスでも stderr に書く必要がある。
+    fn write_error_output(&self, stdout: &mut io::StdoutLock, output_json: &str) -> Result<()> {
+        if self.adapter.format_uses_stderr_for_errors() {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            writeln!(stderr, "{}", output_json)?;
+            stderr.flush()?;
+        } else {
+            writeln!(stdout, "{}", output_json)?;
+            stdout.flush()?;
+        }
+        Ok(())
     }
 
     /// SubagentStart/SubagentStop イベントの処理。

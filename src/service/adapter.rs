@@ -98,6 +98,14 @@ impl FormatAdapter {
         )
     }
 
+    /// フェイルクローズ時にエラー出力を stderr に書くべきかを返す。
+    ///
+    /// Windsurf はブロック時に exit code 2 + stderr からメッセージを読むため、
+    /// パースエラー等のフェイルクローズパスでも stderr に書く必要がある。
+    pub fn format_uses_stderr_for_errors(&self) -> bool {
+        matches!(self.format, Format::Windsurf)
+    }
+
     /// エラーメッセージを出力用にフォーマットする。
     /// 入力パース失敗時に使用される。
     /// セキュリティ: フェイルクローズド設計 - パースエラー時はブロックする。

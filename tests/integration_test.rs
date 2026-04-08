@@ -896,16 +896,18 @@ fn test_cursor_empty_input_is_fail_closed() {
 
 #[test]
 fn test_windsurf_empty_input_is_fail_closed() {
-    let (stdout, _stderr, exit_code) = run_hook_with_format("", "windsurf");
+    let (_stdout, stderr, exit_code) = run_hook_with_format("", "windsurf");
 
     assert_eq!(
         exit_code, 2,
         "Empty input should result in block (fail-closed)"
     );
+    // Windsurf はブロック時に stderr からメッセージを読むため、
+    // フェイルクローズパスでも stderr に出力される
     assert!(
-        stdout.contains("fail-closed"),
-        "Output should indicate fail-closed: {}",
-        stdout
+        stderr.contains("fail-closed"),
+        "stderr should indicate fail-closed: {}",
+        stderr
     );
 }
 

@@ -1134,3 +1134,215 @@ fn test_block_rm_in_command_substitution() {
         stdout
     );
 }
+
+// =========================================================================
+// Codex フォーマット統合テスト
+// =========================================================================
+
+#[test]
+fn test_codex_format_allow_safe_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"},"session_id":"test-session","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Safe command should be allowed");
+    // Codex Allow は空 JSON {} を返す
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex Allow should return empty JSON"
+    );
+}
+
+#[test]
+fn test_codex_format_block_rm_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"session_id":"test-session","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    // Codex: 非0終了コードはフック失敗扱いのため exit 0 + JSON で block を伝達
+    assert_eq!(exit_code, 0, "Codex block should still exit 0");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should contain block decision: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""reason""#),
+        "Output should contain reason field: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_format_block_kill_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"},"session_id":"test-session","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex block should still exit 0");
+    assert!(
+        stdout.contains(r#""decision":"block""#),
+        "Output should contain block decision: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_format_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "codex");
+
+    // Codex: 非0終了コードはフック失敗扱いのため、フェイルクローズでも exit 0
+    assert_eq!(
+        exit_code, 0,
+        "Codex empty input should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_format_invalid_json_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("{invalid json}", "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex invalid JSON should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_format_missing_required_fields_is_fail_closed() {
+    // hook_event_name が欠落: Codex はフェイルクローズすべき
+    let input = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex missing fields should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("fail-closed"),
+        "Output should indicate fail-closed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_format_stop_event() {
+    let input = r#"{"hook_event_name":"Stop","session_id":"test-session","cwd":"/tmp","stop_hook_active":false}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex Stop should exit 0");
+    // Stop Allow は空 JSON {} を返す
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex Stop Allow should return empty JSON"
+    );
+}
+
+// =========================================================================
+// Windsurf フォーマット追加テスト
+// =========================================================================
+
+#[test]
+fn test_windsurf_invalid_json_is_fail_closed_stderr() {
+    let (_stdout, stderr, exit_code) = run_hook_with_format("{invalid}", "windsurf");
+
+    assert_eq!(
+        exit_code, 2,
+        "Windsurf invalid JSON should result in block (fail-closed)"
+    );
+    // Windsurf はブロック時に stderr からメッセージを読む
+    assert!(
+        stderr.contains("fail-closed"),
+        "stderr should indicate fail-closed: {}",
+        stderr
+    );
+}
+
+// =========================================================================
+// stop_hook_active ループ防止テスト
+// =========================================================================
+
+#[test]
+fn test_stop_hook_active_true_allows_stop() {
+    // stop_hook_active=true の場合、Stop フックの無限ループを防止するため
+    // 無条件で Allow を返すべき
+    let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "Stop with stop_hook_active=true should be allowed"
+    );
+    // Stop Allow は decision を省略
+    assert!(
+        !stdout.contains(r#""decision":"block""#),
+        "Stop with stop_hook_active should not block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_stop_hook_active_false_processes_normally() {
+    // stop_hook_active=false の場合は通常通り処理される
+    let input = r#"{"hook_event_name":"Stop","stop_hook_active":false}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "Stop with stop_hook_active=false should be allowed (no stop hooks configured)"
+    );
+    assert!(
+        !stdout.contains(r#""decision":"block""#),
+        "Stop should not block without stop hooks: {}",
+        stdout
+    );
+}
+
+// =========================================================================
+// Codex フォーマット パススルーイベントテスト
+// =========================================================================
+
+#[test]
+fn test_codex_session_start_passthrough() {
+    let input = r#"{"hook_event_name":"SessionStart","session_id":"test-session","cwd":"/tmp","source":"startup"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex SessionStart should be allowed (passthrough)"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex passthrough should return empty JSON"
+    );
+}
+
+#[test]
+fn test_codex_user_prompt_submit_passthrough() {
+    let input = r#"{"hook_event_name":"UserPromptSubmit","session_id":"test-session","cwd":"/tmp","prompt":"hello"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex UserPromptSubmit should be allowed (passthrough)"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex passthrough should return empty JSON"
+    );
+}

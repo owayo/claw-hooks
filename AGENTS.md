@@ -119,6 +119,7 @@ cargo run -- version     # Show version
 - Use `--format windsurf` when testing
 - BeforeCommand (pre_run_command) Block: exit code 2 + stderr にメッセージ出力
 - Stop Block: exit code 2 + stderr にメッセージ出力
+- フェイルクローズ（パースエラー/空入力）: exit code 2 + stderr にメッセージ出力
 
 ### Gemini CLI
 - Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events

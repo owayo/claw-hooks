@@ -2354,6 +2354,33 @@ mod tests {
         }
     }
 
+    // === format_uses_stderr_for_errors のテスト ===
+
+    #[test]
+    fn test_windsurf_uses_stderr_for_errors() {
+        // Windsurf はブロック時に stderr からメッセージを読むため true
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert!(adapter.format_uses_stderr_for_errors());
+    }
+
+    #[test]
+    fn test_non_windsurf_uses_stdout_for_errors() {
+        // Windsurf 以外は stdout に出力
+        for format in [
+            Format::Claude,
+            Format::Cursor,
+            Format::Gemini,
+            Format::Codex,
+        ] {
+            let adapter = FormatAdapter::new(format, 0);
+            assert!(
+                !adapter.format_uses_stderr_for_errors(),
+                "{:?} は stderr を使わないべき",
+                format
+            );
+        }
+    }
+
     // === Codex CLI のテスト ===
 
     #[test]

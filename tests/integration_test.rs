@@ -189,9 +189,11 @@ fn test_stop_event() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(exit_code, 0, "Stop event should be allowed");
+    // Stop Allow は decision を省略（空 JSON を返す）
     assert!(
-        stdout.contains(r#""decision":"approve""#),
-        "Output should indicate allow"
+        !stdout.contains(r#""decision""#),
+        "Stop Allow should not contain decision field: {}",
+        stdout
     );
 }
 
@@ -370,27 +372,28 @@ fn test_windsurf_format_allow_safe_command() {
 #[test]
 fn test_windsurf_format_block_rm_command() {
     let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"rm -rf /tmp/test","cwd":"/path/to/project"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
+    let (_stdout, stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
     assert_eq!(exit_code, 2, "rm command should be blocked");
+    // Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Windsurf output should indicate block: {}",
-        stdout
+        stderr.contains(r#""decision":"block""#),
+        "Windsurf block message should be on stderr: {}",
+        stderr
     );
-    // Note: block message is configurable via rm_block_message in config
 }
 
 #[test]
 fn test_windsurf_format_block_kill_command() {
     let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"pkill node","cwd":"/path/to/project"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
+    let (_stdout, stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
     assert_eq!(exit_code, 2, "pkill command should be blocked");
+    // Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Windsurf output should indicate block: {}",
-        stdout
+        stderr.contains(r#""decision":"block""#),
+        "Windsurf block message should be on stderr: {}",
+        stderr
     );
 }
 

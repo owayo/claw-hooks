@@ -107,10 +107,18 @@ cargo run -- version     # Show version
 - Primary development agent
 - Uses CLAUDE.md (symlink to AGENTS.md) for instructions
 - Format: `--format claude` (default)
+- PreToolUse output: `hookSpecificOutput.permissionDecision` ("allow"/"deny") format (deprecated `decision`/`reason` top-level fields are no longer used for this event)
+- Stop output: Allow = `{}` (decision omitted), Block = `{"decision":"block","reason":"..."}`
 
-### Cursor / Windsurf
+### Cursor
 - Refer to README.md for integration examples
-- Use `--format cursor` or `--format windsurf` when testing
+- Use `--format cursor` when testing
+
+### Windsurf
+- Refer to README.md for integration examples
+- Use `--format windsurf` when testing
+- BeforeCommand (pre_run_command) Block: exit code 2 + stderr にメッセージ出力
+- Stop Block: exit code 2 + stderr にメッセージ出力
 
 ### Gemini CLI
 - Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events
@@ -119,7 +127,8 @@ cargo run -- version     # Show version
 ### Codex CLI
 - Supports all 5 hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
 - Use `--format codex` when testing
-- Block decisions must be returned via stdout JSON; non-zero exit codes are treated as hook failures
+- Allow output: `{}` (empty JSON, exit 0)
+- Block output: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
 - Missing required Codex fields must be treated as fail-closed parse errors
 - Current Codex `PreToolUse` / `PostToolUse` hooks match `Bash` only, so do not document `PostToolUse` as a file-save hook
 - Official docs: https://developers.openai.com/codex/hooks

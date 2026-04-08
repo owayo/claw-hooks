@@ -84,12 +84,17 @@ impl FormatAdapter {
         }
     }
 
-    /// 出力をstdoutではなくstderrに書き込むべきかどうか。
-    /// Windsurf Stop Blockはエラー出力にstderrを使用する。
+    /// 出力を stdout ではなく stderr に書き込むべきかどうか。
+    /// Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る。
+    /// BeforeCommand (pre_run_command) と Stop の Block 判定が対象。
     pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
         matches!(
             (&self.format, event, decision),
-            (&Format::Windsurf, HookEvent::Stop, Decision::Block { .. })
+            (
+                &Format::Windsurf,
+                HookEvent::BeforeCommand | HookEvent::Stop,
+                Decision::Block { .. }
+            )
         )
     }
 
@@ -259,18 +264,19 @@ impl FormatAdapter {
     }
 
     fn format_claude_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // StopイベントではBlock判定に"message"ではなく"reason"を使用
+        // Stop イベントでは Block 時に "decision":"block" + "reason" を使用。
+        // Allow 時は decision を省略（"Omit to allow Claude to stop"）。
         if event == HookEvent::Stop {
             let output = match decision {
                 Decision::Allow { .. } => ClaudeStopOutput {
-                    decision: "approve".to_string(),
+                    decision: None,
                     reason: None,
                 },
                 Decision::Block { message } => {
                     let normalized = normalize_lint_output(message);
                     let truncated = truncate_output(&normalized, self.output_max_length);
                     ClaudeStopOutput {
-                        decision: "block".to_string(),
+                        decision: Some("block".to_string()),
                         reason: Some(truncated),
                     }
                 }
@@ -596,12 +602,13 @@ struct ClaudeInput {
 }
 
 /// Claude Code の Stop イベント出力フォーマット。
-/// Stop イベントの Block 判定では "message" ではなく "reason" を使う。
-/// これにより Claude は停止せず、"reason" に従って続行する。
+/// Stop の Block 判定では "reason" に修正指示を含め、Claude は停止せず続行する。
+/// Allow 時は decision を省略する（公式ドキュメント: "Omit to allow Claude to stop"）。
 #[derive(Debug, Serialize)]
 struct ClaudeStopOutput {
-    /// 判定: "approve" または "block"
-    decision: String,
+    /// 判定: Block 時のみ "block" を設定。Allow 時は省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<String>,
     /// ブロック理由（エージェントへの修正指示）
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -862,9 +869,10 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
-        assert!(output.contains(r#""decision":"approve""#));
-        // BeforeCommand には hookSpecificOutput がない
-        assert!(!output.contains("hookSpecificOutput"));
+        // BeforeCommand Allow では hookSpecificOutput に permissionDecision = "allow" が含まれる
+        assert!(output.contains("hookSpecificOutput"));
+        assert!(output.contains(r#""permissionDecision":"allow""#));
+        assert!(output.contains(r#""hookEventName":"PreToolUse""#));
     }
 
     #[test]
@@ -894,6 +902,83 @@ mod tests {
             .unwrap();
         assert!(output.contains(r#""decision":"block""#));
         assert!(output.contains("Command blocked for safety"));
+    }
+
+    #[test]
+    fn test_claude_output_block_before_command_json_structure() {
+        // BeforeCommand Block の JSON に hookSpecificOutput.permissionDecision = "deny" が含まれる
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "rm is blocked".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let hso = &parsed["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["permissionDecision"], "deny");
+        assert_eq!(hso["permissionDecisionReason"], "rm is blocked");
+        // additionalContext は含まれない
+        assert!(hso.get("additionalContext").is_none());
+    }
+
+    #[test]
+    fn test_claude_output_after_file_edit_with_context_no_permission_decision() {
+        // PostToolUse(AfterFileEdit) のコンテキスト出力に permissionDecision を含めない
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let decision = Decision::allow_with_context("warning: unused".to_string());
+        let output = adapter
+            .format_output(&decision, HookEvent::AfterFileEdit)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let hso = &parsed["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PostToolUse");
+        assert_eq!(hso["additionalContext"], "warning: unused");
+        // permissionDecision は含まれない
+        assert!(hso.get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn test_claude_output_stop_block_no_hook_specific_output() {
+        // Stop Block の JSON に hookSpecificOutput が含まれない
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint errors".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "block");
+        assert_eq!(parsed["reason"], "lint errors");
+        assert!(parsed.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_claude_output_before_command_block_truncates_permission_reason() {
+        // output_max_length で permissionDecisionReason が切り詰められる
+        let adapter = FormatAdapter::new(Format::Claude, 50);
+        let long_msg = "a".repeat(100);
+        let output = adapter
+            .format_output(
+                &Decision::Block { message: long_msg },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.len() <= 50,
+            "permissionDecisionReason は切り詰められるべき: len={}",
+            reason.len()
+        );
     }
 
     #[test]
@@ -1224,9 +1309,10 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        assert!(output.contains(r#""decision":"approve""#));
-        // Allowにはreasonフィールドがない
+        // Stop Allow では decision を省略（空 JSON: "{}"）
+        assert!(!output.contains(r#""decision""#));
         assert!(!output.contains(r#""reason""#));
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -1486,12 +1572,13 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_use_stdout_for_non_stop() {
+    fn test_windsurf_use_stderr_for_before_command_block() {
+        // Windsurf pre_run_command Block は exit code 2 + stderr を使う
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let block = Decision::Block {
             message: "error".to_string(),
         };
-        assert!(!adapter.use_stderr(&block, HookEvent::BeforeCommand));
+        assert!(adapter.use_stderr(&block, HookEvent::BeforeCommand));
     }
 
     #[test]
@@ -1662,15 +1749,15 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_output_allow_uses_approve_json() {
+    fn test_codex_output_allow_uses_empty_json() {
+        // Codex: Allow は空 JSON を返す（公式ドキュメント推奨）
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-        assert_eq!(parsed["decision"], "approve");
-        assert!(parsed.get("reason").is_none());
+        assert!(parsed.as_object().unwrap().is_empty());
     }
 
     #[test]
@@ -2137,13 +2224,30 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_use_stderr_before_command_block_false() {
-        // Windsurf + BeforeCommand + Block → stderr を使用しない（Stop以外）
+    fn test_windsurf_use_stderr_before_command_block_true() {
+        // Windsurf + BeforeCommand + Block → stderr を使用する（exit code 2 でブロック）
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        assert!(!adapter.use_stderr(&decision, HookEvent::BeforeCommand));
+        assert!(adapter.use_stderr(&decision, HookEvent::BeforeCommand));
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_after_file_edit_block_false() {
+        // Windsurf + AfterFileEdit + Block → stderr を使用しない（BeforeCommand/Stop のみ）
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let decision = Decision::Block {
+            message: "error".to_string(),
+        };
+        assert!(!adapter.use_stderr(&decision, HookEvent::AfterFileEdit));
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_before_command_allow_false() {
+        // Windsurf + BeforeCommand + Allow → stderr を使用しない
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert!(!adapter.use_stderr(&Decision::allow(), HookEvent::BeforeCommand));
     }
 
     #[test]
@@ -2154,6 +2258,40 @@ mod tests {
             message: "error".to_string(),
         };
         assert!(!adapter.use_stderr(&decision, HookEvent::Stop));
+    }
+
+    #[test]
+    fn test_non_windsurf_use_stderr_always_false() {
+        // Windsurf 以外のフォーマットでは use_stderr は常に false
+        let block = Decision::Block {
+            message: "err".to_string(),
+        };
+        for format in [
+            Format::Claude,
+            Format::Cursor,
+            Format::Codex,
+            Format::Gemini,
+        ] {
+            let adapter = FormatAdapter::new(format, 0);
+            for event in [
+                HookEvent::BeforeCommand,
+                HookEvent::Stop,
+                HookEvent::AfterFileEdit,
+            ] {
+                assert!(
+                    !adapter.use_stderr(&block, event),
+                    "{:?} + {:?} + Block で use_stderr は false であるべき",
+                    format,
+                    event
+                );
+                assert!(
+                    !adapter.use_stderr(&Decision::allow(), event),
+                    "{:?} + {:?} + Allow で use_stderr は false であるべき",
+                    format,
+                    event
+                );
+            }
+        }
     }
 
     // === format_error のテスト ===
@@ -2268,13 +2406,13 @@ mod tests {
 
     #[test]
     fn test_codex_output_allow() {
-        // Codex: Allow出力 → "approve" を含む
+        // Codex: Allow は空 JSON を返す
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "approve");
+        assert!(parsed.as_object().unwrap().is_empty());
     }
 
     #[test]
@@ -2469,13 +2607,13 @@ mod tests {
 
     #[test]
     fn test_codex_output_stop_allow() {
+        // Codex: Stop Allow も空 JSON
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "approve");
-        assert!(parsed.get("reason").is_none());
+        assert!(parsed.as_object().unwrap().is_empty());
     }
 
     // === exit_code エッジケーステスト ===
@@ -3155,12 +3293,10 @@ impl FormatAdapter {
     }
 
     fn format_codex_output(&self, decision: &Decision) -> Result<String> {
-        // Codex CLI は decision/reason 形式の JSON を解釈する。
-        // Stop フックでは `{"decision":"block","reason":"..."}` により継続修正を促せる。
+        // Codex CLI: Allow は exit 0 + 空 JSON（公式ドキュメント推奨）。
+        // Block は legacy 形式 {"decision":"block","reason":"..."} を使用（公式に受理される）。
         let output = match decision {
-            Decision::Allow { .. } => serde_json::json!({
-                "decision": "approve"
-            }),
+            Decision::Allow { .. } => serde_json::json!({}),
             Decision::Block { message } => {
                 let normalized = normalize_lint_output(message);
                 let truncated = truncate_output(&normalized, self.output_max_length);

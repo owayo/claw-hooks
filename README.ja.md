@@ -918,9 +918,9 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 
 現行の Codex Hooks は `PreToolUse` / `PostToolUse` ともに `Bash` のみを対象にします。`claw-hooks` は互換性のため `PostToolUse` を受け付けますが、拡張子フックを実行するのは Claude の `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `write_file` のようなファイル書き込みイベントだけです。
 
-出力形式は、許可時に `approve`、ブロック時に `reason` 付き `block` を使用します:
-- 許可: `{"decision":"approve"}`
-- ブロック: `{"decision":"block","reason":"..."}`
+出力形式:
+- 許可: `{}`（空JSON、exit 0）
+- ブロック: `{"decision":"block","reason":"..."}`（レガシー形式、公式に受理される）
 
 Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
 
@@ -984,11 +984,33 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 }
 ```
 
-### 出力 (stdout)
+### 出力 (stdout/stderr)
 
-**許可**: `{"decision":"approve"}`
+**Claude Code PreToolUse 許可**:
+```json
+{
+  "decision": "approve",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow"
+  }
+}
+```
 
-**許可（lint出力付き、Claude Code PostToolUseのみ）**:
+**Claude Code PreToolUse ブロック**:
+```json
+{
+  "decision": "block",
+  "message": "Use safe-rm instead...",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Use safe-rm instead..."
+  }
+}
+```
+
+**Claude Code PostToolUse 許可（lint出力付き）**:
 ```json
 {
   "decision": "approve",
@@ -1001,7 +1023,15 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 
 `additionalContext`フィールドはlint警告/エラーをClaude Codeに送信し、エージェントが自動的に問題を修正できます。この機能はClaude CodeのPostToolUseフックでのみ利用可能です。
 
-**ブロック**: `{"decision":"block","message":"Use safe-rm instead..."}`
+**Claude Code Stop 許可**: `{}`
+
+**Claude Code Stop ブロック**: `{"decision":"block","reason":"lint errors found..."}`
+
+**Windsurf ブロック**: exit code 2 でブロック時、stderrにメッセージ出力（Windsurfはexit code 2でstderrを読み取る）。
+
+**Codex CLI 許可**: `{}`（空JSON）
+
+**Codex CLI ブロック**: `{"decision":"block","reason":"Use safe-rm instead..."}`
 
 ### 終了コード
 

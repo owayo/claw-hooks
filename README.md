@@ -918,9 +918,9 @@ Uses `hook_event_name` field:
 
 Current Codex hooks match `PreToolUse` and `PostToolUse` on `Bash` only. `claw-hooks` keeps `PostToolUse` compatible, but extension hooks still run only for file-write events such as Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, and Gemini `write_file`.
 
-Output format uses `approve`/`block` with a `reason` field for blocks:
-- Allow: `{"decision":"approve"}`
-- Block: `{"decision":"block","reason":"..."}`
+Output format:
+- Allow: `{}` (empty JSON, exit 0)
+- Block: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
 
 Hooks should exit with status `0` for both allow and block decisions. A non-zero exit code is treated by Codex CLI as a hook failure, not as a block.
 
@@ -984,11 +984,33 @@ Codex `PostToolUse` is omitted from the "After File Save" flow because the curre
 }
 ```
 
-### Output (stdout)
+### Output (stdout/stderr)
 
-**Approve**: `{"decision":"approve"}`
+**Claude Code PreToolUse Allow**:
+```json
+{
+  "decision": "approve",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow"
+  }
+}
+```
 
-**Approve with lint output (Claude Code PostToolUse only)**:
+**Claude Code PreToolUse Block**:
+```json
+{
+  "decision": "block",
+  "message": "Use safe-rm instead...",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Use safe-rm instead..."
+  }
+}
+```
+
+**Claude Code PostToolUse Allow with lint output**:
 ```json
 {
   "decision": "approve",
@@ -1001,7 +1023,15 @@ Codex `PostToolUse` is omitted from the "After File Save" flow because the curre
 
 The `additionalContext` field passes lint warnings/errors to Claude Code, allowing it to fix issues automatically. This feature is only available for Claude Code's PostToolUse hooks.
 
-**Block**: `{"decision":"block","message":"Use safe-rm instead..."}`
+**Claude Code Stop Allow**: `{}`
+
+**Claude Code Stop Block**: `{"decision":"block","reason":"lint errors found..."}`
+
+**Windsurf Block**: Exit code 2 with block message on stderr (Windsurf reads stderr on exit code 2).
+
+**Codex CLI Allow**: `{}` (empty JSON)
+
+**Codex CLI Block**: `{"decision":"block","reason":"Use safe-rm instead..."}`
 
 ### Exit Codes
 

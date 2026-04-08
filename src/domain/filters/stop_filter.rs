@@ -268,7 +268,13 @@ impl StopHookFilter {
                 match Self::execute_command_tracked(&command, timeout_secs, agent_msg.as_deref()) {
                     Ok(result) => {
                         Self::log_output(&command, &result.output);
-                        if result.output.status.success() || result.timed_out {
+                        if result.timed_out {
+                            // タイムアウトは異常終了 — 成功として扱わない
+                            Some(format!(
+                                "⏱ Stop hook timed out after {}s: {}",
+                                timeout_secs, &command
+                            ))
+                        } else if result.output.status.success() {
                             None
                         } else {
                             Some(Self::build_reason(&command, &result.output))
@@ -985,9 +991,9 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_hook_timeout_conditional_allows() {
+    fn test_stop_hook_timeout_conditional_reports_failure() {
         use crate::config::HookCondition;
-        // Conditional hook with timeout should allow (timeout treated as success)
+        // report=true の条件付きフックがタイムアウトした場合、Block を返すべき
         let hooks = vec![StopHook {
             commands: vec!["sleep 10".to_string()],
             condition: Some(HookCondition {
@@ -997,7 +1003,7 @@ mod tests {
 
             stage: None,
 
-            report: None,
+            report: None, // condition あり → should_report() = true
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1006,13 +1012,20 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(
-            matches!(decision, Decision::Allow { .. }),
-            "Timeout should be treated as Allow, got: {:?}",
+            matches!(decision, Decision::Block { .. }),
+            "タイムアウトした report=true フックは Block を返すべき, got: {:?}",
             decision
         );
+        if let Decision::Block { message } = &decision {
+            assert!(
+                message.contains("timed out"),
+                "タイムアウトメッセージが含まれるべき: {}",
+                message
+            );
+        }
         assert!(
             elapsed.as_secs() < 5,
-            "Conditional hook should timeout in ~2s, took {:?}",
+            "タイムアウトは約2秒で発生すべき, took {:?}",
             elapsed
         );
     }
@@ -1047,7 +1060,7 @@ mod tests {
     fn test_stop_hook_timeout_mixed_fast_and_slow_conditional() {
         use crate::config::HookCondition;
         // 2つの条件付きコマンドが並列実行: 1つは高速成功、1つはタイムアウト
-        // タイムアウトは成功として扱われるため、両方とも許可されるべき
+        // タイムアウトしたコマンドは失敗として報告される
         let hooks = vec![StopHook {
             commands: vec!["true".to_string(), "sleep 10".to_string()],
             condition: Some(HookCondition {
@@ -1057,7 +1070,7 @@ mod tests {
 
             stage: None,
 
-            report: None,
+            report: None, // condition あり → should_report() = true
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1066,13 +1079,20 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(
-            matches!(decision, Decision::Allow { .. }),
-            "Timeout should be treated as Allow, got: {:?}",
+            matches!(decision, Decision::Block { .. }),
+            "タイムアウトした report=true フックは Block を返すべき, got: {:?}",
             decision
         );
+        if let Decision::Block { message } = &decision {
+            assert!(
+                message.contains("timed out"),
+                "タイムアウトメッセージが含まれるべき: {}",
+                message
+            );
+        }
         assert!(
             elapsed.as_secs() < 5,
-            "Should timeout in ~2s, took {:?}",
+            "タイムアウトは約2秒で発生すべき, took {:?}",
             elapsed
         );
     }
@@ -1149,6 +1169,64 @@ mod tests {
             "1s command should complete before 3s timeout: {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn test_stop_hook_report_false_failure_does_not_block() {
+        // report=false の失敗フックは Block を返さない（fire-and-forget）
+        let hooks = vec![StopHook {
+            commands: vec!["false".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(false),
+        }];
+        let filter = StopHookFilter::new(hooks, false, 5);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "report=false のフック失敗は Allow を返すべき, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_multi_stage_collects_failures_across_stages() {
+        use crate::config::HookCondition;
+        // stage 1 は成功、stage 5 は失敗 → 失敗メッセージは stage 5 のもののみ
+        let hooks = vec![
+            StopHook {
+                commands: vec!["true".to_string()],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(1),
+                report: Some(true),
+            },
+            StopHook {
+                commands: vec!["sh -c 'echo stage5-error >&2; exit 1'".to_string()],
+                condition: Some(HookCondition {
+                    command_exists: None,
+                    file_exists: Some("Cargo.toml".to_string()),
+                }),
+                stage: Some(5),
+                report: Some(true),
+            },
+        ];
+        let filter = StopHookFilter::new(hooks, false, 10);
+        let decision = filter.execute(&make_stop_input());
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "stage 5 の失敗により Block を返すべき, got: {:?}",
+            decision
+        );
+        if let Decision::Block { message } = &decision {
+            assert!(
+                message.contains("stage5-error"),
+                "stage 5 のエラーメッセージが含まれるべき: {}",
+                message
+            );
+        }
     }
 
     // === Agent message propagation tests ===

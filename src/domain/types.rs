@@ -204,7 +204,9 @@ pub struct HookOutput {
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 
-/// Claude Code PostToolUse 用のフック固有出力。
+/// Claude Code 用のフック固有出力。
+/// PreToolUse: permissionDecision / permissionDecisionReason
+/// PostToolUse: additionalContext
 #[derive(Debug, Clone, Serialize)]
 pub struct HookSpecificOutput {
     /// フックイベント名
@@ -214,6 +216,17 @@ pub struct HookSpecificOutput {
     /// エージェントへの追加コンテキスト（例: lint 警告）
     #[serde(rename = "additionalContext", skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+
+    /// PreToolUse 用の権限判定: "allow" / "deny"
+    #[serde(rename = "permissionDecision", skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<String>,
+
+    /// PreToolUse 用のブロック理由
+    #[serde(
+        rename = "permissionDecisionReason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub permission_decision_reason: Option<String>,
 }
 
 /// オプションのブロックメッセージ付き処理判定。
@@ -251,19 +264,30 @@ impl Decision {
         }
     }
 
-    /// 指定イベントに対して判定を HookOutput に変換する。
+    /// 指定イベントに対して判定を HookOutput に変換する（Claude Code 形式）。
+    ///
+    /// - BeforeCommand (PreToolUse): hookSpecificOutput.permissionDecision を使用
+    /// - AfterFileEdit (PostToolUse): hookSpecificOutput.additionalContext を使用
+    /// - Stop: トップレベル decision/reason を使用（format_claude_output 側で処理）
     pub fn into_output(self, event: HookEvent) -> HookOutput {
         match self {
             Decision::Allow { additional_context } => {
-                // AfterFileEdit（Claude Code の PostToolUse）の場合のみ hookSpecificOutput を含める
-                let hook_specific_output = if event == HookEvent::AfterFileEdit {
-                    additional_context.map(|ctx| HookSpecificOutput {
-                        // 外部形式は Claude Code 互換性のため "PostToolUse" を使用
+                let hook_specific_output = match event {
+                    // PreToolUse: hookSpecificOutput.permissionDecision = "allow"
+                    HookEvent::BeforeCommand => Some(HookSpecificOutput {
+                        hook_event_name: "PreToolUse".to_string(),
+                        additional_context: None,
+                        permission_decision: Some("allow".to_string()),
+                        permission_decision_reason: None,
+                    }),
+                    // PostToolUse: hookSpecificOutput.additionalContext
+                    HookEvent::AfterFileEdit => additional_context.map(|ctx| HookSpecificOutput {
                         hook_event_name: "PostToolUse".to_string(),
                         additional_context: Some(ctx),
-                    })
-                } else {
-                    None
+                        permission_decision: None,
+                        permission_decision_reason: None,
+                    }),
+                    _ => None,
                 };
 
                 HookOutput {
@@ -272,11 +296,25 @@ impl Decision {
                     hook_specific_output,
                 }
             }
-            Decision::Block { message } => HookOutput {
-                decision: "block".to_string(),
-                message: Some(message),
-                hook_specific_output: None,
-            },
+            Decision::Block { message } => {
+                let hook_specific_output = if event == HookEvent::BeforeCommand {
+                    // PreToolUse: hookSpecificOutput.permissionDecision = "deny"
+                    Some(HookSpecificOutput {
+                        hook_event_name: "PreToolUse".to_string(),
+                        additional_context: None,
+                        permission_decision: Some("deny".to_string()),
+                        permission_decision_reason: Some(message.clone()),
+                    })
+                } else {
+                    None
+                };
+
+                HookOutput {
+                    decision: "block".to_string(),
+                    message: Some(message),
+                    hook_specific_output,
+                }
+            }
         }
     }
 
@@ -368,8 +406,14 @@ mod tests {
 
         assert_eq!(output.decision, "approve");
         assert!(output.message.is_none());
-        // BeforeCommand には hookSpecificOutput なし
-        assert!(output.hook_specific_output.is_none());
+        // BeforeCommand では hookSpecificOutput に permissionDecision = "allow" が含まれる
+        let hook_output = output
+            .hook_specific_output
+            .expect("BeforeCommand Allow には hookSpecificOutput が必要");
+        assert_eq!(hook_output.hook_event_name, "PreToolUse");
+        assert_eq!(hook_output.permission_decision, Some("allow".to_string()));
+        assert!(hook_output.permission_decision_reason.is_none());
+        assert!(hook_output.additional_context.is_none());
     }
 
     #[test]
@@ -403,13 +447,16 @@ mod tests {
 
     #[test]
     fn test_decision_into_output_allow_with_context_before_command() {
-        // BeforeCommand ではコンテキストは無視される（AfterFileEdit のみ対応）
+        // BeforeCommand では permissionDecision = "allow" が hookSpecificOutput に含まれる
         let decision = Decision::allow_with_context("Some context".to_string());
         let output = decision.into_output(HookEvent::BeforeCommand);
 
         assert_eq!(output.decision, "approve");
-        // BeforeCommand では hookSpecificOutput は存在すべきでない
-        assert!(output.hook_specific_output.is_none());
+        let hook_output = output
+            .hook_specific_output
+            .expect("BeforeCommand Allow には hookSpecificOutput が必要");
+        assert_eq!(hook_output.hook_event_name, "PreToolUse");
+        assert_eq!(hook_output.permission_decision, Some("allow".to_string()));
     }
 
     #[test]
@@ -424,7 +471,16 @@ mod tests {
             output.message,
             Some("Command blocked for safety".to_string())
         );
-        assert!(output.hook_specific_output.is_none());
+        // BeforeCommand Block では hookSpecificOutput に permissionDecision = "deny" が含まれる
+        let hook_output = output
+            .hook_specific_output
+            .expect("BeforeCommand Block には hookSpecificOutput が必要");
+        assert_eq!(hook_output.hook_event_name, "PreToolUse");
+        assert_eq!(hook_output.permission_decision, Some("deny".to_string()));
+        assert_eq!(
+            hook_output.permission_decision_reason,
+            Some("Command blocked for safety".to_string())
+        );
     }
 
     #[test]
@@ -445,6 +501,32 @@ mod tests {
         assert_eq!(output.decision, "approve");
         // BeforePrompt イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_block_after_file_edit_no_hook_specific() {
+        // AfterFileEdit の Block では hookSpecificOutput を生成しない
+        let decision = Decision::Block {
+            message: "Error".to_string(),
+        };
+        let output = decision.into_output(HookEvent::AfterFileEdit);
+        assert_eq!(output.decision, "block");
+        assert!(
+            output.hook_specific_output.is_none(),
+            "AfterFileEdit Block には hookSpecificOutput を含めない"
+        );
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_with_context_stop_discards() {
+        // Stop ではコンテキストを無視し hookSpecificOutput を生成しない
+        let decision = Decision::allow_with_context("ctx".to_string());
+        let output = decision.into_output(HookEvent::Stop);
+        assert_eq!(output.decision, "approve");
+        assert!(
+            output.hook_specific_output.is_none(),
+            "Stop ではコンテキストを無視すべき"
+        );
     }
 
     #[test]

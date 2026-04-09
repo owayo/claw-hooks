@@ -190,16 +190,23 @@ pub struct StopInput {
 }
 
 /// AI エージェントに返されるフック出力。
+///
+/// PreToolUse: hookSpecificOutput のみ（トップレベル decision/reason は deprecated）
+/// PostToolUse: トップレベル decision/reason を使用
 #[derive(Debug, Clone, Serialize)]
 pub struct HookOutput {
-    /// 判定: "approve" または "block"
-    pub decision: String,
-
-    /// オプションのメッセージ（通常ブロック時に存在）
+    /// 判定: "block" のみ使用。Allow 時は省略。
+    /// PreToolUse ではこのフィールドは deprecated のため省略する。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    pub decision: Option<String>,
 
-    /// Claude Code 用のフック固有出力（PostToolUse additionalContext）
+    /// ブロック理由（PostToolUse Block 時に使用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Claude Code 用のフック固有出力
+    /// PreToolUse: permissionDecision / permissionDecisionReason
+    /// PostToolUse: additionalContext
     #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
@@ -266,9 +273,9 @@ impl Decision {
 
     /// 指定イベントに対して判定を HookOutput に変換する（Claude Code 形式）。
     ///
-    /// - BeforeCommand (PreToolUse): hookSpecificOutput.permissionDecision を使用
-    /// - AfterFileEdit (PostToolUse): hookSpecificOutput.additionalContext を使用
-    /// - Stop: トップレベル decision/reason を使用（format_claude_output 側で処理）
+    /// - BeforeCommand (PreToolUse): hookSpecificOutput のみ（トップレベル decision は deprecated）
+    /// - AfterFileEdit (PostToolUse): Allow は hookSpecificOutput.additionalContext、Block はトップレベル decision/reason
+    /// - Stop: format_claude_output 側で ClaudeStopOutput を使用するため、ここには来ない
     pub fn into_output(self, event: HookEvent) -> HookOutput {
         match self {
             Decision::Allow { additional_context } => {
@@ -291,30 +298,30 @@ impl Decision {
                 };
 
                 HookOutput {
-                    decision: "approve".to_string(),
-                    message: None,
+                    decision: None,
+                    reason: None,
                     hook_specific_output,
                 }
             }
-            Decision::Block { message } => {
-                let hook_specific_output = if event == HookEvent::BeforeCommand {
-                    // PreToolUse: hookSpecificOutput.permissionDecision = "deny"
-                    Some(HookSpecificOutput {
+            Decision::Block { message } => match event {
+                // PreToolUse: hookSpecificOutput のみ（トップレベル decision/reason は deprecated）
+                HookEvent::BeforeCommand => HookOutput {
+                    decision: None,
+                    reason: None,
+                    hook_specific_output: Some(HookSpecificOutput {
                         hook_event_name: "PreToolUse".to_string(),
                         additional_context: None,
                         permission_decision: Some("deny".to_string()),
-                        permission_decision_reason: Some(message.clone()),
-                    })
-                } else {
-                    None
-                };
-
-                HookOutput {
-                    decision: "block".to_string(),
-                    message: Some(message),
-                    hook_specific_output,
-                }
-            }
+                        permission_decision_reason: Some(message),
+                    }),
+                },
+                // PostToolUse 等: トップレベル decision/reason を使用
+                _ => HookOutput {
+                    decision: Some("block".to_string()),
+                    reason: Some(message),
+                    hook_specific_output: None,
+                },
+            },
         }
     }
 
@@ -404,9 +411,10 @@ mod tests {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::BeforeCommand);
 
-        assert_eq!(output.decision, "approve");
-        assert!(output.message.is_none());
-        // BeforeCommand では hookSpecificOutput に permissionDecision = "allow" が含まれる
+        // PreToolUse Allow: トップレベルに decision/reason を含めない
+        assert!(output.decision.is_none());
+        assert!(output.reason.is_none());
+        // hookSpecificOutput に permissionDecision = "allow" が含まれる
         let hook_output = output
             .hook_specific_output
             .expect("BeforeCommand Allow には hookSpecificOutput が必要");
@@ -421,8 +429,9 @@ mod tests {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::AfterFileEdit);
 
-        assert_eq!(output.decision, "approve");
-        assert!(output.message.is_none());
+        // PostToolUse Allow: トップレベルに decision/reason を含めない
+        assert!(output.decision.is_none());
+        assert!(output.reason.is_none());
         // 追加コンテキストがない場合 hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
@@ -432,8 +441,9 @@ mod tests {
         let decision = Decision::allow_with_context("Lint warning: unused variable".to_string());
         let output = decision.into_output(HookEvent::AfterFileEdit);
 
-        assert_eq!(output.decision, "approve");
-        assert!(output.message.is_none());
+        // PostToolUse Allow: トップレベルに decision/reason を含めない
+        assert!(output.decision.is_none());
+        assert!(output.reason.is_none());
         // コンテキスト付き AfterFileEdit では hookSpecificOutput が存在するべき
         let hook_output = output
             .hook_specific_output
@@ -451,7 +461,8 @@ mod tests {
         let decision = Decision::allow_with_context("Some context".to_string());
         let output = decision.into_output(HookEvent::BeforeCommand);
 
-        assert_eq!(output.decision, "approve");
+        // PreToolUse: トップレベルに decision を含めない
+        assert!(output.decision.is_none());
         let hook_output = output
             .hook_specific_output
             .expect("BeforeCommand Allow には hookSpecificOutput が必要");
@@ -460,18 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn test_decision_into_output_block() {
+    fn test_decision_into_output_block_before_command() {
         let decision = Decision::Block {
             message: "Command blocked for safety".to_string(),
         };
         let output = decision.into_output(HookEvent::BeforeCommand);
 
-        assert_eq!(output.decision, "block");
-        assert_eq!(
-            output.message,
-            Some("Command blocked for safety".to_string())
-        );
-        // BeforeCommand Block では hookSpecificOutput に permissionDecision = "deny" が含まれる
+        // PreToolUse Block: トップレベルに decision/reason を含めない（deprecated）
+        assert!(output.decision.is_none());
+        assert!(output.reason.is_none());
+        // hookSpecificOutput に permissionDecision = "deny" が含まれる
         let hook_output = output
             .hook_specific_output
             .expect("BeforeCommand Block には hookSpecificOutput が必要");
@@ -488,7 +497,8 @@ mod tests {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::Stop);
 
-        assert_eq!(output.decision, "approve");
+        // Stop Allow: トップレベルに decision を含めない
+        assert!(output.decision.is_none());
         // Stop イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
@@ -498,19 +508,21 @@ mod tests {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::BeforePrompt);
 
-        assert_eq!(output.decision, "approve");
+        // BeforePrompt Allow: トップレベルに decision を含めない
+        assert!(output.decision.is_none());
         // BeforePrompt イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 
     #[test]
-    fn test_decision_into_output_block_after_file_edit_no_hook_specific() {
-        // AfterFileEdit の Block では hookSpecificOutput を生成しない
+    fn test_decision_into_output_block_after_file_edit() {
+        // AfterFileEdit の Block ではトップレベル decision/reason を使用
         let decision = Decision::Block {
             message: "Error".to_string(),
         };
         let output = decision.into_output(HookEvent::AfterFileEdit);
-        assert_eq!(output.decision, "block");
+        assert_eq!(output.decision, Some("block".to_string()));
+        assert_eq!(output.reason, Some("Error".to_string()));
         assert!(
             output.hook_specific_output.is_none(),
             "AfterFileEdit Block には hookSpecificOutput を含めない"
@@ -522,7 +534,7 @@ mod tests {
         // Stop ではコンテキストを無視し hookSpecificOutput を生成しない
         let decision = Decision::allow_with_context("ctx".to_string());
         let output = decision.into_output(HookEvent::Stop);
-        assert_eq!(output.decision, "approve");
+        assert!(output.decision.is_none());
         assert!(
             output.hook_specific_output.is_none(),
             "Stop ではコンテキストを無視すべき"
@@ -612,7 +624,7 @@ mod tests {
     fn test_decision_into_output_subagent_start() {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::SubagentStart);
-        assert_eq!(output.decision, "approve");
+        assert!(output.decision.is_none());
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -620,7 +632,35 @@ mod tests {
     fn test_decision_into_output_subagent_stop() {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::SubagentStop);
-        assert_eq!(output.decision, "approve");
+        assert!(output.decision.is_none());
+        assert!(output.hook_specific_output.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_block_stop_uses_top_level_fields() {
+        // Stop Block は hookSpecificOutput を使わず、
+        // トップレベルの decision/reason を使用する。
+        let decision = Decision::Block {
+            message: "lint errors found".to_string(),
+        };
+        let output = decision.into_output(HookEvent::Stop);
+        assert_eq!(output.decision, Some("block".to_string()));
+        assert_eq!(output.reason, Some("lint errors found".to_string()));
+        assert!(
+            output.hook_specific_output.is_none(),
+            "Stop Block は hookSpecificOutput を含むべきではない"
+        );
+    }
+
+    #[test]
+    fn test_decision_into_output_block_before_prompt() {
+        // BeforePrompt Block もトップレベル decision/reason を使用する。
+        let decision = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        let output = decision.into_output(HookEvent::BeforePrompt);
+        assert_eq!(output.decision, Some("block".to_string()));
+        assert_eq!(output.reason, Some("blocked".to_string()));
         assert!(output.hook_specific_output.is_none());
     }
 }

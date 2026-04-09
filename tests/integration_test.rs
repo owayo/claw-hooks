@@ -39,7 +39,7 @@ fn test_allow_safe_command() {
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate allow: {}",
         stdout
     );
@@ -52,8 +52,8 @@ fn test_block_kill_command() {
 
     assert_eq!(exit_code, 2, "Kill command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block: {}",
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny: {}",
         stdout
     );
     // Note: block message is configurable via kill_block_message in config
@@ -66,8 +66,8 @@ fn test_block_pkill_command() {
 
     assert_eq!(exit_code, 2, "pkill command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
 }
 
@@ -78,8 +78,8 @@ fn test_block_killall_command() {
 
     assert_eq!(exit_code, 2, "killall command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
 }
 
@@ -90,8 +90,8 @@ fn test_block_rm_command() {
 
     assert_eq!(exit_code, 2, "rm command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
     // Note: block message is configurable via rm_block_message in config
 }
@@ -103,8 +103,8 @@ fn test_block_rmdir_command() {
 
     assert_eq!(exit_code, 2, "rmdir command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
 }
 
@@ -115,8 +115,8 @@ fn test_piped_command_with_kill() {
 
     assert_eq!(exit_code, 2, "Piped command with kill should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
 }
 
@@ -127,8 +127,8 @@ fn test_chained_command_with_rm() {
 
     assert_eq!(exit_code, 2, "Chained command with rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block"
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny"
     );
 }
 
@@ -139,7 +139,7 @@ fn test_allow_file_read_operation() {
 
     assert_eq!(exit_code, 0, "Read operation should be allowed");
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate allow"
     );
 }
@@ -152,7 +152,7 @@ fn test_allow_file_write_operation() {
     // Without extension hooks configured, write should be allowed
     assert_eq!(exit_code, 0, "Write operation should be allowed");
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate allow"
     );
 }
@@ -164,7 +164,7 @@ fn test_non_bash_tool_allowed() {
 
     assert_eq!(exit_code, 0, "Non-bash tool should be allowed");
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate allow"
     );
 }
@@ -176,9 +176,11 @@ fn test_post_tool_use_event() {
 
     // PostToolUse events should be allowed (monitoring only, no blocking)
     assert_eq!(exit_code, 0, "PostToolUse should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"approve""#),
-        "Output should indicate allow"
+    // PostToolUse Allow: 空 JSON（decision 省略）
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "PostToolUse Allow should return empty JSON"
     );
 }
 
@@ -263,8 +265,8 @@ fn test_block_dd_command_by_default() {
 
     assert_eq!(exit_code, 2, "dd command should be blocked by default");
     assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block: {}",
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate deny: {}",
         stdout
     );
 }
@@ -362,9 +364,11 @@ fn test_windsurf_format_allow_safe_command() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"approve""#),
-        "Windsurf output should indicate allow: {}",
+    // Windsurf Allow: 空 JSON（decision 省略）
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Windsurf allow should return empty JSON: {}",
         stdout
     );
 }
@@ -405,9 +409,11 @@ fn test_windsurf_format_post_write_code() {
 
     // PostToolUse events should be allowed (monitoring only)
     assert_eq!(exit_code, 0, "post_write_code should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"approve""#),
-        "Windsurf output should indicate allow: {}",
+    // Windsurf Allow: 空 JSON（decision 省略）
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Windsurf allow should return empty JSON: {}",
         stdout
     );
 }
@@ -465,9 +471,11 @@ fn test_windsurf_format_post_cascade_response() {
 
     // Stop events should be allowed (monitoring only)
     assert_eq!(exit_code, 0, "post_cascade_response should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"approve""#),
-        "Windsurf output should indicate allow: {}",
+    // Windsurf Stop Allow: 空 JSON（decision 省略）
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Windsurf stop allow should return empty JSON: {}",
         stdout
     );
 }
@@ -528,7 +536,7 @@ fn test_custom_filter_blocks_yarn_after_semicolon() {
 
     assert_eq!(exit_code, 2, "yarn command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -552,7 +560,7 @@ fn test_custom_filter_allows_yarn_in_quotes() {
         "Command with yarn in quotes should be allowed"
     );
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate approve: {}",
         stdout
     );
@@ -568,7 +576,7 @@ fn test_custom_filter_blocks_direct_yarn_command() {
 
     assert_eq!(exit_code, 2, "Direct yarn command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -584,7 +592,7 @@ fn test_custom_filter_blocks_yarn_in_chained_commands() {
 
     assert_eq!(exit_code, 2, "yarn in chained command should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -600,7 +608,7 @@ fn test_custom_filter_blocks_yarn_after_pipe() {
 
     assert_eq!(exit_code, 2, "yarn after pipe should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -616,7 +624,7 @@ fn test_custom_filter_blocks_yarn_in_sh_c() {
 
     assert_eq!(exit_code, 2, "yarn in sh -c should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -632,7 +640,7 @@ fn test_custom_filter_blocks_yarn_in_bash_c() {
 
     assert_eq!(exit_code, 2, "yarn in bash -c should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -648,7 +656,7 @@ fn test_custom_filter_blocks_yarn_in_subshell() {
 
     assert_eq!(exit_code, 2, "yarn in subshell should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -667,7 +675,7 @@ fn test_custom_filter_blocks_yarn_in_command_substitution() {
         "yarn in command substitution should be blocked"
     );
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -683,7 +691,7 @@ fn test_custom_filter_allows_yarn_string_in_pipe() {
 
     assert_eq!(exit_code, 0, "yarn as string argument should be allowed");
     assert!(
-        stdout.contains(r#""decision":"approve""#),
+        stdout.contains(r#""permissionDecision":"allow""#),
         "Output should indicate approve: {}",
         stdout
     );
@@ -699,7 +707,7 @@ fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
 
     assert_eq!(exit_code, 2, "yarn in complex pipeline should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -715,7 +723,7 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
 
     assert_eq!(exit_code, 2, "yarn with env prefix should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -996,7 +1004,7 @@ fn test_block_sudo_rm() {
 
     assert_eq!(exit_code, 2, "sudo rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1009,7 +1017,7 @@ fn test_block_sudo_non_interactive_rm() {
 
     assert_eq!(exit_code, 2, "sudo -n rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1022,7 +1030,7 @@ fn test_block_sudo_long_option_rm() {
 
     assert_eq!(exit_code, 2, "sudo --user root rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1038,7 +1046,7 @@ fn test_block_timeout_long_option_rm() {
         "timeout --signal TERM 10 rm should be blocked"
     );
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1051,7 +1059,7 @@ fn test_block_command_wrapper_rm() {
 
     assert_eq!(exit_code, 2, "command rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1064,7 +1072,7 @@ fn test_block_bash_c_rm() {
 
     assert_eq!(exit_code, 2, "bash -c rm should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1077,7 +1085,7 @@ fn test_block_sudo_kill() {
 
     assert_eq!(exit_code, 2, "sudo kill should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1090,7 +1098,7 @@ fn test_block_sudo_dd() {
 
     assert_eq!(exit_code, 2, "sudo dd should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1103,7 +1111,7 @@ fn test_block_xargs_kill() {
 
     assert_eq!(exit_code, 2, "xargs kill should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1116,7 +1124,7 @@ fn test_block_rm_in_subshell() {
 
     assert_eq!(exit_code, 2, "rm in subshell should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1129,7 +1137,7 @@ fn test_block_rm_in_command_substitution() {
 
     assert_eq!(exit_code, 2, "rm in command substitution should be blocked");
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
         stdout
     );
@@ -1286,7 +1294,7 @@ fn test_stop_hook_active_true_allows_stop() {
     );
     // Stop Allow は decision を省略
     assert!(
-        !stdout.contains(r#""decision":"block""#),
+        !stdout.contains(r#""permissionDecision":"deny""#),
         "Stop with stop_hook_active should not block: {}",
         stdout
     );
@@ -1303,7 +1311,7 @@ fn test_stop_hook_active_false_processes_normally() {
         "Stop with stop_hook_active=false should be allowed (no stop hooks configured)"
     );
     assert!(
-        !stdout.contains(r#""decision":"block""#),
+        !stdout.contains(r#""permissionDecision":"deny""#),
         "Stop should not block without stop hooks: {}",
         stdout
     );

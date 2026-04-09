@@ -280,11 +280,11 @@ claw-hooks init
 
 # 安全なコマンドでテスト（許可）
 echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}' | claw-hooks hook
-# 出力: {"decision":"approve"}
+# 出力: {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 
 # 危険なコマンドでテスト（ブロック）
 echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | claw-hooks hook
-# 出力: {"decision":"block","message":"🚫 Use safe-rm instead..."}
+# 出力: {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"🚫 Use safe-rm instead..."}}
 ```
 
 ## 使用方法
@@ -770,11 +770,11 @@ message = "uv pipを使用してください"
 ```bash
 # ブロック: セミコロンの後の yarn を検出
 echo "install"; yarn install
-# → {"decision":"block","message":"`yarn`の代わりに`pnpm`を使用してください"}
+# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"`yarn`の代わりに`pnpm`を使用してください"}}
 
 # 許可: "yarn" はクォート内（コマンドではない）、pnpm は OK
 echo "not yarn install"; pnpm install
-# → {"decision":"approve"}
+# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 ```
 
 クォート内のコマンドは無視されます（引数であり、コマンドではないため）。
@@ -989,7 +989,6 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 **Claude Code PreToolUse 許可**:
 ```json
 {
-  "decision": "approve",
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow"
@@ -1000,8 +999,6 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 **Claude Code PreToolUse ブロック**:
 ```json
 {
-  "decision": "block",
-  "message": "Use safe-rm instead...",
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
@@ -1010,16 +1007,19 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 }
 ```
 
+> **注意**: PreToolUseは`hookSpecificOutput.permissionDecision`のみを使用します。トップレベルの`decision`/`reason`フィールドはこのイベントでは非推奨です。
+
 **Claude Code PostToolUse 許可（lint出力付き）**:
 ```json
 {
-  "decision": "approve",
   "hookSpecificOutput": {
     "hookEventName": "PostToolUse",
     "additionalContext": "[rustfmt {file}] warning: unused variable..."
   }
 }
 ```
+
+**Claude Code PostToolUse ブロック**: `{"decision":"block","reason":"..."}`
 
 `additionalContext`フィールドはlint警告/エラーをClaude Codeに送信し、エージェントが自動的に問題を修正できます。この機能はClaude CodeのPostToolUseフックでのみ利用可能です。
 
@@ -1052,7 +1052,7 @@ Gemini CLIはブロックを含むすべての決定に対してexit code `0`を
 **Codex CLI**（異なるセマンティクス）:
 | コード | 意味 |
 |--------|------|
-| `0` | 成功（JSONで決定: `approve` または `block`） |
+| `0` | 成功（JSONで決定: `allow` または `block`） |
 | 非0 | フック失敗（決定は無視される） |
 
 Codex CLIはブロックを含むすべての決定に対してexit code `0`を期待します。非0終了コードはフックインフラの障害として扱われ、stdoutのJSON内のブロック決定は無視されます。

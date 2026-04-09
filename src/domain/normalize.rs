@@ -891,4 +891,25 @@ mod tests {
         let result = normalize_lint_output(input);
         assert!(result.contains("/Users/dev/project/src/main.rs"));
     }
+
+    // === strip_ansi_codes の追加エッジケーステスト ===
+
+    #[test]
+    fn test_strip_ansi_codes_csi_only_bracket() {
+        // ESC [ だけで入力が終了する場合
+        let input = "before\x1b[";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "before", "ESC [ のみでもパニックしないこと");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_256color_sequence() {
+        // 256色のCSIシーケンス（中間バイトが多い）
+        let input = "\x1b[38;5;196mred text\x1b[0m";
+        let result = strip_ansi_codes(input);
+        assert_eq!(
+            result, "red text",
+            "256色CSIシーケンスが正しく除去されること"
+        );
+    }
 }

@@ -2274,4 +2274,39 @@ mod tests {
         let rm_count = commands.iter().filter(|c| *c == "rm").count();
         assert_eq!(rm_count, 1, "rm は1回だけ: {:?}", commands);
     }
+
+    // === parse_shell_tokens の未閉じクォートエッジケース ===
+
+    #[test]
+    fn test_parse_shell_tokens_unclosed_single_quote_no_panic() {
+        // 未閉じシングルクォートでパニックしないことを確認
+        let tokens = parse_shell_tokens("echo 'hello world");
+        assert!(!tokens.is_empty(), "未閉じクォートでもトークンが返るべき");
+        assert_eq!(tokens[0], "echo");
+    }
+
+    #[test]
+    fn test_parse_shell_tokens_unclosed_double_quote_no_panic() {
+        // 未閉じダブルクォートでパニックしないことを確認
+        let tokens = parse_shell_tokens("rm \"unterminated arg");
+        assert_eq!(tokens[0], "rm");
+    }
+
+    // === split_by_logical_ops のエッジケース ===
+
+    #[test]
+    fn test_split_by_logical_ops_preserves_quoted_operators() {
+        // クォート内の && はコマンド区切りとして扱わない
+        let result = ShellParser::split_by_logical_ops(r#"echo "a && b" && rm file"#);
+        assert_eq!(result.len(), 2, "クォート内の && は分割すべきでない");
+        assert_eq!(result[1].trim(), "rm file");
+    }
+
+    #[test]
+    fn test_split_by_logical_ops_single_pipe_not_split() {
+        // 単一の | はパイプであり論理演算子ではないため分割しない
+        let result = ShellParser::split_by_logical_ops("cat file | grep error || echo fail");
+        assert_eq!(result.len(), 2, "|| で分割されるべき");
+        assert!(result[0].contains("cat file | grep error"));
+    }
 }

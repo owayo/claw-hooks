@@ -107,8 +107,12 @@ cargo run -- version     # Show version
 - Primary development agent
 - Uses CLAUDE.md (symlink to AGENTS.md) for instructions
 - Format: `--format claude` (default)
-- PreToolUse output: `hookSpecificOutput.permissionDecision` ("allow"/"deny") format (deprecated `decision`/`reason` top-level fields are no longer used for this event)
-- Stop output: Allow = `{}` (decision omitted), Block = `{"decision":"block","reason":"..."}`
+- PreToolUse Allow: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}`
+- PreToolUse Block: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（トップレベル `decision`/`reason` は deprecated のため使用しない）
+- PostToolUse Allow: `{}` (追加コンテキストがある場合は `hookSpecificOutput.additionalContext` を含む)
+- PostToolUse Block: `{"decision":"block","reason":"..."}`
+- Stop output: Allow = `{}`, Block = `{"decision":"block","reason":"..."}`
+- Fail-closed errors: `{"decision":"block","reason":"..."}`
 
 ### Cursor
 - Refer to README.md for integration examples

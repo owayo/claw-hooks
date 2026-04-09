@@ -280,11 +280,11 @@ claw-hooks init
 
 # Test with a safe command (allowed)
 echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}' | claw-hooks hook
-# Output: {"decision":"approve"}
+# Output: {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 
 # Test with a dangerous command (blocked)
 echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | claw-hooks hook
-# Output: {"decision":"block","message":"🚫 Use safe-rm instead..."}
+# Output: {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"🚫 Use safe-rm instead..."}}
 ```
 
 ## Usage
@@ -770,11 +770,11 @@ Both modes detect commands even when chained with `;`, `&&`, `||`, or `|`:
 ```bash
 # Blocked: yarn is detected after semicolon
 echo "install"; yarn install
-# → {"decision":"block","message":"Use `pnpm` instead of `yarn`"}
+# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use `pnpm` instead of `yarn`"}}
 
 # Allowed: "yarn" is inside quotes (not a command), pnpm is OK
 echo "not yarn install"; pnpm install
-# → {"decision":"approve"}
+# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
 ```
 
 Commands inside quotes are ignored (they're arguments, not commands).
@@ -989,7 +989,6 @@ Codex `PostToolUse` is omitted from the "After File Save" flow because the curre
 **Claude Code PreToolUse Allow**:
 ```json
 {
-  "decision": "approve",
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow"
@@ -1000,8 +999,6 @@ Codex `PostToolUse` is omitted from the "After File Save" flow because the curre
 **Claude Code PreToolUse Block**:
 ```json
 {
-  "decision": "block",
-  "message": "Use safe-rm instead...",
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
@@ -1010,16 +1007,19 @@ Codex `PostToolUse` is omitted from the "After File Save" flow because the curre
 }
 ```
 
+> **Note**: PreToolUse uses `hookSpecificOutput.permissionDecision` only. Top-level `decision`/`reason` fields are deprecated for this event.
+
 **Claude Code PostToolUse Allow with lint output**:
 ```json
 {
-  "decision": "approve",
   "hookSpecificOutput": {
     "hookEventName": "PostToolUse",
     "additionalContext": "[rustfmt {file}] warning: unused variable..."
   }
 }
 ```
+
+**Claude Code PostToolUse Block**: `{"decision":"block","reason":"..."}`
 
 The `additionalContext` field passes lint warnings/errors to Claude Code, allowing it to fix issues automatically. This feature is only available for Claude Code's PostToolUse hooks.
 
@@ -1052,7 +1052,7 @@ Gemini CLI expects exit code `0` for all decisions, including blocks. The `decis
 **Codex CLI** (different semantics):
 | Code | Meaning |
 |------|---------|
-| `0` | Success (decision in JSON: `approve` or `block`) |
+| `0` | Success (decision in JSON: `allow` or `block`) |
 | non-zero | Hook failure (decision is ignored) |
 
 Codex CLI expects exit code `0` for all decisions, including blocks. A non-zero exit code is treated as a hook infrastructure failure, and any block decision in stdout JSON is ignored.

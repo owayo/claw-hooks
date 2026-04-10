@@ -59,7 +59,8 @@ impl FormatAdapter {
 
     /// 判定結果に対する終了コードを取得する。
     /// 注意: エージェントごとに終了コードのセマンティクスが異なる。
-    /// - Claude/Windsurf: 0 = 許可, 2 = ブロック
+    /// - Claude: 0 = 許可, 2 = ブロック
+    /// - Windsurf: 0 = 許可/Stop, 2 = ブロック（pre_run_command のみ）
     /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
     /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Gemini CLI: 0 = 成功（判定はJSON内）, 2 = システムエラーのみ
@@ -80,19 +81,23 @@ impl FormatAdapter {
                 // Cursor Stop: 判定はJSON内のfollowup_messageで伝達される。
                 0
             }
+            Format::Windsurf if event == HookEvent::Stop => {
+                // Windsurf の post_cascade_response は事後フックなのでブロックできない。
+                0
+            }
             _ => decision.exit_code(),
         }
     }
 
     /// 出力を stdout ではなく stderr に書き込むべきかどうか。
     /// Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る。
-    /// BeforeCommand (pre_run_command) と Stop の Block 判定が対象。
+    /// ただし Stop は post_cascade_response に対応する事後フックのため対象外。
     pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
         matches!(
             (&self.format, event, decision),
             (
                 &Format::Windsurf,
-                HookEvent::BeforeCommand | HookEvent::Stop,
+                HookEvent::BeforeCommand,
                 Decision::Block { .. }
             )
         )
@@ -551,13 +556,11 @@ impl FormatAdapter {
     }
 
     fn format_windsurf_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop の Block は標準エラー向けにプレーンテキストを返す。
-        // Windsurf は終了コード 2 のとき stderr を読む。
+        // post_cascade_response は事後フックであり、仕様上ブロックできない。
+        // Stop フック内で失敗を検出しても、Windsurf には常に許可を返す。
         if event == HookEvent::Stop {
-            if let Decision::Block { message } = decision {
-                let normalized = normalize_lint_output(message);
-                return Ok(truncate_output(&normalized, self.output_max_length));
-            }
+            let _ = decision;
+            return Ok("{}".to_string());
         }
 
         // Windsurf は Claude Code と同系統の出力形式を使うが、
@@ -1522,22 +1525,6 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_output_stop_block_plain_text() {
-        let adapter = FormatAdapter::new(Format::Windsurf, 0);
-        let output = adapter
-            .format_output(
-                &Decision::Block {
-                    message: "cargo clippy failed\nerror: unused variable".to_string(),
-                },
-                HookEvent::Stop,
-            )
-            .unwrap();
-        // Stop の Block は stderr 向けにプレーンテキストを返す
-        assert!(!output.starts_with('{'));
-        assert!(output.contains("unused variable"));
-    }
-
-    #[test]
     fn test_windsurf_output_stop_allow_unchanged() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
@@ -1548,17 +1535,14 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_output_stop_block_normalizes_output() {
+    fn test_windsurf_output_stop_block_returns_empty_json_even_with_ansi() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let message = "  \x1b[31merror\x1b[0m: unused\n\n\n    --> src/main.rs:1:1".to_string();
         let output = adapter
             .format_output(&Decision::Block { message }, HookEvent::Stop)
             .unwrap();
-        // ANSI 除去、先頭空白除去、連続空行圧縮が効くこと
-        assert!(output.contains("error: unused"));
-        assert!(!output.contains("\x1b"));
-        assert!(output.contains("--> src/main.rs:1:1"));
-        assert!(!output.contains("    -->"));
+        // 失敗内容は利用者向け出力へ出さず、空 JSON に固定する
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -1582,12 +1566,12 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_use_stderr_for_stop_block() {
+    fn test_windsurf_use_stderr_for_stop_block_is_false() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let block = Decision::Block {
             message: "error".to_string(),
         };
-        assert!(adapter.use_stderr(&block, HookEvent::Stop));
+        assert!(!adapter.use_stderr(&block, HookEvent::Stop));
     }
 
     #[test]
@@ -2228,13 +2212,13 @@ mod tests {
     // === use_stderr のテスト ===
 
     #[test]
-    fn test_windsurf_use_stderr_stop_block_true() {
-        // Windsurf + Stop + Block → stderr を使用する
+    fn test_windsurf_use_stderr_stop_block_false() {
+        // Windsurf + Stop + Block → stderr を使用しない
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "lint error".to_string(),
         };
-        assert!(adapter.use_stderr(&decision, HookEvent::Stop));
+        assert!(!adapter.use_stderr(&decision, HookEvent::Stop));
     }
 
     #[test]
@@ -2256,7 +2240,7 @@ mod tests {
 
     #[test]
     fn test_windsurf_use_stderr_after_file_edit_block_false() {
-        // Windsurf + AfterFileEdit + Block → stderr を使用しない（BeforeCommand/Stop のみ）
+        // Windsurf + AfterFileEdit + Block → stderr を使用しない（pre_run_command のみ）
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "error".to_string(),
@@ -2588,11 +2572,11 @@ mod tests {
         assert_eq!(reason, long_message);
     }
 
-    // === Windsurf Stop Block 出力テスト ===
+    // === Windsurf Stop 出力テスト ===
 
     #[test]
-    fn test_windsurf_output_stop_block_returns_plain_text() {
-        // Windsurf の Stop Block は JSON ではなくプレーンテキスト（stderr 用）
+    fn test_windsurf_output_stop_block_returns_empty_json() {
+        // Windsurf の Stop は事後フックのため、失敗しても空 JSON を返す
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(
@@ -2602,9 +2586,8 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        // JSON ではなくプレーンテキストであること
-        assert!(serde_json::from_str::<serde_json::Value>(&output).is_err());
-        assert!(output.contains("unused variable"));
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.as_object().unwrap().is_empty());
     }
 
     #[test]
@@ -2618,8 +2601,8 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_output_stop_block_normalizes_ansi() {
-        // Windsurf Stop Block でも ANSI コード除去が効くこと
+    fn test_windsurf_output_stop_block_discards_message() {
+        // Stop の失敗はエージェントへ返さず、出力は常に空 JSON のままにする
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter
             .format_output(
@@ -2629,8 +2612,7 @@ mod tests {
                 HookEvent::Stop,
             )
             .unwrap();
-        assert!(!output.contains("\x1b"));
-        assert!(output.contains("error: failed"));
+        assert_eq!(output, "{}");
     }
 
     // === Codex Stop 出力テスト ===
@@ -2670,8 +2652,8 @@ mod tests {
     // === exit_code エッジケーステスト ===
 
     #[test]
-    fn test_windsurf_exit_code_stop_block_is_two() {
-        // Windsurf Stop Block は exit_code 2 で stderr を使う
+    fn test_windsurf_exit_code_stop_block_is_zero() {
+        // post_cascade_response は事後フックのため、Stop の失敗でも exit code は 0
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let code = adapter.exit_code(
             &Decision::Block {
@@ -2679,7 +2661,7 @@ mod tests {
             },
             HookEvent::Stop,
         );
-        assert_eq!(code, 2);
+        assert_eq!(code, 0);
     }
 
     #[test]
@@ -3052,27 +3034,26 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_stop_block_stderr_is_plain_text() {
-        // Windsurf の Stop Block はプレーンテキストを stderr に書く。
+    fn test_windsurf_stop_block_does_not_use_stderr() {
+        // post_cascade_response は事後フックなので、Stop の失敗を stderr に流さない。
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "lint errors found".to_string(),
         };
 
         assert!(
-            adapter.use_stderr(&decision, HookEvent::Stop),
-            "Windsurf Stop Block は stderr を使うべき"
+            !adapter.use_stderr(&decision, HookEvent::Stop),
+            "Windsurf Stop は stderr を使うべきではない"
         );
 
-        // 出力がプレーンテキスト（非 JSON）であることを確認
+        // 出力は常に空 JSON を返す
         let output = adapter.format_output(&decision, HookEvent::Stop).unwrap();
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&output);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(
-            parsed.is_err(),
-            "Windsurf Stop Block の出力はプレーンテキストであるべき: {}",
+            parsed.as_object().unwrap().is_empty(),
+            "Windsurf Stop の出力は空 JSON であるべき: {}",
             output
         );
-        assert!(output.contains("lint errors found"));
     }
 
     // === Codex PostToolUse Block 出力テスト ===

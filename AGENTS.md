@@ -122,7 +122,7 @@ cargo run -- version     # Show version
 - Refer to README.md for integration examples
 - Use `--format windsurf` when testing
 - BeforeCommand (pre_run_command) Block: exit code 2 + stderr にメッセージ出力
-- Stop Block: exit code 2 + stderr にメッセージ出力
+- Stop は `post_cascade_response` に対応する事後フックのためベストエフォート。stop hook が失敗しても `{}` を返し、エージェントにはブロックを返さない
 - フェイルクローズ（パースエラー/空入力）: exit code 2 + stderr にメッセージ出力
 
 ### Gemini CLI

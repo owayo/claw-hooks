@@ -37,7 +37,7 @@
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力をAIエージェントに送信（Claude Codeのみ）
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
-- 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行、エラーをAIエージェントにフィードバック
+- 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
@@ -539,7 +539,8 @@ message = "ユーザーに直接実行を依頼してください"
 
 # 条件付きStopフック（Stop時にプロジェクト全体のlintを実行）
 # プロジェクト構成ファイルの存在とツールの利用可能性を検出し、lint/typecheckを実行。
-# 失敗時はAIエージェントに結果を返し、エージェントが問題を修正します。
+# 失敗時は、Stop時フィードバックに対応したエージェントでは結果をAIへ返し、
+# エージェントが問題を修正します（Windsurf はベストエフォート）。
 # conditionフィールド（AND条件）: file_exists, command_exists
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
@@ -657,6 +658,8 @@ condition = { file_exists = "tsconfig.json" }
 `condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。`commands`配列内のすべてのコマンドは**並列実行**されます。失敗したコマンドの出力はすべて収集され、AIエージェントにブロック理由としてまとめて返されます。
 **タイムアウトの扱い:** `hook_timeout` を超えたコマンドは claw-hooks がプロセスを強制終了（SIGKILL）し、タイムアウト通知をログに記録しますが、ブロック理由には含めません。これはセッション終了がタイムアウトで止まることを防ぐためです。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）は引き続きブロック対象です。
 
+ただし Windsurf は例外で、`post_cascade_response` が非同期の事後フックであるため、Stopフック自体は実行されても失敗はベストエフォート扱いとなり、AI エージェントへのブロックとしては返されません。
+
 **Stopフックのフィールド:**
 
 | フィールド | 型 | デフォルト | 説明 |
@@ -699,7 +702,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **ステージの実行順序:** ステージは1から5の順に逐次実行されます。同じステージ内のすべてのフックは並列実行されます。あるステージの全フックが完了してから次のステージに進みます。
 
-**レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、失敗はログに記録されますがブロックしません（fire-and-forget）。
+**レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、失敗はログに記録されますがブロックしません（fire-and-forget）。Windsurf の Stop フックだけは基盤側が非同期のため、常にベストエフォートです。
 
 ```toml
 # その他の例:
@@ -1027,7 +1030,9 @@ Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル�
 
 **Claude Code Stop ブロック**: `{"decision":"block","reason":"lint errors found..."}`
 
-**Windsurf ブロック**: exit code 2 でブロック時、stderrにメッセージ出力（Windsurfはexit code 2でstderrを読み取る）。
+**Windsurf pre_run_command ブロック**: exit code 2 でブロック時、stderrにメッセージ出力（Windsurfはexit code 2でstderrを読み取る）。
+
+**Windsurf Stop (`post_cascade_response`)**: 常に `{}` を返します。フック自体は実行されますが、失敗はベストエフォート扱いで、非同期の事後フックという仕様上ブロックとしては返されません。
 
 **Codex CLI 許可**: `{}`（空JSON）
 

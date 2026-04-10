@@ -34,7 +34,7 @@ pub enum HookEvent {
     /// 外部イベント名:
     /// - Claude Code: `Stop`
     /// - Cursor: `Stop`
-    /// - Windsurf: `post_cascade_response`
+    /// - Windsurf: `post_cascade_response`（非同期の事後フック。実行はベストエフォート）
     /// - Gemini CLI: `AfterAgent`
     /// - Codex CLI: `Stop`
     Stop,
@@ -177,6 +177,7 @@ pub struct StopInput {
     pub loop_count: Option<u32>,
 
     /// レスポンスコンテンツ（Windsurf: 完全なカスケードレスポンス）
+    /// `post_cascade_response` は非同期の事後フックのため、失敗してもブロックには使われない。
     #[serde(default)]
     pub response: Option<String>,
 

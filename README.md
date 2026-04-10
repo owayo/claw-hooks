@@ -37,7 +37,7 @@
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to AI agent (Claude Code only)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
-- 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent
+- 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent where the hook runtime supports stop-time feedback (Windsurf runs best-effort)
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
@@ -539,7 +539,8 @@ message = "Ask the user to run this command manually"
 
 # Conditional stop hooks (project-wide lint on stop)
 # Detects project type by file existence and tool availability.
-# On failure, the result is returned to the AI agent so it can fix the issues.
+# On failure, the result is returned to the AI agent so it can fix the issues
+# on runtimes that support stop-time feedback (Windsurf remains best-effort).
 # condition fields (AND logic): file_exists, command_exists
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
@@ -657,6 +658,8 @@ All three approaches can be combined: use the global config for shared rules, `.
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
 **Timeout handling:** When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
 
+Windsurf is the main exception here: its `post_cascade_response` hook is an asynchronous post-hook, so stop hooks still run but failures are treated as best-effort and are not surfaced back to the agent as a block.
+
 **Stop hook fields:**
 
 | Field | Type | Default | Description |
@@ -699,7 +702,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **Stage execution order:** Stages are executed sequentially from 1 to 5. All hooks in the same stage run in parallel. A stage completes before the next one begins.
 
-**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), failures are logged but do not block — fire-and-forget style.
+**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), failures are logged but do not block — fire-and-forget style. On Windsurf stop hooks, failures are always best-effort because the underlying hook is asynchronous.
 
 ```toml
 # More examples:
@@ -1027,7 +1030,9 @@ The `additionalContext` field passes lint warnings/errors to Claude Code, allowi
 
 **Claude Code Stop Block**: `{"decision":"block","reason":"lint errors found..."}`
 
-**Windsurf Block**: Exit code 2 with block message on stderr (Windsurf reads stderr on exit code 2).
+**Windsurf pre_run_command Block**: Exit code 2 with block message on stderr (Windsurf reads stderr on exit code 2).
+
+**Windsurf Stop (`post_cascade_response`)**: Always returns `{}`. The hook still runs, but failures are treated as best-effort and are not sent back as a block because Windsurf's stop hook is an asynchronous post-hook.
 
 **Codex CLI Allow**: `{}` (empty JSON)
 

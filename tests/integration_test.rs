@@ -451,7 +451,7 @@ fn test_cursor_format_stop_aborted() {
 
 #[test]
 fn test_cursor_format_stop_error() {
-    // Cursor's stop hook with error status
+    // Cursor の Stop フックで status=error を受け取るケース
     let input = r#"{"status":"error","loop_count":0}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
@@ -465,11 +465,11 @@ fn test_cursor_format_stop_error() {
 
 #[test]
 fn test_windsurf_format_post_cascade_response() {
-    // Windsurf's post_cascade_response (equivalent to Stop event)
+    // Windsurf の post_cascade_response（Stop 相当イベント）
     let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"Task completed successfully."}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
-    // Stop events should be allowed (monitoring only)
+    // Stop は監視用途のため常に許可される
     assert_eq!(exit_code, 0, "post_cascade_response should be allowed");
     // Windsurf Stop Allow: 空 JSON（decision 省略）
     assert_eq!(
@@ -480,12 +480,47 @@ fn test_windsurf_format_post_cascade_response() {
     );
 }
 
-// === Custom Filter Tests ===
+#[test]
+fn test_windsurf_stop_hook_failure_is_best_effort() {
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("config.toml");
+    let config_content = r#"
+[[stop_hooks]]
+commands = ["sh -c 'echo lint failed 1>&2; exit 1'"]
+report = true
+"#;
+    std::fs::write(&config_path, config_content).expect("Failed to write config");
 
-/// Helper to run claw-hooks with custom config file.
-fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (String, String, i32) {
+    let input = r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"Task completed successfully."}}"#;
+    let (stdout, stderr, exit_code) =
+        run_hook_with_config_and_format(input, "windsurf", &config_path);
+
+    assert_eq!(exit_code, 0, "Windsurf stop hooks must remain best-effort");
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Windsurf stop hook failure should still return empty JSON: {}",
+        stdout
+    );
+    assert!(
+        !stderr.contains("lint failed"),
+        "Stop hook failure must not be surfaced to Windsurf stderr: {}",
+        stderr
+    );
+}
+
+// === カスタムフィルターのテスト ===
+
+/// JSON入力・フォーマット・設定ファイルを指定して claw-hooks を実行する。
+fn run_hook_with_config_and_format(
+    json_input: &str,
+    format: &str,
+    config_path: &std::path::Path,
+) -> (String, String, i32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
         .arg("run")
+        .arg("--format")
+        .arg(format)
         .arg("--config")
         .arg(config_path)
         .stdin(Stdio::piped())
@@ -506,13 +541,18 @@ fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (Str
     (stdout, stderr, exit_code)
 }
 
-/// Create a test config file with custom filters.
-/// Returns (config_path, _temp_dir) - keep _temp_dir alive for RAII cleanup.
+/// 設定ファイルを指定して claw-hooks を実行する。
+fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (String, String, i32) {
+    run_hook_with_config_and_format(json_input, "claude", config_path)
+}
+
+/// カスタムフィルター用のテスト設定ファイルを作成する。
+/// 戻り値は `(config_path, _temp_dir)`。RAII による後始末のため `_temp_dir` を保持する。
 fn create_custom_filter_config() -> (std::path::PathBuf, tempfile::TempDir) {
     let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let config_path = temp_dir.path().join("config.toml");
     let config_content = r#"
-# Disable default filters for isolated testing
+# 単体で検証できるよう既定フィルターを無効化
 rm_block = false
 kill_block = false
 dd_block = false
@@ -528,8 +568,8 @@ message = "Use pnpm instead of yarn"
 
 #[test]
 fn test_custom_filter_blocks_yarn_after_semicolon() {
-    // Test: echo "install"; yarn install
-    // yarn is a command after semicolon, should be blocked
+    // `echo "install"; yarn install` の形でも、
+    // セミコロン後の `yarn` をコマンドとして検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"install\"; yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);

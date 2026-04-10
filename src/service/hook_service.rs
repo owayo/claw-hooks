@@ -116,7 +116,8 @@ impl HookService {
         };
         info!("Output {}: {}", emoji, output);
 
-        // Windsurf Stop Block は stderr に出力（エージェントは exit 2 時に stderr を読む）
+        // Windsurf は pre_run_command のブロック時のみ stderr を使う。
+        // post_cascade_response は事後フックのため、Stop の失敗も stdout 側の許可応答に丸める。
         if self.adapter.use_stderr(&decision, hook_input.event) {
             let stderr = io::stderr();
             let mut stderr = stderr.lock();

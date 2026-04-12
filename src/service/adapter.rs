@@ -498,7 +498,9 @@ impl FormatAdapter {
     fn parse_windsurf_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
-        let windsurf_input: WindsurfInput = serde_json::from_str(input)
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
+        let windsurf_input: WindsurfInput = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
 
         // Windsurf の agent_action_name を内部イベント型にマッピング
@@ -563,7 +565,19 @@ impl FormatAdapter {
                 )
             }
             other => {
-                return Err(anyhow!("Unknown Windsurf action: {}", other));
+                debug!(
+                    agent = self.format.label(),
+                    agent_action_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported action, passing through", self.log_prefix()
+                );
+
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id: None,
+                });
             }
         };
 
@@ -2075,10 +2089,12 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_unknown_action_is_error() {
+    fn test_windsurf_unknown_action_is_passthrough_legacy_case() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
-        assert!(adapter.parse_input(input).is_err());
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "unknown_action");
     }
 
     #[test]
@@ -2102,10 +2118,12 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_unknown_event_is_error() {
+    fn test_gemini_unknown_event_is_passthrough() {
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"UnknownEvent"}"#;
-        assert!(adapter.parse_input(input).is_err());
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "UnknownEvent");
     }
 
     #[test]
@@ -2930,15 +2948,12 @@ mod tests {
     // === Windsurf 入力パースのエッジケース ===
 
     #[test]
-    fn test_windsurf_input_unknown_action_is_error() {
+    fn test_windsurf_input_unknown_action_is_passthrough() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
-        assert!(
-            err.to_string().contains("Unknown Windsurf action"),
-            "未知アクションのエラーメッセージが不適切: {}",
-            err
-        );
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "unknown_action");
     }
 
     #[test]
@@ -3066,11 +3081,12 @@ mod tests {
 
     #[test]
     fn test_gemini_input_session_start_passthrough() {
-        // SessionStart, SessionEnd, Notification 等は未対応（エラーになるべき）
+        // claw-hooks の対象外イベントでも、Gemini 側のフック実行は止めずに透過させる。
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let input = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
-        let err = adapter.parse_input(input);
-        assert!(err.is_err(), "Gemini の未対応イベントはエラーになるべき");
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "SessionStart");
     }
 
     #[test]
@@ -3290,7 +3306,9 @@ impl FormatAdapter {
     fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
-        let gemini_input: GeminiInput = serde_json::from_str(input)
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
+        let gemini_input: GeminiInput = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
 
         let raw_event = gemini_input.hook_event_name.clone();
@@ -3301,7 +3319,21 @@ impl FormatAdapter {
             "AfterTool" => HookEvent::AfterFileEdit,
             "AfterAgent" => HookEvent::Stop,
             "BeforeAgent" => HookEvent::BeforePrompt,
-            other => return Err(anyhow!("Unknown Gemini event: {}", other)),
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported event, passing through", self.log_prefix()
+                );
+
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id: gemini_input.session_id,
+                });
+            }
         };
 
         // ツール以外のイベントを処理

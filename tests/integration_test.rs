@@ -513,6 +513,15 @@ fn test_windsurf_format_post_cascade_response() {
 }
 
 #[test]
+fn test_windsurf_format_unsupported_event_passthrough() {
+    let input = r#"{"agent_action_name":"pre_user_prompt","prompt":"hello"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
+
+    assert_eq!(exit_code, 0, "未対応の Windsurf イベントは透過させるべき");
+    assert_eq!(stdout.trim(), "{}", "未対応イベントでも allow を返すべき");
+}
+
+#[test]
 fn test_windsurf_stop_hook_failure_is_best_effort() {
     let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let config_path = temp_dir.path().join("config.toml");
@@ -897,6 +906,19 @@ fn test_gemini_format_with_event_alias() {
     assert!(
         stdout.contains(r#""decision":"allow""#),
         "Gemini output should indicate allow: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_gemini_format_session_start_passthrough() {
+    let input = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
+
+    assert_eq!(exit_code, 0, "未対応の Gemini イベントは透過させるべき");
+    assert!(
+        stdout.contains(r#""decision":"allow""#),
+        "未対応イベントでも allow を返すべき: {}",
         stdout
     );
 }

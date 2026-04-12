@@ -40,7 +40,7 @@
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
-- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`）をトークン効率のために圧縮
+- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`）と進捗表示の末尾の `...` をトークン効率のために圧縮
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLI、Codex CLIに対応
 
@@ -67,13 +67,15 @@ def main():
         dangerous = ["rm ", "rm -", "rmdir"]
         if any(cmd in command for cmd in dangerous):
             result = {
-                "decision": "block",
-                "message": "🚫 Dangerous command blocked"
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "🚫 Dangerous command blocked"
+                }
             }
             print(json.dumps(result))
             sys.exit(2)
 
-    print(json.dumps({"decision": "approve"}))
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -813,13 +815,15 @@ Claude Code公式フック仕様を使用:
 
 ### Cursor (`--format cursor`)
 
-JSONにイベントタイプを含みません。フィールドの存在で検出:
+`hook_event_name` フィールドでイベントを判定します:
 
-| JSONフィールド | 検出されるフック | 内部マッピング |
-|---------------|-----------------|----------------|
-| `command` | `beforeShellExecution` | PreToolUse + Bash |
-| `file_path` / `filePath` | `afterFileEdit` | PostToolUse + Write |
-| `status` | `stop` | Stop |
+| `hook_event_name` | 必須フィールド | 内部マッピング |
+|-------------------|----------------|----------------|
+| `beforeShellExecution` | `command` | PreToolUse + Bash |
+| `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
+| `stop` | `status` | Stop |
+
+未対応の Cursor イベントは `allow` として透過されます。
 
 ### Windsurf (`--format windsurf`)
 
@@ -830,6 +834,8 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 | `pre_run_command` | PreToolUse + Bash |
 | `post_write_code` | PostToolUse + Write |
 | `post_cascade_response` | Stop |
+
+未対応の Windsurf アクションは `allow` として透過されます。
 
 ### Gemini CLI (`--format gemini`)
 
@@ -862,6 +868,8 @@ JSONにイベントタイプを含みません。フィールドの存在で検�
 | `BeforeTool` | `run_shell_command` | PreToolUse + Bash |
 | `AfterTool` | `write_file` | PostToolUse + Write |
 | `AfterAgent` | - | Stop |
+
+未対応の Gemini イベントは `allow` として透過されるため、`claw-hooks` を必要なイベントだけに安全に接続できます。
 
 出力形式は`approve`/`block`の代わりに`allow`/`deny`を使用:
 - 許可: `{"decision":"allow"}`

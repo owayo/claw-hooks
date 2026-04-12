@@ -40,7 +40,7 @@
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent where the hook runtime supports stop-time feedback (Windsurf runs best-effort)
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
-- 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`) for token-efficient output
+- 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`) and trailing progress ellipses for token-efficient output
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI
 
@@ -67,13 +67,15 @@ def main():
         dangerous = ["rm ", "rm -", "rmdir"]
         if any(cmd in command for cmd in dangerous):
             result = {
-                "decision": "block",
-                "message": "🚫 Dangerous command blocked"
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "🚫 Dangerous command blocked"
+                }
             }
             print(json.dumps(result))
             sys.exit(2)
 
-    print(json.dumps({"decision": "approve"}))
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -813,13 +815,15 @@ Supported hook events: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `Use
 
 ### Cursor (`--format cursor`)
 
-No event type in JSON. Detected by field presence:
+Uses the `hook_event_name` field for event detection:
 
-| JSON Fields | Detected Hook | Internal Mapping |
-|-------------|---------------|------------------|
-| `command` | `beforeShellExecution` | PreToolUse + Bash |
-| `file_path` / `filePath` | `afterFileEdit` | PostToolUse + Write |
-| `status` | `stop` | Stop |
+| `hook_event_name` | Required Fields | Internal Mapping |
+|-------------------|-----------------|------------------|
+| `beforeShellExecution` | `command` | PreToolUse + Bash |
+| `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
+| `stop` | `status` | Stop |
+
+Unsupported Cursor events are passed through as allow.
 
 ### Windsurf (`--format windsurf`)
 
@@ -830,6 +834,8 @@ Uses `agent_action_name` field:
 | `pre_run_command` | PreToolUse + Bash |
 | `post_write_code` | PostToolUse + Write |
 | `post_cascade_response` | Stop |
+
+Unsupported Windsurf actions are passed through as allow.
 
 ### Gemini CLI (`--format gemini`)
 
@@ -862,6 +868,8 @@ Uses `hook_event_name` and `tool_name` fields:
 | `BeforeTool` | `run_shell_command` | PreToolUse + Bash |
 | `AfterTool` | `write_file` | PostToolUse + Write |
 | `AfterAgent` | - | Stop |
+
+Unsupported Gemini events are passed through as allow so `claw-hooks` can be attached only to the events it actively handles.
 
 Output format uses `allow`/`deny` instead of `approve`/`block`:
 - Allow: `{"decision":"allow"}`

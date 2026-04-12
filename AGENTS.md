@@ -19,7 +19,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 6. **Subagent Events**: NanoBuddy notifications on subagent start
-7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`), and character-count-based output length truncation for token efficiency
+7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`) plus trailing progress ellipsis compression, and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields
 
 ## Project Structure
@@ -126,10 +126,12 @@ cargo run -- version     # Show version
 - Use `--format windsurf` when testing
 - BeforeCommand (pre_run_command) Block: exit code 2 + stderr にメッセージ出力
 - Stop は `post_cascade_response` に対応する事後フックのためベストエフォート。stop hook が失敗しても `{}` を返し、エージェントにはブロックを返さない
+- 未対応の `agent_action_name` は allow でパススルーする（全イベント対応が目的ではないため）
 - フェイルクローズ（パースエラー/空入力）: exit code 2 + stderr にメッセージ出力
 
 ### Gemini CLI
 - Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events
+- 未対応イベントは allow でパススルーする（全イベント対応が目的ではないため）
 - Use `--format gemini` when testing
 
 ### Codex CLI

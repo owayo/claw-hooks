@@ -119,8 +119,12 @@ pub fn normalize_lint_output(output: &str) -> String {
     lines.join("\n")
 }
 
-/// 同一文字が4回以上連続する装飾文字を1文字に圧縮する。
+/// 同一文字が連続する装飾文字をトークン効率のために圧縮する。
 /// 対象: `.`, `=`, `-`, `─`, `━`
+/// ルール:
+/// - `=`, `-`, `─`, `━` は4回以上の連続で1文字に圧縮
+/// - `.` は4回以上の連続、または行末の3連続以上で1文字に圧縮
+///
 /// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -133,8 +137,8 @@ fn collapse_repeated_chars(input: &str) -> String {
                 chars.next();
                 count += 1;
             }
-            // 4回以上の繰り返しのみ圧縮（3回以下は省略記号等の可能性があるため維持）
-            if count < 4 {
+            let should_collapse = count >= 4 || (c == '.' && count >= 3 && chars.peek().is_none());
+            if !should_collapse {
                 for _ in 1..count {
                     result.push(c);
                 }
@@ -981,11 +985,20 @@ mod tests {
 
     #[test]
     fn test_collapse_repeated_chars_preserves_3_or_less() {
-        // 3回以下は省略記号等の可能性があるため維持
-        assert_eq!(collapse_repeated_chars("..."), "...");
+        // 行末以外の短い繰り返しは維持する
+        assert_eq!(collapse_repeated_chars("Wait... what?"), "Wait... what?");
         assert_eq!(collapse_repeated_chars("---"), "---");
         assert_eq!(collapse_repeated_chars("=="), "==");
         assert_eq!(collapse_repeated_chars("text == value"), "text == value");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_compresses_trailing_ellipsis() {
+        assert_eq!(
+            collapse_repeated_chars("Using attach strategy..."),
+            "Using attach strategy."
+        );
+        assert_eq!(collapse_repeated_chars("..."), ".");
     }
 
     #[test]
@@ -1031,7 +1044,7 @@ mod tests {
         let result = normalize_lint_output(input);
         assert_eq!(
             result,
-            "Using attach strategy to execute scripts...\n= Starting migration for: 3.8.0.rc001 =\n. 63 / 212 ( 29%)"
+            "Using attach strategy to execute scripts.\n= Starting migration for: 3.8.0.rc001 =\n. 63 / 212 ( 29%)"
         );
     }
 

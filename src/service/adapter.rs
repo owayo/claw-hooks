@@ -307,20 +307,101 @@ impl FormatAdapter {
     fn parse_cursor_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
-        let cursor_input: CursorInput = serde_json::from_str(input)
-            .map_err(|e| anyhow!("Failed to parse Cursor input: {}", e))?;
+        // Cursor は全フックに hook_event_name フィールドを送信するため、
+        // これを使ってイベントを安全に識別する。
+        // afterShellExecution 等の未対応イベントが command フィールドを持つ場合に
+        // beforeShellExecution と誤マッチするのを防ぐ。
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Cursor JSON: {}", e))?;
 
-        // フックタイプに基づいてCursorフォーマットを内部HookInputに変換
-        match cursor_input {
-            CursorInput::SubagentStart {
-                subagent_type,
-                prompt,
-                ..
-            } => {
+        let event_name = raw
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        match event_name.as_str() {
+            "beforeShellExecution" => {
+                let parsed: CursorShellInput = serde_json::from_value(raw)
+                    .map_err(|e| anyhow!("Failed to parse Cursor beforeShellExecution: {}", e))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    hook_type = "beforeShellExecution",
+                    command = %parsed.command,
+                    cwd = ?parsed.cwd,
+                    mapped_event = ?HookEvent::BeforeCommand,
+                    mapped_tool = "Bash",
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforeCommand,
+                    tool_name: "Bash".to_string(),
+                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: parsed.command,
+                        timeout: None,
+                    }),
+                    session_id: None,
+                })
+            }
+            "afterFileEdit" | "afterTabFileEdit" => {
+                let parsed: CursorFileEditInput = serde_json::from_value(raw)
+                    .map_err(|e| anyhow!("Failed to parse Cursor afterFileEdit: {}", e))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    hook_type = event_name,
+                    file_path = %parsed.file_path,
+                    mapped_event = ?HookEvent::AfterFileEdit,
+                    mapped_tool = "Write",
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::AfterFileEdit,
+                    tool_name: "Write".to_string(),
+                    tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
+                        file_path: parsed.file_path,
+                        content: None,
+                    }),
+                    session_id: None,
+                })
+            }
+            "stop" => {
+                let parsed: CursorStopInput = serde_json::from_value(raw)
+                    .map_err(|e| anyhow!("Failed to parse Cursor stop: {}", e))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    hook_type = "stop",
+                    status = %parsed.status,
+                    loop_count = ?parsed.loop_count,
+                    mapped_event = ?HookEvent::Stop,
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::Stop,
+                    tool_name: "Stop".to_string(),
+                    tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                        status: Some(parsed.status),
+                        loop_count: parsed.loop_count,
+                        response: None,
+                        agent_message: None,
+                        stop_hook_active: false,
+                    }),
+                    session_id: None,
+                })
+            }
+            "subagentStart" => {
+                let parsed: CursorSubagentStartInput = serde_json::from_value(raw)
+                    .map_err(|e| anyhow!("Failed to parse Cursor subagentStart: {}", e))?;
+
                 debug!(
                     agent = self.format.label(),
                     hook_type = "subagentStart",
-                    subagent_type = %subagent_type,
+                    subagent_type = %parsed.subagent_type,
                     mapped_event = ?HookEvent::SubagentStart,
                     "{} parsed input", self.log_prefix()
                 );
@@ -329,25 +410,23 @@ impl FormatAdapter {
                     event: HookEvent::SubagentStart,
                     tool_name: "SubagentStart".to_string(),
                     tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                        subagent_type: Some(subagent_type),
-                        prompt,
+                        subagent_type: Some(parsed.subagent_type),
+                        prompt: parsed.prompt,
                         status: None,
                         duration: None,
                     }),
                     session_id: None,
                 })
             }
-            CursorInput::SubagentStop {
-                subagent_type,
-                subagent_status,
-                duration,
-                ..
-            } => {
+            "subagentStop" => {
+                let parsed: CursorSubagentStopInput = serde_json::from_value(raw)
+                    .map_err(|e| anyhow!("Failed to parse Cursor subagentStop: {}", e))?;
+
                 debug!(
                     agent = self.format.label(),
                     hook_type = "subagentStop",
-                    subagent_type = %subagent_type,
-                    status = %subagent_status,
+                    subagent_type = %parsed.subagent_type,
+                    status = %parsed.subagent_status,
                     mapped_event = ?HookEvent::SubagentStop,
                     "{} parsed input", self.log_prefix()
                 );
@@ -356,78 +435,28 @@ impl FormatAdapter {
                     event: HookEvent::SubagentStop,
                     tool_name: "SubagentStop".to_string(),
                     tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                        subagent_type: Some(subagent_type),
+                        subagent_type: Some(parsed.subagent_type),
                         prompt: None,
-                        status: Some(subagent_status),
-                        duration,
+                        status: Some(parsed.subagent_status),
+                        duration: parsed.duration,
                     }),
                     session_id: None,
                 })
             }
-            CursorInput::Stop { status, loop_count } => {
+            // 未対応イベント（afterShellExecution, preToolUse, postToolUse 等）は
+            // パススルーとして処理し、ブロックしない
+            other => {
                 debug!(
                     agent = self.format.label(),
-                    hook_type = "stop",
-                    status = %status,
-                    loop_count = ?loop_count,
-                    mapped_event = ?HookEvent::Stop,
-                    "{} parsed input", self.log_prefix()
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported event, passing through", self.log_prefix()
                 );
 
-                // CursorのstopフックはStopイベントに相当
                 Ok(HookInput {
-                    event: HookEvent::Stop,
-                    tool_name: "Stop".to_string(),
-                    tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                        status: Some(status),
-                        loop_count,
-                        response: None,
-                        agent_message: None,
-                        stop_hook_active: false,
-                    }),
-                    session_id: None,
-                })
-            }
-            CursorInput::ShellExecution { command, cwd } => {
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "beforeShellExecution",
-                    command = %command,
-                    cwd = ?cwd,
-                    mapped_event = ?HookEvent::BeforeCommand,
-                    mapped_tool = "Bash",
-                    "{} parsed input", self.log_prefix()
-                );
-
-                // CursorのbeforeShellExecutionはBashのBeforeCommandに相当
-                Ok(HookInput {
-                    event: HookEvent::BeforeCommand,
-                    tool_name: "Bash".to_string(),
-                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                        command,
-                        timeout: None,
-                    }),
-                    session_id: None,
-                })
-            }
-            CursorInput::FileEdit { file_path } => {
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "afterFileEdit",
-                    file_path = %file_path,
-                    mapped_event = ?HookEvent::AfterFileEdit,
-                    mapped_tool = "Write",
-                    "{} parsed input", self.log_prefix()
-                );
-
-                // CursorのafterFileEditはWriteのAfterFileEditに対応する
-                Ok(HookInput {
-                    event: HookEvent::AfterFileEdit,
-                    tool_name: "Write".to_string(),
-                    tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
-                        file_path,
-                        content: None,
-                    }),
+                    event: HookEvent::BeforePrompt,
+                    tool_name: event_name.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
                     session_id: None,
                 })
             }
@@ -627,65 +656,64 @@ struct ClaudeStopOutput {
 
 // === Cursor フォーマット型 ===
 
-/// Cursor の入力フォーマット。
-/// beforeShellExecution、afterFileEdit、stop、subagent hooks に対応する。
+/// Cursor の beforeShellExecution 入力フォーマット。
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum CursorInput {
-    // 注意: serde(untagged) は上から順に評価するため、
-    // SubagentStop は SubagentStart より前に置く必要がある。
-    // SubagentStop は "status" を要求するが、SubagentStart は
-    // "subagent_type" だけでも一致してしまうため。
-    /// subagentStop hook - サブエージェントの終了
-    SubagentStop {
-        /// サブエージェント種別
-        subagent_type: String,
-        /// サブエージェント完了状態: "completed" または "error"
-        #[serde(rename = "status")]
-        subagent_status: String,
-        /// サブエージェント出力
-        #[serde(default)]
-        #[allow(dead_code)]
-        result: Option<String>,
-        /// 実行時間（ミリ秒）
-        #[serde(default)]
-        duration: Option<u64>,
-    },
-    /// subagentStart hook - サブエージェント起動
-    SubagentStart {
-        /// サブエージェント種別: "generalPurpose", "explore", "shell" など
-        subagent_type: String,
-        /// サブエージェントに渡されたプロンプト
-        #[serde(default)]
-        prompt: Option<String>,
-        /// サブエージェントで使用したモデル
-        #[serde(default)]
-        #[allow(dead_code)]
-        model: Option<String>,
-    },
-    /// stop hook - エージェントループ終了
-    Stop {
-        /// 停止状態: "completed", "aborted", "error"
-        status: String,
-        /// この会話で発生した自動フォローアップ回数
-        #[serde(default)]
-        loop_count: Option<u32>,
-    },
-    /// beforeShellExecution hook - 実行対象コマンドを含む
-    ShellExecution {
-        /// 実行するコマンド
-        command: String,
-        /// 現在の作業ディレクトリ
-        #[serde(default)]
-        #[allow(dead_code)]
-        cwd: Option<String>,
-    },
-    /// afterFileEdit hook - 編集されたファイルパスを含む
-    FileEdit {
-        /// 編集されたファイルのパス
-        #[serde(alias = "filePath")]
-        file_path: String,
-    },
+struct CursorShellInput {
+    /// 実行するコマンド
+    command: String,
+    /// 現在の作業ディレクトリ
+    #[serde(default)]
+    #[allow(dead_code)]
+    cwd: Option<String>,
+}
+
+/// Cursor の afterFileEdit 入力フォーマット。
+#[derive(Debug, Deserialize)]
+struct CursorFileEditInput {
+    /// 編集されたファイルのパス
+    #[serde(alias = "filePath")]
+    file_path: String,
+}
+
+/// Cursor の stop 入力フォーマット。
+#[derive(Debug, Deserialize)]
+struct CursorStopInput {
+    /// 停止状態: "completed", "aborted", "error"
+    status: String,
+    /// この会話で発生した自動フォローアップ回数
+    #[serde(default)]
+    loop_count: Option<u32>,
+}
+
+/// Cursor の subagentStart 入力フォーマット。
+#[derive(Debug, Deserialize)]
+struct CursorSubagentStartInput {
+    /// サブエージェント種別: "generalPurpose", "explore", "shell" など
+    subagent_type: String,
+    /// サブエージェントに渡されたプロンプト
+    #[serde(default)]
+    prompt: Option<String>,
+    /// サブエージェントで使用したモデル
+    #[serde(default)]
+    #[allow(dead_code)]
+    model: Option<String>,
+}
+
+/// Cursor の subagentStop 入力フォーマット。
+#[derive(Debug, Deserialize)]
+struct CursorSubagentStopInput {
+    /// サブエージェント種別
+    subagent_type: String,
+    /// サブエージェント完了状態: "completed" または "error"
+    #[serde(rename = "status")]
+    subagent_status: String,
+    /// サブエージェント出力
+    #[serde(default)]
+    #[allow(dead_code)]
+    result: Option<String>,
+    /// 実行時間（ミリ秒）
+    #[serde(default)]
+    duration: Option<u64>,
 }
 
 /// Cursor の Stop Block 出力フォーマット。
@@ -755,7 +783,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_shell_execution() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
+        let input = r#"{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
@@ -769,7 +797,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_file_edit() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"file_path":"/path/to/file.rs"}"#;
+        let input = r#"{"hook_event_name":"afterFileEdit","file_path":"/path/to/file.rs"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
@@ -784,7 +812,7 @@ mod tests {
     fn test_cursor_input_parsing_file_edit_camel_case() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         // Cursor は camelCase の filePath を送る場合もある
-        let input = r#"{"filePath":"/path/to/file.tsx"}"#;
+        let input = r#"{"hook_event_name":"afterFileEdit","filePath":"/path/to/file.tsx"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
@@ -998,7 +1026,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_stop() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"status":"completed","loop_count":3}"#;
+        let input = r#"{"hook_event_name":"stop","status":"completed","loop_count":3}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
@@ -1014,7 +1042,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_stop_aborted() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"status":"aborted"}"#;
+        let input = r#"{"hook_event_name":"stop","status":"aborted"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
@@ -1681,7 +1709,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_subagent_start() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"subagent_type":"explore","prompt":"Explore the authentication flow","model":"claude-sonnet-4-20250514"}"#;
+        let input = r#"{"hook_event_name":"subagentStart","subagent_type":"explore","prompt":"Explore the authentication flow","model":"claude-sonnet-4-20250514"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
         assert_eq!(result.tool_name, "SubagentStart");
@@ -1695,12 +1723,12 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_subagent_stop() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"subagent_type":"generalPurpose","status":"completed","result":"Task done","duration":45000}"#;
+        let input = r#"{"hook_event_name":"subagentStop","subagent_type":"generalPurpose","status":"completed","result":"Task done","duration":45000}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(
             result.event,
             HookEvent::SubagentStop,
-            "SubagentStart ではなく SubagentStop として解釈されるべき"
+            "subagentStart ではなく subagentStop として解釈されるべき"
         );
         assert_eq!(result.tool_name, "SubagentStop");
         if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
@@ -1736,7 +1764,7 @@ mod tests {
     #[test]
     fn test_codex_input_parsing_stop() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
-        let input = r#"{"session_id":"019d193e-b16a-70e2-bd83-dc692a870e9a","transcript_path":"/tmp/rollout.jsonl","cwd":"/Users/owa/GitHub/claw-hooks","hook_event_name":"Stop","model":"gpt-5.4","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}"#;
+        let input = r#"{"session_id":"019d193e-b16a-70e2-bd83-dc692a870e9a","transcript_path":"/tmp/rollout.jsonl","cwd":"/home/user/claw-hooks","hook_event_name":"Stop","model":"gpt-5.4","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}"#;
         let result = adapter.parse_input(input).unwrap();
 
         assert_eq!(result.event, HookEvent::Stop);
@@ -1992,11 +2020,58 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_parse_empty_object_is_error() {
+    fn test_cursor_parse_empty_object_is_passthrough() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        // 空オブジェクトはどのCursorInputバリアントにもマッチしない
+        // hook_event_name がない空オブジェクトは未対応イベントとしてパススルー
         let input = r#"{}"#;
-        assert!(adapter.parse_input(input).is_err());
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+    }
+
+    #[test]
+    fn test_cursor_unsupported_event_passthrough() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // afterShellExecution は claw-hooks の対象外でパススルー
+        let input =
+            r#"{"hook_event_name":"afterShellExecution","command":"echo test","output":"test"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "afterShellExecution");
+    }
+
+    #[test]
+    fn test_cursor_pre_tool_use_passthrough() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // preToolUse は claw-hooks の対象外
+        let input = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"rm -rf /"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "preToolUse");
+    }
+
+    #[test]
+    fn test_cursor_after_shell_execution_not_confused_with_before() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // afterShellExecution は command フィールドを持つが、
+        // hook_event_name で正しく判別され、BeforeCommand にならないことを検証
+        let input = r#"{"hook_event_name":"afterShellExecution","command":"rm -rf /tmp","output":"removed"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(
+            result.event,
+            HookEvent::BeforePrompt,
+            "afterShellExecution が BeforeCommand に誤マッチしてはならない"
+        );
+        assert_ne!(result.event, HookEvent::BeforeCommand);
+    }
+
+    #[test]
+    fn test_cursor_after_tab_file_edit() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // afterTabFileEdit も afterFileEdit と同じ AfterFileEdit にマッピングされる
+        let input = r#"{"hook_event_name":"afterTabFileEdit","file_path":"/path/to/file.rs"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "Write");
     }
 
     #[test]
@@ -3079,6 +3154,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_codex_write_tool_explicit_deserialization() {
+        // Codex の Write ツールが FileOperationInput に正しくデシリアライズされる
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/test.rs","content":"fn main() {}"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "Write");
+        if let crate::domain::ToolInput::File(file) = &result.tool_input {
+            assert_eq!(file.file_path, "/tmp/test.rs");
+        } else {
+            panic!("Write ツールは ToolInput::File にデシリアライズされるべき");
+        }
+    }
+
+    #[test]
+    fn test_codex_write_empty_object_is_error() {
+        // Codex の Write ツールで空の tool_input は FileOperationInput デシリアライズ失敗
+        // 旧実装では ToolInput::Stop に誤マッチしていた
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{}}"#;
+        assert!(
+            adapter.parse_input(input).is_err(),
+            "空の tool_input は FileOperationInput へのデシリアライズに失敗すべき"
+        );
+    }
+
     // === Claude PreToolUse Block ANSI 正規化テスト ===
 
     #[test]
@@ -3399,7 +3501,11 @@ impl FormatAdapter {
                 })
             }
             "Write" | "Edit" | "MultiEdit" | "Read" => {
-                serde_json::from_value(raw_tool_input.clone())
+                // untagged enum への暗黙的デシリアライズを避け、
+                // 明示的に FileOperationInput にデシリアライズする。
+                // 空オブジェクト時に ToolInput::Stop に誤マッチするのを防ぐ。
+                serde_json::from_value::<crate::domain::FileOperationInput>(raw_tool_input.clone())
+                    .map(crate::domain::ToolInput::File)
                     .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
             }
             _ => crate::domain::ToolInput::Other(raw_tool_input.clone()),

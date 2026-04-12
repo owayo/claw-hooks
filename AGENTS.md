@@ -7,7 +7,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.4.100
+- **Version**: 26.4.101
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
@@ -19,7 +19,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 6. **Subagent Events**: NanoBuddy notifications on subagent start
-7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, and character-count-based output length truncation for token efficiency
+7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`), and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields
 
 ## Project Structure
@@ -117,6 +117,9 @@ cargo run -- version     # Show version
 ### Cursor
 - Refer to README.md for integration examples
 - Use `--format cursor` when testing
+- Input parsing uses `hook_event_name` field for event identification (not field-structure matching)
+- Supported events: `beforeShellExecution`, `afterFileEdit`, `afterTabFileEdit`, `stop`, `subagentStart`, `subagentStop`
+- Unsupported events (e.g., `afterShellExecution`, `preToolUse`, `postToolUse`) are passed through as allow
 
 ### Windsurf
 - Refer to README.md for integration examples

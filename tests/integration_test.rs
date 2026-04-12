@@ -302,7 +302,7 @@ fn test_cursor_format_allow_safe_command() {
 
 #[test]
 fn test_cursor_format_block_rm_command() {
-    let input = r#"{"command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
+    let input = r#"{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 2, "rm command should be blocked");
@@ -316,7 +316,7 @@ fn test_cursor_format_block_rm_command() {
 
 #[test]
 fn test_cursor_format_block_kill_command() {
-    let input = r#"{"command":"kill -9 1234","cwd":"/path/to/project"}"#;
+    let input = r#"{"hook_event_name":"beforeShellExecution","command":"kill -9 1234","cwd":"/path/to/project"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 2, "kill command should be blocked");
@@ -329,8 +329,8 @@ fn test_cursor_format_block_kill_command() {
 
 #[test]
 fn test_cursor_format_after_file_edit() {
-    // Cursor's afterFileEdit hook provides file_path
-    let input = r#"{"file_path":"/path/to/file.rs"}"#;
+    // Cursor の afterFileEdit フックは file_path を提供する
+    let input = r#"{"hook_event_name":"afterFileEdit","file_path":"/path/to/file.rs"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     // afterFileEdit maps to PostToolUse which always allows
@@ -344,14 +344,46 @@ fn test_cursor_format_after_file_edit() {
 
 #[test]
 fn test_cursor_format_after_file_edit_camel_case() {
-    // Cursor might use camelCase filePath
-    let input = r#"{"filePath":"/path/to/component.tsx"}"#;
+    // Cursor は camelCase の filePath を送る場合もある
+    let input = r#"{"hook_event_name":"afterFileEdit","filePath":"/path/to/component.tsx"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "afterFileEdit should be allowed");
     assert!(
         stdout.contains(r#""permission":"allow""#),
         "Cursor output should indicate allow: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cursor_format_unsupported_event_passthrough() {
+    // afterShellExecution 等の未対応イベントはパススルー（allow）
+    let input =
+        r#"{"hook_event_name":"afterShellExecution","command":"echo test","output":"test"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
+
+    assert_eq!(exit_code, 0, "未対応イベントは allow として処理されるべき");
+    assert!(
+        stdout.contains(r#""permission":"allow""#),
+        "未対応イベントは allow: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cursor_format_pre_tool_use_passthrough() {
+    // preToolUse は claw-hooks の対象外でパススルー
+    let input = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"rm -rf /"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
+
+    assert_eq!(
+        exit_code, 0,
+        "preToolUse は claw-hooks の対象外でパススルー"
+    );
+    assert!(
+        stdout.contains(r#""permission":"allow""#),
+        "preToolUse は allow: {}",
         stdout
     );
 }

@@ -84,9 +84,10 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// lint/typecheck出力をAI向けに正規化する。
 /// トークン効率を最適化しつつ、エラー情報は維持する:
 /// - ANSIエスケープコード（色、スタイル）を除去
-/// - 共通の絶対パスプレフィックスを除去（例: `/Users/owa/GitHub/project/`）
+/// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
 /// - 各行の先頭・末尾の空白を除去
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
+/// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`）を1文字に圧縮
 /// - 連続する空行を1行に圧縮
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
@@ -106,7 +107,8 @@ pub fn normalize_lint_output(output: &str) -> String {
             continue;
         }
         prev_blank = false;
-        lines.push(collapse_whitespace(trimmed));
+        let collapsed = collapse_whitespace(trimmed);
+        lines.push(collapse_repeated_chars(&collapsed));
     }
 
     // 末尾の空行を除去
@@ -115,6 +117,36 @@ pub fn normalize_lint_output(output: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+/// 同一文字が4回以上連続する装飾文字を1文字に圧縮する。
+/// 対象: `.`, `=`, `-`, `─`, `━`
+/// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`
+fn collapse_repeated_chars(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        result.push(c);
+        if is_decorative_char(c) {
+            let mut count = 1u32;
+            while chars.peek() == Some(&c) {
+                chars.next();
+                count += 1;
+            }
+            // 4回以上の繰り返しのみ圧縮（3回以下は省略記号等の可能性があるため維持）
+            if count < 4 {
+                for _ in 1..count {
+                    result.push(c);
+                }
+            }
+        }
+    }
+    result
+}
+
+/// 装飾文字かどうかを判定する。
+fn is_decorative_char(c: char) -> bool {
+    matches!(c, '.' | '=' | '-' | '─' | '━')
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -136,7 +168,9 @@ fn collapse_whitespace(input: &str) -> String {
 }
 
 /// テキスト内の絶対パスから共通ディレクトリプレフィックスを除去する。
-/// パスが2つ以上あり、プレフィックスがスラッシュ3つ以上の深さ（例: `/Users/owa/`）であることが条件。
+/// パスが2つ以上あり、プレフィックスがスラッシュ3つ以上の深さ（例: `/home/user/`）であることが条件。
+/// パスコンテキスト（直前がスラッシュ以外またはトークン先頭）でのみ置換し、
+/// エラーメッセージ本文中の偶発的な一致を除外する。
 fn strip_common_path_prefix(text: &str) -> String {
     let paths = extract_absolute_paths(text);
     if paths.len() < 2 {
@@ -149,7 +183,28 @@ fn strip_common_path_prefix(text: &str) -> String {
         return text.to_string();
     }
 
-    text.replace(prefix, "")
+    // パスコンテキストでのみ置換: プレフィックス直後にパス文字が続く場合のみ
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(pos) = remaining.find(prefix) {
+        result.push_str(&remaining[..pos]);
+        let after = &remaining[pos + prefix.len()..];
+        // パスコンテキスト: プレフィックス直後にファイル名文字（英数字、_、.、-）が続く場合のみ除去
+        let is_path_context = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-');
+        if is_path_context {
+            // プレフィックスを除去（直後のパス部分はそのまま保持）
+            remaining = after;
+        } else {
+            // パスコンテキストでなければプレフィックスをそのまま保持
+            result.push_str(prefix);
+            remaining = after;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 /// lint出力テキストから絶対パスを抽出する。
@@ -283,7 +338,7 @@ mod tests {
     #[test]
     fn test_strip_common_path_prefix_multiple_files() {
         // 同一ディレクトリ → プレフィックスに /src/ を含む
-        let input = "/Users/owa/GitHub/project/src/main.rs:10 error\n/Users/owa/GitHub/project/src/lib.rs:20 warning";
+        let input = "/home/user/GitHub/project/src/main.rs:10 error\n/home/user/GitHub/project/src/lib.rs:20 warning";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, "main.rs:10 error\nlib.rs:20 warning");
     }
@@ -291,14 +346,14 @@ mod tests {
     #[test]
     fn test_strip_common_path_prefix_different_dirs() {
         let input =
-            "/Users/owa/GitHub/project/src/main.rs:10\n/Users/owa/GitHub/project/tests/test.rs:20";
+            "/home/user/GitHub/project/src/main.rs:10\n/home/user/GitHub/project/tests/test.rs:20";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, "src/main.rs:10\ntests/test.rs:20");
     }
 
     #[test]
     fn test_strip_common_path_prefix_single_path_skipped() {
-        let input = "/Users/owa/GitHub/project/src/main.rs:10 error";
+        let input = "/home/user/GitHub/project/src/main.rs:10 error";
         let result = strip_common_path_prefix(input);
         assert_eq!(result, input);
     }
@@ -320,23 +375,23 @@ mod tests {
 
     #[test]
     fn test_extract_absolute_paths() {
-        let text = "error at /Users/owa/src/main.rs:10:5";
+        let text = "error at /home/user/src/main.rs:10:5";
         let paths = extract_absolute_paths(text);
-        assert_eq!(paths, vec!["/Users/owa/src/main.rs"]);
+        assert_eq!(paths, vec!["/home/user/src/main.rs"]);
     }
 
     #[test]
     fn test_extract_absolute_paths_with_arrow() {
-        let text = "-->/Users/owa/src/main.rs:10:5";
+        let text = "-->/home/user/src/main.rs:10:5";
         let paths = extract_absolute_paths(text);
-        assert_eq!(paths, vec!["/Users/owa/src/main.rs"]);
+        assert_eq!(paths, vec!["/home/user/src/main.rs"]);
     }
 
     #[test]
     fn test_extract_absolute_paths_with_parens() {
-        let text = "/Users/owa/src/main.ts(10,5): error";
+        let text = "/home/user/src/main.ts(10,5): error";
         let paths = extract_absolute_paths(text);
-        assert_eq!(paths, vec!["/Users/owa/src/main.ts"]);
+        assert_eq!(paths, vec!["/home/user/src/main.ts"]);
     }
 
     #[test]
@@ -360,7 +415,7 @@ mod tests {
     #[test]
     fn test_normalize_strips_path_prefix() {
         // E2E: 異なるディレクトリ → プレフィックスはプロジェクトルート
-        let input = "/Users/owa/GitHub/project/src/App.tsx:10:5 error\n/Users/owa/GitHub/project/tests/index.test.tsx:20:3 warning";
+        let input = "/home/user/GitHub/project/src/App.tsx:10:5 error\n/home/user/GitHub/project/tests/index.test.tsx:20:3 warning";
         let result = normalize_lint_output(input);
         assert_eq!(
             result,
@@ -911,5 +966,94 @@ mod tests {
             result, "red text",
             "256色CSIシーケンスが正しく除去されること"
         );
+    }
+
+    // === 繰り返し装飾文字の圧縮テスト ===
+
+    #[test]
+    fn test_collapse_repeated_chars_4_or_more() {
+        assert_eq!(collapse_repeated_chars("===="), "=");
+        assert_eq!(collapse_repeated_chars("...................."), ".");
+        assert_eq!(collapse_repeated_chars("─────"), "─");
+        assert_eq!(collapse_repeated_chars("━━━━━"), "━");
+        assert_eq!(collapse_repeated_chars("------"), "-");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_preserves_3_or_less() {
+        // 3回以下は省略記号等の可能性があるため維持
+        assert_eq!(collapse_repeated_chars("..."), "...");
+        assert_eq!(collapse_repeated_chars("---"), "---");
+        assert_eq!(collapse_repeated_chars("=="), "==");
+        assert_eq!(collapse_repeated_chars("text == value"), "text == value");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_mixed_text() {
+        assert_eq!(
+            collapse_repeated_chars("= Starting migration ="),
+            "= Starting migration ="
+        );
+        assert_eq!(
+            collapse_repeated_chars("==== Starting migration ===="),
+            "= Starting migration ="
+        );
+        assert_eq!(
+            collapse_repeated_chars(".  63 / 212 ( 29%)"),
+            ".  63 / 212 ( 29%)"
+        );
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_ignores_non_decorative() {
+        // 装飾文字以外は対象外
+        assert_eq!(collapse_repeated_chars("aaaaa"), "aaaaa");
+        assert_eq!(collapse_repeated_chars("#####"), "#####");
+        assert_eq!(collapse_repeated_chars("*****"), "*****");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_empty() {
+        assert_eq!(collapse_repeated_chars(""), "");
+    }
+
+    #[test]
+    fn test_normalize_collapses_long_decorative_chars() {
+        // E2E: normalize_lint_output で装飾文字が圧縮される
+        let input = "error\n============================\ntype mismatch\n....................";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "error\n=\ntype mismatch\n.");
+    }
+
+    #[test]
+    fn test_normalize_progress_bar_compression() {
+        let input = "Using attach strategy to execute scripts...\n==== Starting migration for: 3.8.0.rc001 ====\n...............................................................  63 / 212 ( 29%)";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "Using attach strategy to execute scripts...\n= Starting migration for: 3.8.0.rc001 =\n. 63 / 212 ( 29%)"
+        );
+    }
+
+    // === パスコンテキスト置換テスト ===
+
+    #[test]
+    fn test_strip_common_path_prefix_context_only() {
+        // プレフィックス直後にパス文字が続く場合のみ除去
+        let input =
+            "/home/user/GitHub/project/src/main.rs:10\n/home/user/GitHub/project/src/lib.rs:20";
+        let result = strip_common_path_prefix(input);
+        assert_eq!(result, "main.rs:10\nlib.rs:20");
+    }
+
+    #[test]
+    fn test_strip_common_path_prefix_non_path_context_preserved() {
+        // プレフィックスの直後がスペースや改行等の場合は除去しない
+        // このケースでは2パス抽出 → 共通プレフィックスは /home/user/GitHub/project/
+        // 「see /home/user/GitHub/project/ 」の直後がスペースなので除去しない
+        let input = "/home/user/GitHub/project/src/main.rs:10\n/home/user/GitHub/project/tests/test.rs:20\nsee /home/user/GitHub/project/ for details";
+        let result = strip_common_path_prefix(input);
+        assert!(result.contains("see /home/user/GitHub/project/ for details"));
+        assert!(result.contains("src/main.rs:10"));
     }
 }

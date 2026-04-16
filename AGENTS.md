@@ -93,6 +93,7 @@ cargo run -- version     # Show version
 3. **Adapter Pattern**: Convert agent-specific JSON to internal types
 4. **tree-sitter for AST**: Accurate shell command parsing with robust fallback string parser for non-AST builds
 5. **Fail-Closed Security**: Block commands when input parsing fails
+6. **Intentional Scope Limits**: This tool is for command blocking, post-edit hooks, stop hooks, and subagent notifications. It must not expand into general lifecycle/prompt orchestration. `SessionStart`, `UserPromptSubmit`, and internal `BeforePrompt`-style events are intentionally out of scope and should remain pass-through/allow-by-design unless the project direction explicitly changes.
 
 ## Testing Guidelines
 

@@ -22,10 +22,14 @@ fn main() -> Result<()> {
     // 設定ファイルの読み込み
     let config = ConfigService::load(cli.config.as_deref())?;
 
-    // デバッグモード時にロギングを初期化
-    if cli.debug || config.debug {
-        domain::logger::init(&config)?;
-    }
+    // デバッグモード時にロギングを初期化。
+    // ガードは main の寿命まで保持してログスレッドを生かしておく必要がある
+    // （ドロップ時にバッファをフラッシュしてからシャットダウンされる）。
+    let _logger_guard = if cli.debug || config.debug {
+        Some(domain::logger::init(&config)?)
+    } else {
+        None
+    };
 
     // コマンド実行
     match cli.command {

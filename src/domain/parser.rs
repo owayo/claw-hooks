@@ -320,17 +320,17 @@ impl ShellParser {
                     found_command_name = true;
                 }
                 "word" | "string" | "raw_string" | "simple_expansion" | "expansion"
-                | "concatenation" => {
-                    if found_command_name {
-                        let text = if strip_quotes {
-                            source[child.byte_range()]
-                                .trim_matches(|c| c == '"' || c == '\'')
-                                .to_string()
-                        } else {
-                            source[child.byte_range()].to_string()
-                        };
-                        args.push(text);
-                    }
+                | "concatenation"
+                    if found_command_name =>
+                {
+                    let text = if strip_quotes {
+                        source[child.byte_range()]
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string()
+                    } else {
+                        source[child.byte_range()].to_string()
+                    };
+                    args.push(text);
                 }
                 _ => {}
             }

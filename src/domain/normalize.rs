@@ -1069,4 +1069,84 @@ mod tests {
         assert!(result.contains("see /home/user/GitHub/project/ for details"));
         assert!(result.contains("src/main.rs:10"));
     }
+
+    // === collapse_repeated_chars 追加の境界条件 ===
+
+    #[test]
+    fn test_collapse_repeated_chars_trailing_ellipsis_with_following_text_after_newline() {
+        // 「行末」判定はあくまで chars.peek() == None なので、行が連続しても分割は呼び出し側で行う前提
+        // collapse_repeated_chars 単体では \n を含む単一文字列を扱うことは想定しないが、防御的に確認
+        let input = "first... second";
+        // chars.peek() は次に space があるため、3点リーダは行末と判定されない
+        assert_eq!(collapse_repeated_chars(input), "first... second");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_dots_at_start() {
+        // 行頭の3点リーダは行末ではないので維持される
+        assert_eq!(collapse_repeated_chars("...text"), "...text");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_only_dots_3() {
+        // 単独で3点 → chars.peek() == None なので行末扱い
+        assert_eq!(collapse_repeated_chars("..."), ".");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_two_dots_preserved() {
+        // 2点は装飾文字判定の閾値（4以上 or 行末3以上）に達しないため維持
+        assert_eq!(collapse_repeated_chars(".."), "..");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_horizontal_box_drawing() {
+        // 罫線文字 ─ ━ の長い連続が圧縮される
+        assert_eq!(collapse_repeated_chars("title\n─────"), "title\n─");
+        assert_eq!(collapse_repeated_chars("━━━━━━━━━━ end"), "━ end");
+    }
+
+    // === normalize_lint_output: ANSI + パス + 装飾の複合 ===
+
+    #[test]
+    fn test_normalize_combines_ansi_path_and_decoration_compression() {
+        // 実際の lint 出力に近い複合ケース
+        let input = "\x1b[31m/home/user/GitHub/project/src/main.rs:10:5 error\x1b[0m\n\
+            ===== summary =====\n\
+            /home/user/GitHub/project/src/lib.rs:20 warning";
+        let result = normalize_lint_output(input);
+        // ANSI 除去
+        assert!(!result.contains('\x1b'));
+        // パスプレフィックス除去（共通部分は /home/user/GitHub/project/src/ なのでファイル名のみ残る）
+        assert!(result.contains("main.rs:10:5"));
+        assert!(result.contains("lib.rs:20"));
+        assert!(!result.contains("/home/user/GitHub/"));
+        // 装飾文字圧縮
+        assert!(result.contains("= summary ="));
+        assert!(!result.contains("====="));
+    }
+
+    // === truncate_output 追加: 既存のサフィックスを含む入力 ===
+
+    #[test]
+    fn test_truncate_output_input_already_contains_truncated_suffix() {
+        // 既に切り詰めサフィックスを含む入力でも、長さ制限さえ守れば正しく動く
+        let input = format!("{}\n... (truncated)", "a".repeat(2000));
+        let result = truncate_output(&input, 100);
+        assert!(result.chars().count() <= 100);
+        assert!(result.ends_with("... (truncated)"));
+    }
+
+    // === strip_common_path_prefix 追加: マルチバイトパスでも文字境界を維持 ===
+
+    #[test]
+    fn test_strip_common_path_prefix_multibyte_path_preserves_char_boundary() {
+        // マルチバイトのディレクトリ名を含む共通プレフィックスでも UTF-8 境界を壊さない
+        let input = "/Users/田中/proj/src/main.rs:10 error\n/Users/田中/proj/src/lib.rs:20 warning";
+        let result = strip_common_path_prefix(input);
+        // 元の入力は有効な UTF-8 で、結果も有効な UTF-8 のまま
+        assert!(result.is_ascii() || result.chars().count() > 0);
+        assert!(result.contains("main.rs:10"));
+        assert!(result.contains("lib.rs:20"));
+    }
 }

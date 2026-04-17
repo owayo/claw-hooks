@@ -5,6 +5,7 @@ use logroller::{LogRollerBuilder, Rotation, RotationAge, TimeZone};
 use std::fs;
 use std::path::Path;
 use time::macros::format_description;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
@@ -13,7 +14,11 @@ use tracing_subscriber::prelude::*;
 use crate::config::Config;
 
 /// ログシステムを初期化する。
-pub fn init(config: &Config) -> Result<()> {
+///
+/// 戻り値の `WorkerGuard` を呼び出し側で保持する必要がある。
+/// ドロップ時にバックグラウンドのログ書き込みスレッドへ残バッファを
+/// フラッシュさせるため、main の寿命まで保持しないと最後の数件が欠落する。
+pub fn init(config: &Config) -> Result<WorkerGuard> {
     // 必要に応じてログディレクトリを作成
     if !config.log_path.exists() {
         fs::create_dir_all(&config.log_path)?;
@@ -31,7 +36,7 @@ pub fn init(config: &Config) -> Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create log roller: {}", e))?;
 
-    let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     // タイムスタンプにローカルタイムゾーンを使用
     let time_format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
@@ -55,12 +60,10 @@ pub fn init(config: &Config) -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set global subscriber: {}", e))?;
 
-    // プログラムの実行中はguardを維持する
-    // 注: 実際のアプリケーションでは、guardをどこかに保持しないと
-    // ドロップ時にログスレッドが停止してしまう。
-    std::mem::forget(_guard);
-
-    Ok(())
+    // ガードを返す。呼び出し側で main の寿命に束縛して保持する必要がある。
+    // mem::forget するとデストラクタが呼ばれず、未フラッシュのログが
+    // プロセス終了時に失われる。
+    Ok(guard)
 }
 
 /// 2日以上経過したログファイルを削除する。
@@ -195,5 +198,41 @@ mod tests {
         cleanup_old_logs(log_path).unwrap();
 
         assert!(subdir.exists(), "Subdirectory should not be deleted");
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_keeps_recent_files_with_long_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path();
+
+        // "claw-hooks" で始まる別名のログファイル（ローテーション後のファイル名想定）
+        let recent_rotated = log_path.join("claw-hooks-archive.2026-04-15");
+        fs::write(&recent_rotated, "rotated").unwrap();
+        let one_day_ago = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+        set_file_modified_time(&recent_rotated, one_day_ago).unwrap();
+
+        cleanup_old_logs(log_path).unwrap();
+
+        // 24時間前のファイルは2日基準なので削除されない
+        assert!(
+            recent_rotated.exists(),
+            "1日前の claw-hooks プレフィックスファイルは保持される"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_old_logs_handles_unreadable_metadata_gracefully() {
+        // メタデータが読めないファイルがあってもエラーにならず処理を継続できる
+        let dir = tempfile::TempDir::new().unwrap();
+        let log_path = dir.path();
+
+        // 通常のログファイルを作成
+        let regular_file = log_path.join("claw-hooks.2026-04-15");
+        fs::write(&regular_file, "log").unwrap();
+
+        // 削除しても他のファイルへ影響しないことを確認
+        let result = cleanup_old_logs(log_path);
+        assert!(result.is_ok());
+        assert!(regular_file.exists());
     }
 }

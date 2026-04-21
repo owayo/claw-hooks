@@ -13,7 +13,7 @@ pub enum HookEvent {
     ///
     /// 外部イベント名:
     /// - Claude Code: `PreToolUse`
-    /// - Cursor: `ShellExecution`
+    /// - Cursor: `beforeShellExecution`
     /// - Windsurf: `pre_run_command`
     /// - Gemini CLI: `BeforeTool`
     /// - Codex CLI: `PreToolUse`
@@ -22,18 +22,18 @@ pub enum HookEvent {
     /// ファイル編集後（拡張フックの対象）。
     ///
     /// 外部イベント名:
-    /// - Claude Code: `PostToolUse`
-    /// - Cursor: `FileEdit`
+    /// - Claude Code: `PostToolUse`（`Write` / `Edit` の保存後）
+    /// - Cursor: `afterFileEdit`, `afterTabFileEdit`
     /// - Windsurf: `post_write_code`
-    /// - Gemini CLI: `AfterTool`
-    /// - Codex CLI: `PostToolUse`
+    /// - Gemini CLI: `AfterTool`（`write_file` などの書き込み後）
+    /// - Codex CLI: `PostToolUse`（現行ランタイムは `Bash` 出力のパススルーのみ）
     AfterFileEdit,
 
     /// エージェントループ停止。
     ///
     /// 外部イベント名:
     /// - Claude Code: `Stop`
-    /// - Cursor: `Stop`
+    /// - Cursor: `stop`
     /// - Windsurf: `post_cascade_response`（非同期の事後フック。実行はベストエフォート）
     /// - Gemini CLI: `AfterAgent`
     /// - Codex CLI: `Stop`

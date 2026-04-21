@@ -184,7 +184,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ルール:
 - 拡張子フックの各コマンドテンプレートには、`{file}` プレースホルダーを必ず1つだけ含める必要があります。
-- 拡張子フックは保存後・編集後イベント（`PostToolUse`、`afterFileEdit`、`post_write_code`、`AfterTool`）でのみ実行されます。
+- 拡張子フックは保存後・編集後のファイル書き込みイベント（Claude の `PostToolUse` + `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `AfterTool` + `write_file`）でのみ実行されます。
+- 現行の Codex `PostToolUse` は `Bash` 出力のみのため、拡張子フックは実行しません。
 - 親ディレクトリ遡りを含むパス（例: `../`）は安全のため拒否されます。
 - シェルのリダイレクトメタ文字（`<`, `>`）を含むパスは安全のため拒否されます。
 - 必須のコマンドやファイルパスを欠いた不正なエージェント入力は、fail-closed で拒否されます。

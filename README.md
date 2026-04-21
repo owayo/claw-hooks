@@ -184,7 +184,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 Rules:
 - Each extension hook command template must contain exactly one `{file}` placeholder.
-- Extension hooks run only on post-save/post-edit events (`PostToolUse`, `afterFileEdit`, `post_write_code`, `AfterTool`).
+- Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`).
+- Current Codex `PostToolUse` hooks emit `Bash` output only, so they do not trigger extension hooks.
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
 - Malformed agent payloads that omit required command/file fields are rejected fail-closed.

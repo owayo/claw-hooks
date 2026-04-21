@@ -174,7 +174,7 @@ fn test_post_tool_use_event() {
     let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"kill 1234"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    // PostToolUse events should be allowed (monitoring only, no blocking)
+    // Claude の PostToolUse + Bash は監視用途のためブロックしない
     assert_eq!(exit_code, 0, "PostToolUse should be allowed");
     // PostToolUse Allow: 空 JSON（decision 省略）
     assert_eq!(
@@ -186,7 +186,7 @@ fn test_post_tool_use_event() {
 
 #[test]
 fn test_stop_event() {
-    // Stop events have no tool_name or tool_input
+    // Stop イベントには tool_name / tool_input がない
     let input = r#"{"hook_event_name":"Stop","stop_hook_active":true}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
@@ -1348,6 +1348,21 @@ fn test_codex_format_stop_event() {
         parsed,
         serde_json::json!({}),
         "Codex Stop Allow should return empty JSON"
+    );
+}
+
+#[test]
+fn test_codex_format_post_tool_use_bash_passthrough() {
+    let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"echo done"},"session_id":"test-session","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    // 現行の Codex PostToolUse は Bash 出力のパススルーとして扱う
+    assert_eq!(exit_code, 0, "Codex PostToolUse should exit 0");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex PostToolUse passthrough should return empty JSON"
     );
 }
 

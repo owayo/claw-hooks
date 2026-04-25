@@ -184,8 +184,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 Rules:
 - Each extension hook command template must contain exactly one `{file}` placeholder.
-- Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`).
-- Current Codex `PostToolUse` hooks emit `Bash` output only, so they do not trigger extension hooks.
+- Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`, Codex `PostToolUse` with `apply_patch`).
+- Codex `PostToolUse` with `Bash` remains a pass-through command-output event; `apply_patch` payloads are parsed for changed file paths and can trigger extension hooks.
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
 - Malformed agent payloads that omit required command/file fields are rejected fail-closed.
@@ -443,6 +443,17 @@ Add to `~/.codex/hooks.json` (user):
     "PreToolUse": [
       {
         "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
         "hooks": [
           {
             "type": "command",
@@ -894,7 +905,7 @@ Uses `hook_event_name` field:
 ```
 
 ```jsonc
-// PostToolUse event (current Codex runtime emits Bash only)
+// PostToolUse event for Bash command output
 {
   "hook_event_name": "PostToolUse",
   "session_id": "...",
@@ -903,6 +914,22 @@ Uses `hook_event_name` field:
   "tool_name": "Bash",
   "tool_use_id": "...",
   "tool_input": { "command": "cargo test" },
+  "tool_response": "..."
+}
+```
+
+```jsonc
+// PostToolUse event for file edits through apply_patch
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "apply_patch",
+  "tool_use_id": "...",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"
+  },
   "tool_response": "..."
 }
 ```
@@ -926,10 +953,10 @@ Uses `hook_event_name` field:
 | `SessionStart` | BeforePrompt (pass-through) |
 | `UserPromptSubmit` | BeforePrompt (pass-through) |
 | `PreToolUse` | BeforeCommand |
-| `PostToolUse` | AfterFileEdit (pass-through for Bash output) |
+| `PostToolUse` | AfterFileEdit (Bash output pass-through; `apply_patch` can trigger extension hooks) |
 | `Stop` | Stop |
 
-Current Codex hooks match `PreToolUse` and `PostToolUse` on `Bash` only. `claw-hooks` keeps `PostToolUse` compatible, but extension hooks still run only for file-write events such as Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, and Gemini `write_file`.
+Codex `PostToolUse` supports `Bash` command output and file edits through `apply_patch`. `claw-hooks` treats `Bash` as pass-through and maps `apply_patch` to `MultiEdit` by extracting `*** Add File:`, `*** Update File:`, and `*** Move to:` paths from the patch command. Deleted files are ignored for extension hooks because there is no saved file to format.
 
 Output format:
 - Allow: `{}` (empty JSON, exit 0)
@@ -960,12 +987,14 @@ graph LR
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
+        CX2[Codex: PostToolUse + apply_patch]
     end
     CH2[🔧 Run commands by extension]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
+    CX2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]
@@ -982,7 +1011,7 @@ graph LR
     CX3 --> CH3
 ```
 
-Codex `PostToolUse` is omitted from the "After File Save" flow because the current runtime emits Bash output only, not file-write payloads.
+Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events.
 
 ## Input/Output Reference
 

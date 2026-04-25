@@ -93,10 +93,10 @@ impl HookInput {
     /// ファイル操作入力からファイルパスを取得する。
     #[allow(dead_code)]
     pub fn file_path(&self) -> Option<&str> {
-        if let ToolInput::File(file) = &self.tool_input {
-            Some(&file.file_path)
-        } else {
-            None
+        match &self.tool_input {
+            ToolInput::File(file) => Some(&file.file_path),
+            ToolInput::Files(files) => files.first().map(|file| file.file_path.as_str()),
+            _ => None,
         }
     }
 }
@@ -109,6 +109,8 @@ pub enum ToolInput {
     Bash(BashInput),
     /// ファイル操作入力（Write, Edit, MultiEdit, Read）
     File(FileOperationInput),
+    /// 複数ファイル操作入力（Codex apply_patch など）
+    Files(Vec<FileOperationInput>),
     /// Stop イベント入力（エージェントループ終了）
     #[allow(dead_code)]
     Stop(StopInput),

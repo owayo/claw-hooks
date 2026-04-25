@@ -39,7 +39,7 @@ ast-parser = ["tree-sitter", "tree-sitter-bash"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
-libc = "0.2.185"
+libc = "0.2.186"
 
 [profile.release]
 lto = true
@@ -47,6 +47,6 @@ codegen-units = 1
 strip = true
 
 [profile.dev]
-# Faster compilation in development
+# 開発時のコンパイルを速くする
 opt-level = 0
 debug = true

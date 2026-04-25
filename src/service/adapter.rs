@@ -2495,7 +2495,7 @@ mod tests {
 
     #[test]
     fn test_codex_input_post_tool_use_bash_maps_to_after_file_edit() {
-        // Codex: PostToolUse + Bash → AfterFileEdit（現在は Bash のみ対応）
+        // Codex: PostToolUse + Bash はコマンド出力確認用の AfterFileEdit として扱う
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{
             "hook_event_name": "PostToolUse",
@@ -2506,6 +2506,54 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_input_post_tool_use_apply_patch_maps_to_multi_edit_files() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n old\n new\n*** Add File: tests/new_test.rs\n+test\n*** End Patch\n"
+            }
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "MultiEdit");
+        if let crate::domain::ToolInput::Files(files) = &result.tool_input {
+            let paths: Vec<&str> = files.iter().map(|file| file.file_path.as_str()).collect();
+            assert_eq!(paths, vec!["src/lib.rs", "tests/new_test.rs"]);
+        } else {
+            panic!("apply_patch は ToolInput::Files に変換されるべき");
+        }
+    }
+
+    #[test]
+    fn test_codex_input_pre_tool_use_apply_patch_parses_without_file_path() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n old\n new\n*** End Patch\n"
+            }
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "MultiEdit");
+        assert!(matches!(
+            result.tool_input,
+            crate::domain::ToolInput::Files(_)
+        ));
+    }
+
+    #[test]
+    fn test_codex_apply_patch_move_uses_destination_path() {
+        let paths = FormatAdapter::extract_apply_patch_paths(
+            "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n old\n new\n*** Delete File: src/deleted.rs\n*** End Patch\n",
+        );
+        assert_eq!(paths, vec!["src/new.rs"]);
     }
 
     #[test]
@@ -3512,7 +3560,8 @@ impl FormatAdapter {
         // Codex のツール名を内部のツール名にマッピング
         let mapped_tool_name = match raw_tool_name.as_str() {
             "shell" | "run_command" | "execute" => "Bash".to_string(),
-            "write_file" | "create_file" | "edit_file" | "apply_patch" => "Write".to_string(),
+            "write_file" | "create_file" | "edit_file" => "Write".to_string(),
+            "apply_patch" => "MultiEdit".to_string(),
             "read_file" => "Read".to_string(),
             other => other.to_string(),
         };
@@ -3520,27 +3569,37 @@ impl FormatAdapter {
         let raw_tool_input = raw
             .get("tool_input")
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
-        let tool_input = match mapped_tool_name.as_str() {
-            "Bash" => {
-                let command = raw_tool_input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
-                crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                    command: command.to_string(),
-                    timeout: None,
-                })
-            }
-            "Write" | "Edit" | "MultiEdit" | "Read" => {
-                // untagged enum への暗黙的デシリアライズを避け、
-                // 明示的に FileOperationInput にデシリアライズする。
-                // 空オブジェクト時に ToolInput::Stop に誤マッチするのを防ぐ。
-                serde_json::from_value::<crate::domain::FileOperationInput>(raw_tool_input.clone())
+        let tool_input = if raw_tool_name == "apply_patch" {
+            let command = raw_tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
+            crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
+        } else {
+            match mapped_tool_name.as_str() {
+                "Bash" => {
+                    let command = raw_tool_input
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
+                    crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: command.to_string(),
+                        timeout: None,
+                    })
+                }
+                "Write" | "Edit" | "MultiEdit" | "Read" => {
+                    // untagged enum への暗黙的デシリアライズを避け、
+                    // 明示的に FileOperationInput にデシリアライズする。
+                    // 空オブジェクト時に ToolInput::Stop に誤マッチするのを防ぐ。
+                    serde_json::from_value::<crate::domain::FileOperationInput>(
+                        raw_tool_input.clone(),
+                    )
                     .map(crate::domain::ToolInput::File)
                     .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
+                }
+                _ => crate::domain::ToolInput::Other(raw_tool_input.clone()),
             }
-            _ => crate::domain::ToolInput::Other(raw_tool_input.clone()),
         };
 
         debug!(
@@ -3591,6 +3650,69 @@ impl FormatAdapter {
             Decision::Block { message } => Decision::Block {
                 message: truncate_output(message, self.output_max_length),
             },
+        }
+    }
+
+    fn parse_apply_patch_file_inputs(command: &str) -> Vec<crate::domain::FileOperationInput> {
+        Self::extract_apply_patch_paths(command)
+            .into_iter()
+            .map(|file_path| crate::domain::FileOperationInput {
+                file_path,
+                content: None,
+            })
+            .collect()
+    }
+
+    fn extract_apply_patch_paths(command: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut last_replaceable_index = None;
+
+        for line in command.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(path) = line
+                .strip_prefix("*** Add File: ")
+                .or_else(|| line.strip_prefix("*** Update File: "))
+            {
+                last_replaceable_index = Self::push_unique_apply_patch_path(&mut paths, path);
+            } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+                let path = path.trim();
+                if path.is_empty() {
+                    last_replaceable_index = None;
+                    continue;
+                }
+
+                if let Some(index) = last_replaceable_index.take() {
+                    if let Some(existing_index) = paths.iter().position(|existing| existing == path)
+                    {
+                        if existing_index != index {
+                            paths.remove(index);
+                        }
+                    } else if let Some(existing) = paths.get_mut(index) {
+                        *existing = path.to_string();
+                    }
+                } else {
+                    Self::push_unique_apply_patch_path(&mut paths, path);
+                }
+            } else if line.strip_prefix("*** Delete File: ").is_some() || line.starts_with("*** ") {
+                // 削除対象には保存後フックを実行できない。その他の patch 制御行で rename 候補を閉じる。
+                last_replaceable_index = None;
+            }
+        }
+
+        paths
+    }
+
+    fn push_unique_apply_patch_path(paths: &mut Vec<String>, path: &str) -> Option<usize> {
+        let path = path.trim();
+        if path.is_empty() {
+            return None;
+        }
+
+        if let Some(index) = paths.iter().position(|existing| existing == path) {
+            Some(index)
+        } else {
+            paths.push(path.to_string());
+            Some(paths.len() - 1)
         }
     }
 }

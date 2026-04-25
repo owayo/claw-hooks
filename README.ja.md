@@ -184,8 +184,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 ルール:
 - 拡張子フックの各コマンドテンプレートには、`{file}` プレースホルダーを必ず1つだけ含める必要があります。
-- 拡張子フックは保存後・編集後のファイル書き込みイベント（Claude の `PostToolUse` + `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `AfterTool` + `write_file`）でのみ実行されます。
-- 現行の Codex `PostToolUse` は `Bash` 出力のみのため、拡張子フックは実行しません。
+- 拡張子フックは保存後・編集後のファイル書き込みイベント（Claude の `PostToolUse` + `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `AfterTool` + `write_file`、Codex の `PostToolUse` + `apply_patch`）でのみ実行されます。
+- Codex の `PostToolUse` + `Bash` はコマンド出力イベントとしてパススルーし、`apply_patch` は変更ファイルパスを抽出して拡張子フックの対象にします。
 - 親ディレクトリ遡りを含むパス（例: `../`）は安全のため拒否されます。
 - シェルのリダイレクトメタ文字（`<`, `>`）を含むパスは安全のため拒否されます。
 - 必須のコマンドやファイルパスを欠いた不正なエージェント入力は、fail-closed で拒否されます。
@@ -443,6 +443,17 @@ claw-hooks hook --config /path/to/config.toml
     "PreToolUse": [
       {
         "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
         "hooks": [
           {
             "type": "command",
@@ -894,7 +905,7 @@ Claude Code公式フック仕様を使用:
 ```
 
 ```jsonc
-// PostToolUseイベント（現行の Codex ランタイムは Bash のみを返す）
+// Bash コマンド出力の PostToolUse イベント
 {
   "hook_event_name": "PostToolUse",
   "session_id": "...",
@@ -903,6 +914,22 @@ Claude Code公式フック仕様を使用:
   "tool_name": "Bash",
   "tool_use_id": "...",
   "tool_input": { "command": "cargo test" },
+  "tool_response": "..."
+}
+```
+
+```jsonc
+// apply_patch によるファイル編集の PostToolUse イベント
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "apply_patch",
+  "tool_use_id": "...",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"
+  },
   "tool_response": "..."
 }
 ```
@@ -926,10 +953,10 @@ Claude Code公式フック仕様を使用:
 | `SessionStart` | BeforePrompt（パススルー） |
 | `UserPromptSubmit` | BeforePrompt（パススルー） |
 | `PreToolUse` | BeforeCommand |
-| `PostToolUse` | AfterFileEdit（Bash 出力のパススルー） |
+| `PostToolUse` | AfterFileEdit（Bash 出力はパススルー、`apply_patch` は拡張子フック対象） |
 | `Stop` | Stop |
 
-現行の Codex Hooks は `PreToolUse` / `PostToolUse` ともに `Bash` のみを対象にします。`claw-hooks` は互換性のため `PostToolUse` を受け付けますが、拡張子フックを実行するのは Claude の `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `write_file` のようなファイル書き込みイベントだけです。
+Codex の `PostToolUse` は `Bash` コマンド出力と `apply_patch` によるファイル編集を扱えます。`claw-hooks` は `Bash` をパススルーし、`apply_patch` はパッチ本文の `*** Add File:`, `*** Update File:`, `*** Move to:` から変更ファイルパスを抽出して `MultiEdit` として扱います。削除されたファイルは保存後に整形対象が存在しないため、拡張子フックでは無視します。
 
 出力形式:
 - 許可: `{}`（空JSON、exit 0）
@@ -960,12 +987,14 @@ graph LR
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         GE2[Gemini: AfterTool + write_file]
+        CX2[Codex: PostToolUse + apply_patch]
     end
     CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     GE2 --> CH2
+    CX2 --> CH2
 
     subgraph エージェント終了
         CC3[Claude: Stop]
@@ -982,7 +1011,7 @@ graph LR
     CX3 --> CH3
 ```
 
-Codex の `PostToolUse` は現状 Bash 出力専用のため、「ファイル保存後」フローには含めていません。
+Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックのため、「ファイル保存後」フローには含めません。ファイル書き込みイベントとして扱うのは `apply_patch` のみです。
 
 ## 入出力リファレンス
 

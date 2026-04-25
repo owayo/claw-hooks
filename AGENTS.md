@@ -141,7 +141,7 @@ cargo run -- version     # Show version
 - Allow output: `{}` (empty JSON, exit 0)
 - Block output: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
 - Missing required Codex fields must be treated as fail-closed parse errors
-- Current Codex `PreToolUse` / `PostToolUse` hooks match `Bash` only, so do not document `PostToolUse` as a file-save hook
+- Codex `PreToolUse` / `PostToolUse` can receive `Bash` and `apply_patch`; `apply_patch` is mapped to `MultiEdit` and its patch command is parsed for changed file paths
 - Official docs: https://developers.openai.com/codex/hooks
 
 ## README Update Rules

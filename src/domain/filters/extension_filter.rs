@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use super::Filter;
 use crate::domain::command::run_with_timeout;
 use crate::domain::normalize::normalize_lint_output;
-use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
+use crate::domain::{Decision, FileOperationInput, HookEvent, HookInput, ToolInput};
 
 /// パース済みコマンドテンプレートの結果。
 pub(crate) struct ParsedCommand {
@@ -317,16 +317,27 @@ impl Filter for ExtensionHookFilter {
         }
 
         // マッチする拡張子フックがあるか確認
-        if let ToolInput::File(file_input) = &input.tool_input {
-            return self.get_matching_commands(&file_input.file_path).is_some();
+        match &input.tool_input {
+            ToolInput::File(file_input) => {
+                self.get_matching_commands(&file_input.file_path).is_some()
+            }
+            ToolInput::Files(file_inputs) => file_inputs
+                .iter()
+                .any(|file_input| self.get_matching_commands(&file_input.file_path).is_some()),
+            _ => false,
         }
-
-        false
     }
 
     fn execute(&self, input: &HookInput) -> Decision {
         // ファイルパスを抽出してコマンドを実行
-        if let ToolInput::File(file_input) = &input.tool_input {
+        let file_inputs: Vec<&FileOperationInput> = match &input.tool_input {
+            ToolInput::File(file_input) => vec![file_input],
+            ToolInput::Files(file_inputs) => file_inputs.iter().collect(),
+            _ => Vec::new(),
+        };
+
+        let mut outputs = Vec::new();
+        for file_input in file_inputs {
             if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
                 // NanoBuddy 通知（フックコマンドより先に到達するよう先に送信）
                 if self.nano_buddy {
@@ -343,9 +354,13 @@ impl Filter for ExtensionHookFilter {
                 // lint 警告/エラーをエージェントに渡す（Claude Code のみ）
                 // トークン効率のため出力を正規化（ANSI 除去、空行圧縮）
                 if let Some(ctx) = output {
-                    return Decision::allow_with_context(normalize_lint_output(&ctx));
+                    outputs.push(ctx);
                 }
             }
+        }
+
+        if !outputs.is_empty() {
+            return Decision::allow_with_context(normalize_lint_output(&outputs.join("\n")));
         }
 
         // 常に許可 — 拡張子フックは副作用であり、フィルターではない
@@ -443,6 +458,29 @@ mod tests {
     }
 
     #[test]
+    fn test_applies_to_multi_file_edit_when_any_file_matches() {
+        let filter = create_filter_with_go_hooks();
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::Files(vec![
+                crate::domain::FileOperationInput {
+                    file_path: "/path/to/file.rs".to_string(),
+                    content: None,
+                },
+                crate::domain::FileOperationInput {
+                    file_path: "/path/to/file.go".to_string(),
+                    content: None,
+                },
+            ]),
+            session_id: None,
+        };
+
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
     fn test_does_not_apply_to_stop_event() {
         let filter = create_filter_with_go_hooks();
 
@@ -512,7 +550,7 @@ mod tests {
             event: HookEvent::AfterFileEdit,
             tool_name: "Write".to_string(),
             tool_input: ToolInput::File(crate::domain::FileOperationInput {
-                file_path: "/path/to/file.rs".to_string(), // .rs not in hooks
+                file_path: "/path/to/file.rs".to_string(), // .rs は設定対象外
                 content: None,
             }),
             session_id: None,
@@ -557,6 +595,45 @@ mod tests {
         let decision = filter.execute(&input);
         // 拡張子フックは副作用であり、常に Allow を返す
         assert!(matches!(decision, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_execute_multi_file_edit_combines_matching_outputs() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(".txt".to_string(), vec!["echo {file}".to_string()]);
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::Files(vec![
+                crate::domain::FileOperationInput {
+                    file_path: "/tmp/a.txt".to_string(),
+                    content: None,
+                },
+                crate::domain::FileOperationInput {
+                    file_path: "/tmp/b.rs".to_string(),
+                    content: None,
+                },
+                crate::domain::FileOperationInput {
+                    file_path: "/tmp/c.txt".to_string(),
+                    content: None,
+                },
+            ]),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        if let Decision::Allow {
+            additional_context: Some(context),
+        } = decision
+        {
+            assert!(context.contains("/tmp/a.txt"));
+            assert!(context.contains("/tmp/c.txt"));
+            assert!(!context.contains("/tmp/b.rs"));
+        } else {
+            panic!("マッチした複数ファイルの出力を additional_context にまとめるべき");
+        }
     }
 
     #[test]

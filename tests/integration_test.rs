@@ -1356,13 +1356,27 @@ fn test_codex_format_post_tool_use_bash_passthrough() {
     let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"echo done"},"session_id":"test-session","cwd":"/tmp"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
 
-    // 現行の Codex PostToolUse は Bash 出力のパススルーとして扱う
+    // Codex PostToolUse + Bash はコマンド出力確認用のパススルーとして扱う
     assert_eq!(exit_code, 0, "Codex PostToolUse should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(
         parsed,
         serde_json::json!({}),
         "Codex PostToolUse passthrough should return empty JSON"
+    );
+}
+
+#[test]
+fn test_codex_format_post_tool_use_apply_patch_allows() {
+    let input = r#"{"hook_event_name":"PostToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"},"session_id":"test-session","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex apply_patch PostToolUse should exit 0");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex apply_patch without configured extension hooks should allow"
     );
 }
 

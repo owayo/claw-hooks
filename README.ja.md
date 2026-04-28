@@ -451,6 +451,17 @@ claw-hooks hook --config /path/to/config.toml
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash|apply_patch|Edit|Write",
@@ -905,6 +916,18 @@ Claude Code公式フック仕様を使用:
 ```
 
 ```jsonc
+// 承認プロンプト前の PermissionRequest イベント
+{
+  "hook_event_name": "PermissionRequest",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf /tmp/test", "description": "..." }
+}
+```
+
+```jsonc
 // Bash コマンド出力の PostToolUse イベント
 {
   "hook_event_name": "PostToolUse",
@@ -953,14 +976,18 @@ Claude Code公式フック仕様を使用:
 | `SessionStart` | BeforePrompt（パススルー） |
 | `UserPromptSubmit` | BeforePrompt（パススルー） |
 | `PreToolUse` | BeforeCommand |
+| `PermissionRequest` | PermissionRequest（承認前の Bash コマンドガード） |
 | `PostToolUse` | AfterFileEdit（Bash 出力はパススルー、`apply_patch` は拡張子フック対象） |
 | `Stop` | Stop |
+
+Codex の `PermissionRequest` は `Bash` 向けのコマンドガードとして扱います。危険なコマンドは専用の権限応答で拒否し、安全なコマンドでは `{}` を返して通常の承認フローを変更しません。
 
 Codex の `PostToolUse` は `Bash` コマンド出力と `apply_patch` によるファイル編集を扱えます。`claw-hooks` は `Bash` をパススルーし、`apply_patch` はパッチ本文の `*** Add File:`, `*** Update File:`, `*** Move to:` から変更ファイルパスを抽出して `MultiEdit` として扱います。削除されたファイルは保存後に整形対象が存在しないため、拡張子フックでは無視します。
 
 出力形式:
 - 許可: `{}`（空JSON、exit 0）
 - ブロック: `{"decision":"block","reason":"..."}`（レガシー形式、公式に受理される）
+- PermissionRequest ブロック: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 
 Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
 
@@ -1076,6 +1103,8 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 **Codex CLI 許可**: `{}`（空JSON）
 
 **Codex CLI ブロック**: `{"decision":"block","reason":"Use safe-rm instead..."}`
+
+**Codex CLI PermissionRequest ブロック**: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Use safe-rm instead..."}}}`
 
 ### 終了コード
 

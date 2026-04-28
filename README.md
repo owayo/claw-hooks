@@ -451,6 +451,17 @@ Add to `~/.codex/hooks.json` (user):
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claw-hooks hook --format codex"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash|apply_patch|Edit|Write",
@@ -905,6 +916,18 @@ Uses `hook_event_name` field:
 ```
 
 ```jsonc
+// PermissionRequest event before approval prompts
+{
+  "hook_event_name": "PermissionRequest",
+  "session_id": "...",
+  "cwd": "/path/to/project",
+  "model": "gpt-5.4",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf /tmp/test", "description": "..." }
+}
+```
+
+```jsonc
 // PostToolUse event for Bash command output
 {
   "hook_event_name": "PostToolUse",
@@ -953,14 +976,18 @@ Uses `hook_event_name` field:
 | `SessionStart` | BeforePrompt (pass-through) |
 | `UserPromptSubmit` | BeforePrompt (pass-through) |
 | `PreToolUse` | BeforeCommand |
+| `PermissionRequest` | PermissionRequest (Bash command guard before approval) |
 | `PostToolUse` | AfterFileEdit (Bash output pass-through; `apply_patch` can trigger extension hooks) |
 | `Stop` | Stop |
+
+Codex `PermissionRequest` is handled as a command guard for `Bash`: dangerous commands are denied with the hook-specific permission response, while safe commands return `{}` and leave the normal approval flow unchanged.
 
 Codex `PostToolUse` supports `Bash` command output and file edits through `apply_patch`. `claw-hooks` treats `Bash` as pass-through and maps `apply_patch` to `MultiEdit` by extracting `*** Add File:`, `*** Update File:`, and `*** Move to:` paths from the patch command. Deleted files are ignored for extension hooks because there is no saved file to format.
 
 Output format:
 - Allow: `{}` (empty JSON, exit 0)
 - Block: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
+- PermissionRequest Block: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 
 Hooks should exit with status `0` for both allow and block decisions. A non-zero exit code is treated by Codex CLI as a hook failure, not as a block.
 
@@ -1076,6 +1103,8 @@ The `additionalContext` field passes lint warnings/errors to Claude Code, allowi
 **Codex CLI Allow**: `{}` (empty JSON)
 
 **Codex CLI Block**: `{"decision":"block","reason":"Use safe-rm instead..."}`
+
+**Codex CLI PermissionRequest Block**: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Use safe-rm instead..."}}}`
 
 ### Exit Codes
 

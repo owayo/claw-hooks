@@ -19,6 +19,12 @@ pub enum HookEvent {
     /// - Codex CLI: `PreToolUse`
     BeforeCommand,
 
+    /// Codex CLI の権限承認要求前（危険コマンドブロッキングの対象）。
+    ///
+    /// 外部イベント名:
+    /// - Codex CLI: `PermissionRequest`
+    PermissionRequest,
+
     /// ファイル編集後（拡張フックの対象）。
     ///
     /// 外部イベント名:
@@ -277,6 +283,7 @@ impl Decision {
     /// 指定イベントに対して判定を HookOutput に変換する（Claude Code 形式）。
     ///
     /// - BeforeCommand (PreToolUse): hookSpecificOutput のみ（トップレベル decision は deprecated）
+    /// - PermissionRequest: Codex 専用のため各フォーマットアダプター側で処理する
     /// - AfterFileEdit (PostToolUse): Allow は hookSpecificOutput.additionalContext、Block はトップレベル decision/reason
     /// - Stop: format_claude_output 側で ClaudeStopOutput を使用するため、ここには来ない
     pub fn into_output(self, event: HookEvent) -> HookOutput {

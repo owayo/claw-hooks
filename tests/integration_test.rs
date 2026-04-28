@@ -1276,6 +1276,28 @@ fn test_codex_format_block_rm_command() {
 }
 
 #[test]
+fn test_codex_format_permission_request_blocks_rm_command() {
+    let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /","description":"cleanup"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex PermissionRequest block should exit 0");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["hookSpecificOutput"]["hookEventName"],
+        "PermissionRequest"
+    );
+    assert_eq!(parsed["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    assert!(
+        parsed["hookSpecificOutput"]["decision"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("safe-rm"),
+        "PermissionRequest should return the configured rm block message: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_codex_format_block_kill_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"},"session_id":"test-session","cwd":"/tmp"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");

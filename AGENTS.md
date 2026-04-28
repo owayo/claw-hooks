@@ -7,7 +7,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.4.101
+- **Version**: 26.4.103
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
@@ -136,12 +136,13 @@ cargo run -- version     # Show version
 - Use `--format gemini` when testing
 
 ### Codex CLI
-- Supports all 5 hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
+- Supports these hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`
 - Use `--format codex` when testing
 - Allow output: `{}` (empty JSON, exit 0)
 - Block output: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
+- PermissionRequest Block output: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 - Missing required Codex fields must be treated as fail-closed parse errors
-- Codex `PreToolUse` / `PostToolUse` can receive `Bash` and `apply_patch`; `apply_patch` is mapped to `MultiEdit` and its patch command is parsed for changed file paths
+- Codex `PreToolUse` / `PermissionRequest` / `PostToolUse` can receive `Bash` and `apply_patch`; `apply_patch` is mapped to `MultiEdit` and its patch command is parsed for changed file paths
 - Official docs: https://developers.openai.com/codex/hooks
 
 ## README Update Rules

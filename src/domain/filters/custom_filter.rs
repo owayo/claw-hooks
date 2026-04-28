@@ -175,8 +175,12 @@ impl CustomCommandFilter {
 
 impl Filter for CustomCommandFilter {
     fn applies_to(&self, input: &HookInput) -> bool {
-        // BeforeCommand イベントの Bash ツールにのみ適用
-        if input.event != HookEvent::BeforeCommand || input.tool_name != "Bash" {
+        // コマンド実行前/承認前イベントの Bash ツールにのみ適用
+        if !matches!(
+            input.event,
+            HookEvent::BeforeCommand | HookEvent::PermissionRequest
+        ) || input.tool_name != "Bash"
+        {
             return false;
         }
 

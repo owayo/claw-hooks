@@ -143,7 +143,9 @@ impl HookService {
         );
 
         match input.event {
-            HookEvent::BeforeCommand => self.handle_before_command(input),
+            HookEvent::BeforeCommand | HookEvent::PermissionRequest => {
+                self.handle_before_command(input)
+            }
             HookEvent::AfterFileEdit => self.handle_after_file_edit(input),
             HookEvent::Stop => self.handle_stop(input),
             HookEvent::BeforePrompt => self.handle_before_prompt(input),
@@ -151,7 +153,7 @@ impl HookService {
         }
     }
 
-    /// BeforeCommand イベントの処理（ツール使用前）。
+    /// BeforeCommand/PermissionRequest イベントの処理（ツール使用前/承認前）。
     fn handle_before_command(&self, input: &HookInput) -> Decision {
         debug!("Handling BeforeCommand for tool: {}", input.tool_name);
 
@@ -249,6 +251,22 @@ mod tests {
     fn test_process_blocks_rm() {
         let service = make_service();
         let input = make_bash_input("rm -rf /tmp/foo");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_rm_on_permission_request() {
+        let service = make_service();
+        let input = HookInput {
+            event: HookEvent::PermissionRequest,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "rm -rf /tmp/foo".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
         let decision = service.process(&input);
         assert!(matches!(decision, Decision::Block { .. }));
     }

@@ -53,7 +53,7 @@ impl FormatAdapter {
             Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
             Format::Gemini => self.format_gemini_output(decision),
-            Format::Codex => self.format_codex_output(decision),
+            Format::Codex => self.format_codex_output(decision, event),
         }
     }
 
@@ -1826,6 +1826,32 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_output_permission_request_block_uses_deny_decision() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "rm is blocked".to_string(),
+                },
+                HookEvent::PermissionRequest,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(parsed["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["decision"]["message"],
+            "rm is blocked"
+        );
+        assert!(parsed.get("decision").is_none());
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
     fn test_codex_exit_code_block_is_zero() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let decision = Decision::Block {
@@ -1833,6 +1859,10 @@ mod tests {
         };
 
         assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
+        assert_eq!(
+            adapter.exit_code(&decision, HookEvent::PermissionRequest),
+            0
+        );
         assert_eq!(adapter.exit_code(&decision, HookEvent::Stop), 0);
     }
 
@@ -1895,6 +1925,30 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_input_parsing_permission_request() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PermissionRequest",
+            "session_id": "abc-123",
+            "turn_id": "turn-1",
+            "transcript_path": null,
+            "cwd": "/tmp/project",
+            "model": "gpt-5.4",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /tmp/build", "description": "cleanup"}
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::PermissionRequest);
+        assert_eq!(result.tool_name, "Bash");
+        if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
+            assert_eq!(bash.command, "rm -rf /tmp/build");
+        } else {
+            panic!("Expected Bash tool input");
+        }
     }
 
     #[test]
@@ -3500,6 +3554,7 @@ impl FormatAdapter {
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
             "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
+            "PermissionRequest" | "permission_request" => HookEvent::PermissionRequest,
             "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
             // claw-hooks の処理対象外イベント: パススルーで Allow を返す
             "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
@@ -3619,18 +3674,31 @@ impl FormatAdapter {
         })
     }
 
-    fn format_codex_output(&self, decision: &Decision) -> Result<String> {
+    fn format_codex_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         // Codex CLI: Allow は exit 0 + 空 JSON（公式ドキュメント推奨）。
-        // Block は legacy 形式 {"decision":"block","reason":"..."} を使用（公式に受理される）。
+        // PermissionRequest の Block は専用の hookSpecificOutput で deny を返す。
+        // その他の Block は legacy 形式 {"decision":"block","reason":"..."} を使用する。
         let output = match decision {
             Decision::Allow { .. } => serde_json::json!({}),
             Decision::Block { message } => {
                 let normalized = normalize_lint_output(message);
                 let truncated = truncate_output(&normalized, self.output_max_length);
-                serde_json::json!({
-                    "decision": "block",
-                    "reason": truncated
-                })
+                if event == HookEvent::PermissionRequest {
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": {
+                                "behavior": "deny",
+                                "message": truncated
+                            }
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "decision": "block",
+                        "reason": truncated
+                    })
+                }
             }
         };
         serde_json::to_string(&output)

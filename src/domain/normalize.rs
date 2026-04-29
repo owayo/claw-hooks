@@ -89,6 +89,7 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
 /// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`）を1文字に圧縮
 /// - 連続する空行を1行に圧縮
+/// - 同じ単語で始まる行が4行以上連続する場合、4行目以降を集約（cargo の `Compiling ...` 連発などを対象）
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -116,7 +117,69 @@ pub fn normalize_lint_output(output: &str) -> String {
         lines.pop();
     }
 
+    let lines = collapse_repeated_prefix_lines(lines);
+
     lines.join("\n")
+}
+
+/// 同じ「最初の単語」で始まる行が連続する場合、4行目以降を集約する。
+/// cargo の `Compiling foo v1.0` のような進捗ログが大量に並ぶケースで
+/// AI に返すフィードバックのトークン量を削減する。
+///
+/// ルール:
+/// - 行頭の単語（最初の空白までの ASCII 英字始まりトークン）が同一
+/// - その単語が大文字始まりまたは小文字始まりで2文字以上
+/// - 4行以上連続した場合、最初の3行のみ残し、4行目以降は
+///   `... (and N more lines starting with "<word>")` で要約
+fn collapse_repeated_prefix_lines(lines: Vec<String>) -> Vec<String> {
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    let mut idx = 0;
+    while idx < lines.len() {
+        let prefix = leading_prefix_word(&lines[idx]);
+        if let Some(word) = prefix {
+            let mut run_end = idx + 1;
+            while run_end < lines.len() && leading_prefix_word(&lines[run_end]) == Some(word) {
+                run_end += 1;
+            }
+            let run_len = run_end - idx;
+            if run_len >= 4 {
+                // 最初の3行を残し、4行目以降を集約行で置換
+                for line in &lines[idx..idx + 3] {
+                    result.push(line.clone());
+                }
+                let extra = run_len - 3;
+                result.push(format!(
+                    "... (and {} more lines starting with \"{}\")",
+                    extra, word
+                ));
+                idx = run_end;
+                continue;
+            }
+        }
+        result.push(lines[idx].clone());
+        idx += 1;
+    }
+    result
+}
+
+/// 行頭の集約対象となる単語を返す。
+/// 単語の条件: ASCII 英字始まり、2文字以上、後に空白またはコロンが続く。
+fn leading_prefix_word(line: &str) -> Option<&str> {
+    let mut end = 0;
+    let bytes = line.as_bytes();
+    while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+        end += 1;
+    }
+    if end < 2 {
+        return None;
+    }
+    // 単語の後に空白かコロンがある場合のみ集約対象とする。
+    // （`Compiling foo` ✓、`fnname()` ✗、`error[E0001]` ✗）
+    let next = bytes.get(end).copied();
+    match next {
+        Some(b' ') | Some(b'\t') | Some(b':') => Some(&line[..end]),
+        _ => None,
+    }
 }
 
 /// 同一文字が連続する装飾文字をトークン効率のために圧縮する。
@@ -1148,5 +1211,110 @@ mod tests {
         assert!(result.is_ascii() || result.chars().count() > 0);
         assert!(result.contains("main.rs:10"));
         assert!(result.contains("lib.rs:20"));
+    }
+
+    // === collapse_repeated_prefix_lines: 同じ単語で始まる行の集約 ===
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_compiling() {
+        // cargo の Compiling 連発を 4 行目以降で集約する
+        let lines = vec![
+            "Compiling foo v1.0.0".to_string(),
+            "Compiling bar v2.0.0".to_string(),
+            "Compiling baz v3.0.0".to_string(),
+            "Compiling qux v4.0.0".to_string(),
+            "Compiling fred v5.0.0".to_string(),
+            "error: failed".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0], "Compiling foo v1.0.0");
+        assert_eq!(result[1], "Compiling bar v2.0.0");
+        assert_eq!(result[2], "Compiling baz v3.0.0");
+        assert_eq!(
+            result[3],
+            "... (and 2 more lines starting with \"Compiling\")"
+        );
+        assert_eq!(result[4], "error: failed");
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_three_or_fewer_preserved() {
+        // 3行以下は集約せずそのまま保持する
+        let lines = vec![
+            "Compiling foo v1.0.0".to_string(),
+            "Compiling bar v2.0.0".to_string(),
+            "Compiling baz v3.0.0".to_string(),
+            "error: failed".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_different_prefixes() {
+        // 同じ単語で始まらない行が連続しても集約しない
+        let lines = vec![
+            "Compiling foo".to_string(),
+            "Downloading bar".to_string(),
+            "Compiling baz".to_string(),
+            "Downloading qux".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_no_word_prefix_skipped() {
+        // 行頭が記号や数字の場合は集約しない（誤検知防止）
+        let lines = vec![
+            "1. step one".to_string(),
+            "2. step two".to_string(),
+            "3. step three".to_string(),
+            "4. step four".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_normalize_collapses_cargo_compiling_lines() {
+        // 実際の cargo 出力に近い複合ケース
+        let input = "Compiling tauri v2.10.3\n\
+                     Compiling clang-sys v1.8.1\n\
+                     Compiling prettyplease v0.2.37\n\
+                     Compiling minimal-lexical v0.2.1\n\
+                     Compiling libloading v0.8.9\n\
+                     error: failed to run custom build command";
+        let result = normalize_lint_output(input);
+        // 最初の3行は維持
+        assert!(result.contains("Compiling tauri"));
+        assert!(result.contains("Compiling clang-sys"));
+        assert!(result.contains("Compiling prettyplease"));
+        // 4行目以降は集約
+        assert!(result.contains("... (and 2 more lines starting with \"Compiling\")"));
+        // エラー行は維持
+        assert!(result.contains("error: failed to run custom build command"));
+    }
+
+    #[test]
+    fn test_leading_prefix_word_with_colon() {
+        // コロンで終わる行も集約対象（例: `error: foo`、`warning: bar`）
+        assert_eq!(leading_prefix_word("error: something"), Some("error"));
+        assert_eq!(leading_prefix_word("Compiling foo"), Some("Compiling"));
+    }
+
+    #[test]
+    fn test_leading_prefix_word_single_char_skipped() {
+        // 1文字の単語は集約しない
+        assert_eq!(leading_prefix_word("a foo"), None);
+    }
+
+    #[test]
+    fn test_leading_prefix_word_no_word() {
+        // 行頭が英字でない場合は None
+        assert_eq!(leading_prefix_word("123 foo"), None);
+        assert_eq!(leading_prefix_word("--> file.rs"), None);
+        assert_eq!(leading_prefix_word(""), None);
     }
 }

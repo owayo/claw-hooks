@@ -961,17 +961,20 @@ fn test_malformed_json_is_fail_closed() {
 }
 
 #[test]
-fn test_unknown_event_is_fail_closed() {
+fn test_unknown_event_is_passthrough() {
+    // 未対応イベントは claw-hooks のスコープ外なのでパススルーで Allow を返す。
+    // Cursor / Codex / Gemini と同じ挙動に揃える。
     let input = r#"{"hook_event_name":"Bogus","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(
-        exit_code, 2,
-        "Unknown event should result in block (fail-closed)"
+        exit_code, 0,
+        "Unknown event should be allowed (pass-through), got: {}",
+        stdout
     );
     assert!(
-        stdout.contains("fail-closed"),
-        "Output should indicate fail-closed: {}",
+        stdout.contains("\"permissionDecision\":\"allow\"") || stdout.trim() == "{}",
+        "Output should indicate allow: {}",
         stdout
     );
 }

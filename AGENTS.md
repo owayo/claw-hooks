@@ -19,8 +19,8 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 6. **Subagent Events**: NanoBuddy notifications on subagent start
-7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`) plus trailing progress ellipsis compression, and character-count-based output length truncation for token efficiency
-8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields
+7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`) plus trailing progress ellipsis compression, repeated-prefix line collapsing for noisy progress logs (e.g., cargo `Compiling foo v1.0`), and character-count-based output length truncation for token efficiency
+8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields. Unknown/unsupported event names are passed through as allow (fail-open) to keep claw-hooks within its intentional scope.
 
 ## Project Structure
 
@@ -114,6 +114,7 @@ cargo run -- version     # Show version
 - PostToolUse Block: `{"decision":"block","reason":"..."}`
 - Stop output: Allow = `{}`, Block = `{"decision":"block","reason":"..."}`
 - Fail-closed errors: `{"decision":"block","reason":"..."}`
+- 未対応イベント（`StopFailure`, `PermissionRequest`, `PreCompact` 等）は allow でパススルー（Cursor / Codex / Gemini と同じ挙動）
 
 ### Cursor
 - Refer to README.md for integration examples

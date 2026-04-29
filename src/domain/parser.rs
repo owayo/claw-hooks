@@ -160,13 +160,12 @@ impl ShellParser {
     fn extract_command_strings_fallback(&self, command: &str) -> Vec<String> {
         let mut command_strings = Vec::new();
 
-        for segment in command.split(';') {
-            for part in Self::split_by_logical_ops(segment.trim()) {
-                for pipe_part in part.split('|') {
-                    let cmd = pipe_part.trim();
-                    if !cmd.is_empty() {
+        for segment in Self::split_respecting_quotes(command, ';') {
+            for part in Self::split_by_logical_ops(segment) {
+                for pipe_part in Self::split_respecting_quotes(part, '|') {
+                    if !pipe_part.is_empty() {
                         command_strings
-                            .extend(self.extract_command_strings_from_segment_fallback(cmd));
+                            .extend(self.extract_command_strings_from_segment_fallback(pipe_part));
                     }
                 }
             }
@@ -801,12 +800,11 @@ impl ShellParser {
     fn extract_commands_fallback(&self, command: &str) -> Vec<String> {
         let mut commands = Vec::new();
 
-        for segment in command.split(';') {
-            for part in Self::split_by_logical_ops(segment.trim()) {
-                for pipe_part in part.split('|') {
-                    let cmd = pipe_part.trim();
-                    if !cmd.is_empty() {
-                        commands.extend(self.extract_commands_from_segment_fallback(cmd));
+        for segment in Self::split_respecting_quotes(command, ';') {
+            for part in Self::split_by_logical_ops(segment) {
+                for pipe_part in Self::split_respecting_quotes(part, '|') {
+                    if !pipe_part.is_empty() {
+                        commands.extend(self.extract_commands_from_segment_fallback(pipe_part));
                     }
                 }
             }
@@ -875,6 +873,57 @@ impl ShellParser {
         }
 
         commands
+    }
+
+    /// クォート（`'` `"`）と括弧 `()` を考慮して、単一文字 `sep` で分割する。
+    /// クォート/括弧の内側の `sep` は区切りとして扱わない。
+    /// `;` や `|` をシェルの構造を保ったまま分割するために使う。
+    fn split_respecting_quotes(s: &str, sep: char) -> Vec<&str> {
+        let mut result = Vec::new();
+        let mut current_start = 0;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escape_next = false;
+        let mut paren_depth = 0usize;
+
+        for (idx, c) in s.char_indices() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            match c {
+                '\\' if !in_single_quote => {
+                    escape_next = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                '(' if !in_single_quote && !in_double_quote => {
+                    paren_depth += 1;
+                }
+                ')' if !in_single_quote && !in_double_quote => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                }
+                ch if ch == sep && !in_single_quote && !in_double_quote && paren_depth == 0 => {
+                    let part = &s[current_start..idx];
+                    if !part.trim().is_empty() {
+                        result.push(part.trim());
+                    }
+                    current_start = idx + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        let remaining = &s[current_start..];
+        if !remaining.trim().is_empty() {
+            result.push(remaining.trim());
+        }
+
+        result
     }
 
     /// `&&` と `||` で分割する。
@@ -2308,5 +2357,74 @@ mod tests {
         let result = ShellParser::split_by_logical_ops("cat file | grep error || echo fail");
         assert_eq!(result.len(), 2, "|| で分割されるべき");
         assert!(result[0].contains("cat file | grep error"));
+    }
+
+    // === split_respecting_quotes: クォート内の区切り文字を保護 ===
+
+    #[test]
+    fn test_split_respecting_quotes_semicolon_in_single_quote() {
+        // シングルクォート内のセミコロンは区切りとして扱わない
+        let result = ShellParser::split_respecting_quotes("printf 'hello; world'", ';');
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "printf 'hello; world'");
+    }
+
+    #[test]
+    fn test_split_respecting_quotes_pipe_in_double_quote() {
+        // ダブルクォート内のパイプは区切りとして扱わない
+        let result = ShellParser::split_respecting_quotes(r#"echo "safe | text""#, '|');
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], r#"echo "safe | text""#);
+    }
+
+    #[test]
+    fn test_split_respecting_quotes_separator_outside_quotes() {
+        // クォート外の区切り文字は通常通り分割する
+        let result = ShellParser::split_respecting_quotes("a; b; c", ';');
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_respecting_quotes_paren_protection() {
+        // 括弧内のセミコロンは区切らない（サブシェル内のコマンド連鎖を維持）
+        let result = ShellParser::split_respecting_quotes("(a; b); c", ';');
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "(a; b)");
+        assert_eq!(result[1], "c");
+    }
+
+    #[test]
+    fn test_extract_commands_does_not_split_inside_single_quote_for_rm() {
+        // 偽陽性回帰テスト: シングルクォート内に rm 文字列があっても誤ブロックしない。
+        // AST/フォールバックの両方で printf が最初のコマンドとして検出され、rm は漏れない。
+        let mut parser = ShellParser::new();
+        let cmds = parser.extract_commands("printf 'hello; rm -rf /'");
+        assert!(
+            cmds.iter().any(|c| c == "printf"),
+            "printf should be detected, got: {:?}",
+            cmds
+        );
+        assert!(
+            !cmds.iter().any(|c| c == "rm"),
+            "rm should NOT leak from quoted string, got: {:?}",
+            cmds
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_does_not_split_inside_double_quote_for_rm() {
+        // 偽陽性回帰テスト: ダブルクォート内のパイプ + rm を誤検出しない。
+        let mut parser = ShellParser::new();
+        let cmds = parser.extract_commands(r#"echo "safe | rm -rf /""#);
+        assert!(
+            cmds.iter().any(|c| c == "echo"),
+            "echo should be detected, got: {:?}",
+            cmds
+        );
+        assert!(
+            !cmds.iter().any(|c| c == "rm"),
+            "rm should NOT leak from quoted string, got: {:?}",
+            cmds
+        );
     }
 }

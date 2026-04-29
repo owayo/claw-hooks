@@ -176,13 +176,22 @@ impl FormatAdapter {
 
         let raw_event = claude_input.hook_event_name.clone();
 
-        // Claude Codeのイベント名をHookEventにマッピング
+        // Claude Codeのイベント名をHookEventにマッピング。
+        // 未対応イベント（StopFailure, PreCompact, PermissionRequest 等）は claw-hooks の
+        // スコープ外なのでパススルーで Allow を返す（Cursor/Codex/Gemini と同じ方針）。
         let event = match raw_event.as_str() {
             "PreToolUse" => HookEvent::BeforeCommand,
             "PostToolUse" => HookEvent::AfterFileEdit,
             "Stop" => HookEvent::Stop,
-            "SessionStart" | "UserPromptSubmit" | "SessionEnd" | "Notification" => {
-                // これらのイベントは claw-hooks の処理対象外（パススルー）
+            "SubagentStart" => HookEvent::SubagentStart,
+            "SubagentStop" => HookEvent::SubagentStop,
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported event, passing through", self.log_prefix()
+                );
                 return Ok(HookInput {
                     event: HookEvent::BeforePrompt, // パススルー用
                     tool_name: raw_event,
@@ -192,9 +201,6 @@ impl FormatAdapter {
                     session_id: claude_input.session_id,
                 });
             }
-            "SubagentStart" => HookEvent::SubagentStart,
-            "SubagentStop" => HookEvent::SubagentStop,
-            other => return Err(anyhow!("Unknown Claude event: {}", other)),
         };
 
         // Stopイベントを特別に処理（tool_nameやtool_inputが無い）
@@ -2073,11 +2079,19 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_parse_unknown_event_is_error() {
+    fn test_claude_parse_unknown_event_is_passthrough() {
+        // 未対応イベント（StopFailure, PreCompact, PermissionRequest など）は
+        // claw-hooks のスコープ外なのでパススルーして Allow を返す。
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input =
             r#"{"hook_event_name":"Unknown","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        assert!(adapter.parse_input(input).is_err());
+        let parsed = adapter
+            .parse_input(input)
+            .expect("未知イベントはパススルーされるべき");
+        assert!(matches!(
+            parsed.event,
+            crate::domain::HookEvent::BeforePrompt
+        ));
     }
 
     #[test]
@@ -3003,15 +3017,18 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_input_unknown_event_is_error() {
+    fn test_claude_input_unknown_event_is_passthrough() {
+        // 未対応イベントはパススルーで Allow を返す（fail-open）。
+        // Cursor/Codex/Gemini と同じ挙動に揃えることでフォーマット間の一貫性を保つ。
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"UnknownEvent","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
-        assert!(
-            err.to_string().contains("Unknown Claude event"),
-            "未知イベントのエラーメッセージが不適切: {}",
-            err
-        );
+        let parsed = adapter
+            .parse_input(input)
+            .expect("未知イベントはパススルーされるべき");
+        assert!(matches!(
+            parsed.event,
+            crate::domain::HookEvent::BeforePrompt
+        ));
     }
 
     #[test]

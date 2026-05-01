@@ -351,6 +351,58 @@ impl FormatAdapter {
                     session_id: None,
                 })
             }
+            "preToolUse" => {
+                let tool_name = raw
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("Missing tool_name for Cursor preToolUse"))?
+                    .to_string();
+
+                if tool_name != "Shell" && tool_name != "Bash" {
+                    debug!(
+                        agent = self.format.label(),
+                        hook_type = "preToolUse",
+                        tool_name = %tool_name,
+                        mapped_event = ?HookEvent::BeforePrompt,
+                        "{} unsupported preToolUse tool, passing through", self.log_prefix()
+                    );
+
+                    return Ok(HookInput {
+                        event: HookEvent::BeforePrompt,
+                        tool_name,
+                        tool_input: crate::domain::ToolInput::Other(raw),
+                        session_id: None,
+                    });
+                }
+
+                let command = raw
+                    .get("tool_input")
+                    .and_then(|v| v.get("command"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| anyhow!("Missing tool_input.command for Cursor preToolUse"))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    hook_type = "preToolUse",
+                    raw_tool_name = %tool_name,
+                    command = %command,
+                    mapped_event = ?HookEvent::BeforeCommand,
+                    mapped_tool = "Bash",
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforeCommand,
+                    tool_name: "Bash".to_string(),
+                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: command.to_string(),
+                        timeout: None,
+                    }),
+                    session_id: None,
+                })
+            }
             "afterFileEdit" | "afterTabFileEdit" => {
                 let parsed: CursorFileEditInput = serde_json::from_value(raw)
                     .map_err(|e| anyhow!("Failed to parse Cursor afterFileEdit: {}", e))?;
@@ -449,7 +501,7 @@ impl FormatAdapter {
                     session_id: None,
                 })
             }
-            // 未対応イベント（afterShellExecution, preToolUse, postToolUse 等）は
+            // 未対応イベント（afterShellExecution, postToolUse 等）は
             // パススルーとして処理し、ブロックしない
             other => {
                 debug!(
@@ -2122,13 +2174,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_pre_tool_use_passthrough() {
+    fn test_cursor_pre_tool_use_shell_maps_to_before_command() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        // preToolUse は claw-hooks の対象外
+        // Cursor の現行 preToolUse は Shell ツールの command を渡す
         let input = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"rm -rf /"}}"#;
         let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+        assert!(matches!(
+            result.tool_input,
+            crate::domain::ToolInput::Bash(crate::domain::BashInput { .. })
+        ));
+    }
+
+    #[test]
+    fn test_cursor_pre_tool_use_non_shell_passthrough() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // command を持たないツールは claw-hooks の責務外としてパススルーする
+        let input = r#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"path":"README.md"}}"#;
+        let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforePrompt);
-        assert_eq!(result.tool_name, "preToolUse");
+        assert_eq!(result.tool_name, "Read");
     }
 
     #[test]

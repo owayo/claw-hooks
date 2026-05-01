@@ -1111,6 +1111,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_normalize_biome_box_drawing_separator() {
+        let input = "biome.jsonc:2:13 deserialize ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n  i The configuration schema version does not match the CLI version 2.4.13";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "biome.jsonc:2:13 deserialize ━\n\ni The configuration schema version does not match the CLI version 2.4.13"
+        );
+    }
+
     // === パスコンテキスト置換テスト ===
 
     #[test]

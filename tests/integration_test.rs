@@ -56,7 +56,7 @@ fn test_block_kill_command() {
         "Output should indicate deny: {}",
         stdout
     );
-    // Note: block message is configurable via kill_block_message in config
+    // ブロックメッセージは config の kill_block_message で変更できる
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_block_rm_command() {
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
     );
-    // Note: block message is configurable via rm_block_message in config
+    // ブロックメッセージは config の rm_block_message で変更できる
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_allow_file_write_operation() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/test.rs"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    // Without extension hooks configured, write should be allowed
+    // extension_hooks 未設定なら書き込みは許可される
     assert_eq!(exit_code, 0, "Write operation should be allowed");
     assert!(
         stdout.contains(r#""permissionDecision":"allow""#),
@@ -259,7 +259,7 @@ fn test_version_command() {
 
 #[test]
 fn test_block_dd_command_by_default() {
-    // dd_block is true by default, so dd commands should be blocked
+    // dd_block はデフォルトで true のため dd コマンドはブロックされる
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"dd if=/dev/zero of=test.img bs=1M count=1"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
@@ -276,7 +276,7 @@ fn test_invalid_json_input() {
     let input = "not valid json";
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    // Invalid JSON should result in error (exit code 1)
+    // 不正な JSON はエラーとして扱われる
     assert_ne!(exit_code, 0, "Invalid JSON should fail");
     assert!(
         stdout.contains("Failed to parse"),
@@ -285,7 +285,7 @@ fn test_invalid_json_input() {
     );
 }
 
-// === Cursor Format Tests ===
+// === Cursor フォーマットテスト ===
 
 #[test]
 fn test_cursor_format_allow_safe_command() {
@@ -311,7 +311,7 @@ fn test_cursor_format_block_rm_command() {
         "Cursor output should indicate deny: {}",
         stdout
     );
-    // Note: block message is configurable via rm_block_message in config
+    // ブロックメッセージは config の rm_block_message で変更できる
 }
 
 #[test]
@@ -333,7 +333,7 @@ fn test_cursor_format_after_file_edit() {
     let input = r#"{"hook_event_name":"afterFileEdit","file_path":"/path/to/file.rs"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    // afterFileEdit maps to PostToolUse which always allows
+    // afterFileEdit は常に許可される PostToolUse 相当として扱う
     assert_eq!(exit_code, 0, "afterFileEdit should be allowed");
     assert!(
         stdout.contains(r#""permission":"allow""#),
@@ -372,23 +372,35 @@ fn test_cursor_format_unsupported_event_passthrough() {
 }
 
 #[test]
-fn test_cursor_format_pre_tool_use_passthrough() {
-    // preToolUse は claw-hooks の対象外でパススルー
+fn test_cursor_format_pre_tool_use_shell_blocks_rm() {
+    // Cursor の preToolUse Shell 経路でも危険コマンドをブロックする
     let input = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"rm -rf /"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    assert_eq!(
-        exit_code, 0,
-        "preToolUse は claw-hooks の対象外でパススルー"
-    );
+    assert_eq!(exit_code, 2, "preToolUse Shell の rm はブロックされるべき");
     assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "preToolUse は allow: {}",
+        stdout.contains(r#""permission":"deny""#),
+        "preToolUse Shell は deny: {}",
         stdout
     );
 }
 
-// === Windsurf Format Tests ===
+#[test]
+fn test_cursor_format_pre_tool_use_non_shell_passthrough() {
+    // Shell 以外の preToolUse は claw-hooks の対象外でパススルー
+    let input =
+        r#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"path":"README.md"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
+
+    assert_eq!(exit_code, 0, "preToolUse Read はパススルーされるべき");
+    assert!(
+        stdout.contains(r#""permission":"allow""#),
+        "preToolUse Read は allow: {}",
+        stdout
+    );
+}
+
+// === Windsurf フォーマットテスト ===
 
 #[test]
 fn test_windsurf_format_allow_safe_command() {
@@ -439,7 +451,7 @@ fn test_windsurf_format_post_write_code() {
         r#"{"agent_action_name":"post_write_code","tool_info":{"file_path":"/path/to/file.rs"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
-    // PostToolUse events should be allowed (monitoring only)
+    // PostToolUse 相当イベントは監視用途のため許可される
     assert_eq!(exit_code, 0, "post_write_code should be allowed");
     // Windsurf Allow: 空 JSON（decision 省略）
     assert_eq!(
@@ -450,15 +462,15 @@ fn test_windsurf_format_post_write_code() {
     );
 }
 
-// === Stop Event Tests ===
+// === Stop イベントテスト ===
 
 #[test]
 fn test_cursor_format_stop_completed() {
-    // Cursor's stop hook with completed status
+    // Cursor の stop フックで status=completed を受け取るケース
     let input = r#"{"status":"completed","loop_count":2}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    // Stop events should be allowed (monitoring only)
+    // Stop イベントは監視用途のため許可される
     assert_eq!(exit_code, 0, "stop event should be allowed");
     assert!(
         stdout.contains(r#""permission":"allow""#),
@@ -469,7 +481,7 @@ fn test_cursor_format_stop_completed() {
 
 #[test]
 fn test_cursor_format_stop_aborted() {
-    // Cursor's stop hook with aborted status
+    // Cursor の stop フックで status=aborted を受け取るケース
     let input = r#"{"status":"aborted"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
@@ -630,8 +642,8 @@ fn test_custom_filter_blocks_yarn_after_semicolon() {
 
 #[test]
 fn test_custom_filter_allows_yarn_in_quotes() {
-    // Test: echo "not yarn install"; pnpm install
-    // yarn is inside quotes (argument), pnpm is the actual command, should be allowed
+    // テスト入力: echo "not yarn install"; pnpm install
+    // yarn はクォート内の引数で、実際のコマンドは pnpm のため許可される
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"not yarn install\"; pnpm install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -649,8 +661,8 @@ fn test_custom_filter_allows_yarn_in_quotes() {
 
 #[test]
 fn test_custom_filter_blocks_direct_yarn_command() {
-    // Test: yarn install
-    // Direct yarn command should be blocked
+    // テスト入力: yarn install
+    // 直接の yarn コマンドはブロックされる
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -665,8 +677,8 @@ fn test_custom_filter_blocks_direct_yarn_command() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_chained_commands() {
-    // Test: cd project && yarn add react
-    // yarn after && should be detected and blocked
+    // テスト入力: cd project && yarn add react
+    // && の後ろの yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd project && yarn add react"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -681,8 +693,8 @@ fn test_custom_filter_blocks_yarn_in_chained_commands() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_after_pipe() {
-    // Test: cat package.json | yarn install
-    // yarn after pipe should be detected and blocked
+    // テスト入力: cat package.json | yarn install
+    // パイプ後の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -697,8 +709,8 @@ fn test_custom_filter_blocks_yarn_after_pipe() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_sh_c() {
-    // Test: sh -c "yarn install"
-    // yarn inside sh -c should be detected and blocked
+    // テスト入力: sh -c "yarn install"
+    // sh -c 内の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sh -c \"yarn install\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -713,8 +725,8 @@ fn test_custom_filter_blocks_yarn_in_sh_c() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_bash_c() {
-    // Test: bash -c "yarn add react"
-    // yarn inside bash -c should be detected and blocked
+    // テスト入力: bash -c "yarn add react"
+    // bash -c 内の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c \"yarn add react\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -729,8 +741,8 @@ fn test_custom_filter_blocks_yarn_in_bash_c() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_subshell() {
-    // Test: (cd project && yarn install)
-    // yarn in subshell should be detected and blocked
+    // テスト入力: (cd project && yarn install)
+    // サブシェル内の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"(cd project && yarn install)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -745,8 +757,8 @@ fn test_custom_filter_blocks_yarn_in_subshell() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_command_substitution() {
-    // Test: echo $(yarn --version)
-    // yarn in command substitution should be detected and blocked
+    // テスト入力: echo $(yarn --version)
+    // コマンド置換内の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo $(yarn --version)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -764,8 +776,8 @@ fn test_custom_filter_blocks_yarn_in_command_substitution() {
 
 #[test]
 fn test_custom_filter_allows_yarn_string_in_pipe() {
-    // Test: echo "yarn" | grep yarn
-    // yarn is just a string argument, not a command, should be allowed
+    // テスト入力: echo "yarn" | grep yarn
+    // yarn は文字列引数でコマンドではないため許可される
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"yarn\" | grep yarn"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -780,8 +792,8 @@ fn test_custom_filter_allows_yarn_string_in_pipe() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
-    // Test: cat package.json | jq '.dependencies' | yarn install
-    // yarn at end of complex pipeline should be blocked
+    // テスト入力: cat package.json | jq '.dependencies' | yarn install
+    // 複雑なパイプライン末尾の yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | jq '.dependencies' | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -796,8 +808,8 @@ fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
 
 #[test]
 fn test_custom_filter_blocks_yarn_with_env_prefix() {
-    // Test: NODE_ENV=production yarn build
-    // yarn with environment variable prefix should be blocked
+    // テスト入力: NODE_ENV=production yarn build
+    // 環境変数プレフィックス付きの yarn を検出してブロックする
     let (config_path, _temp_dir) = create_custom_filter_config();
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"NODE_ENV=production yarn build"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
@@ -810,11 +822,11 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
     );
 }
 
-// === Gemini CLI Format Tests ===
+// === Gemini CLI フォーマットテスト ===
 
 #[test]
 fn test_gemini_format_allow_safe_command() {
-    // Use official Gemini CLI tool name: run_shell_command
+    // Gemini CLI 公式のツール名 run_shell_command を使う
     let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
@@ -824,7 +836,7 @@ fn test_gemini_format_allow_safe_command() {
         "Gemini output should indicate allow: {}",
         stdout
     );
-    // Gemini should not have reason field for allow
+    // Gemini の許可レスポンスには reason フィールドを含めない
     assert!(
         !stdout.contains("reason"),
         "Allow output should not have reason: {}",
@@ -834,8 +846,8 @@ fn test_gemini_format_allow_safe_command() {
 
 #[test]
 fn test_gemini_format_block_rm_command() {
-    // Use official Gemini CLI tool name: run_shell_command
-    // Gemini CLI expects exit code 0 for all decisions (deny is communicated via JSON)
+    // Gemini CLI 公式のツール名 run_shell_command を使う
+    // Gemini CLI は判定を JSON で伝えるため deny でも終了コード 0 を返す
     let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
@@ -854,8 +866,8 @@ fn test_gemini_format_block_rm_command() {
 
 #[test]
 fn test_gemini_format_block_kill_command() {
-    // Use official Gemini CLI tool name: run_shell_command
-    // Gemini CLI expects exit code 0 for all decisions (deny is communicated via JSON)
+    // Gemini CLI 公式のツール名 run_shell_command を使う
+    // Gemini CLI は判定を JSON で伝えるため deny でも終了コード 0 を返す
     let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"pkill node"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
@@ -869,11 +881,11 @@ fn test_gemini_format_block_kill_command() {
 
 #[test]
 fn test_gemini_format_after_tool() {
-    // Use official Gemini CLI tool name: write_file
+    // Gemini CLI 公式のツール名 write_file を使う
     let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
-    // PostToolUse events should be allowed (monitoring only)
+    // PostToolUse 相当イベントは監視用途のため許可される
     assert_eq!(exit_code, 0, "AfterTool should be allowed");
     assert!(
         stdout.contains(r#""decision":"allow""#),
@@ -887,7 +899,7 @@ fn test_gemini_format_after_agent() {
     let input = r#"{"hook_event_name":"AfterAgent"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
-    // Stop events should be allowed (monitoring only)
+    // Stop 相当イベントは監視用途のため許可される
     assert_eq!(exit_code, 0, "AfterAgent should be allowed");
     assert!(
         stdout.contains(r#""decision":"allow""#),
@@ -898,7 +910,7 @@ fn test_gemini_format_after_agent() {
 
 #[test]
 fn test_gemini_format_with_event_alias() {
-    // Use official Gemini CLI tool name: run_shell_command
+    // Gemini CLI 公式のツール名 run_shell_command を使う
     let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"echo hello"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
 
@@ -923,7 +935,7 @@ fn test_gemini_format_session_start_passthrough() {
     );
 }
 
-// === Fail-Closed Error Handling Tests ===
+// === フェイルクローズのエラーハンドリングテスト ===
 
 #[test]
 fn test_empty_input_is_fail_closed() {

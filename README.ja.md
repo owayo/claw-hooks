@@ -371,6 +371,9 @@ claw-hooks hook --config /path/to/config.toml
 {
   "version": 1,
   "hooks": {
+    "preToolUse": [
+      { "command": "claw-hooks hook --format cursor" }
+    ],
     "beforeShellExecution": [
       { "command": "claw-hooks hook --format cursor" }
     ],
@@ -842,11 +845,12 @@ Claude Code公式フック仕様を使用:
 
 | `hook_event_name` | 必須フィールド | 内部マッピング |
 |-------------------|----------------|----------------|
+| `preToolUse`（`Shell` / `Bash` のみ） | `tool_name`, `tool_input.command` | PreToolUse + Bash |
 | `beforeShellExecution` | `command` | PreToolUse + Bash |
 | `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
 | `stop` | `status` | Stop |
 
-未対応の Cursor イベントは `allow` として透過されます。
+Shell 以外の `preToolUse` を含む未対応の Cursor イベントは `allow` として透過されます。
 
 ### Windsurf (`--format windsurf`)
 
@@ -997,7 +1001,7 @@ Codex CLIでは、許可・ブロックのどちらでもフックコマンド�
 graph LR
     subgraph コマンド実行前
         CC1[Claude: PreToolUse + Bash]
-        CU1[Cursor: beforeShellExecution]
+        CU1[Cursor: preToolUse Shell / beforeShellExecution]
         WS1[Windsurf: pre_run_command]
         GE1[Gemini: BeforeTool + run_shell_command]
         CX1[Codex: PreToolUse + Bash]

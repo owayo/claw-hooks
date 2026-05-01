@@ -371,6 +371,9 @@ Add to `~/.cursor/hooks.json` (user) or `<project>/.cursor/hooks.json` (project)
 {
   "version": 1,
   "hooks": {
+    "preToolUse": [
+      { "command": "claw-hooks hook --format cursor" }
+    ],
     "beforeShellExecution": [
       { "command": "claw-hooks hook --format cursor" }
     ],
@@ -842,11 +845,12 @@ Uses the `hook_event_name` field for event detection:
 
 | `hook_event_name` | Required Fields | Internal Mapping |
 |-------------------|-----------------|------------------|
+| `preToolUse` (`Shell` / `Bash` only) | `tool_name`, `tool_input.command` | PreToolUse + Bash |
 | `beforeShellExecution` | `command` | PreToolUse + Bash |
 | `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
 | `stop` | `status` | Stop |
 
-Unsupported Cursor events are passed through as allow.
+Unsupported Cursor events, including non-shell `preToolUse` tools, are passed through as allow.
 
 ### Windsurf (`--format windsurf`)
 
@@ -997,7 +1001,7 @@ Hooks should exit with status `0` for both allow and block decisions. A non-zero
 graph LR
     subgraph Before Command
         CC1[Claude: PreToolUse + Bash]
-        CU1[Cursor: beforeShellExecution]
+        CU1[Cursor: preToolUse Shell / beforeShellExecution]
         WS1[Windsurf: pre_run_command]
         GE1[Gemini: BeforeTool + run_shell_command]
         CX1[Codex: PreToolUse + Bash]

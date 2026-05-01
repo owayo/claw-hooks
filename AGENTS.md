@@ -120,8 +120,8 @@ cargo run -- version     # Show version
 - Refer to README.md for integration examples
 - Use `--format cursor` when testing
 - Input parsing uses `hook_event_name` field for event identification (not field-structure matching)
-- Supported events: `beforeShellExecution`, `afterFileEdit`, `afterTabFileEdit`, `stop`, `subagentStart`, `subagentStop`
-- Unsupported events (e.g., `afterShellExecution`, `preToolUse`, `postToolUse`) are passed through as allow
+- Supported events: `preToolUse` for `Shell`/`Bash`, `beforeShellExecution`, `afterFileEdit`, `afterTabFileEdit`, `stop`, `subagentStart`, `subagentStop`
+- Unsupported events (e.g., `afterShellExecution`, non-shell `preToolUse`, `postToolUse`) are passed through as allow
 
 ### Windsurf
 - Refer to README.md for integration examples

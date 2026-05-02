@@ -86,7 +86,7 @@ impl HookService {
                 error!("{}", error_msg);
                 // 適切なフォーマットでエラーを出力
                 // セキュリティ: フェイルクローズ終了コード（2 = block）
-                let output_json = self.adapter.format_error(&error_msg);
+                let output_json = self.adapter.format_error_for_input(&error_msg, &input);
                 self.write_error_output(&mut stdout, &output_json)?;
                 process::exit(self.adapter.error_exit_code());
             }
@@ -626,6 +626,22 @@ mod tests {
     fn test_process_blocks_dd_in_subshell() {
         let service = make_service();
         let input = make_bash_input("bash -c 'dd if=/dev/zero of=/dev/sda'");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_rm_in_eval() {
+        let service = make_service();
+        let input = make_bash_input("eval 'rm -rf /tmp/generated'");
+        let decision = service.process(&input);
+        assert!(matches!(decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn test_process_blocks_rm_in_find_exec() {
+        let service = make_service();
+        let input = make_bash_input(r"find . -name '*.tmp' -exec rm -rf {} \;");
         let decision = service.process(&input);
         assert!(matches!(decision, Decision::Block { .. }));
     }

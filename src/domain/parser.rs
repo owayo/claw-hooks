@@ -15,6 +15,9 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// -c フラグでコマンド文字列を実行できるシェル
 const SHELL_COMMANDS: &[&str] = &["bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash"];
 
+/// find で後続引数をコマンドとして実行する述語
+const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
+
 /// tree-sitter-bash を使用した AST ベースのシェルコマンドパーサー。
 pub struct ShellParser {
     #[cfg(feature = "ast-parser")]
@@ -64,7 +67,7 @@ impl ShellParser {
     }
 
     #[cfg(not(feature = "ast-parser"))]
-    pub fn extract_commands(&self, command: &str) -> Vec<String> {
+    pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
         self.extract_commands_fallback(command)
     }
 
@@ -85,7 +88,7 @@ impl ShellParser {
     }
 
     #[cfg(not(feature = "ast-parser"))]
-    pub fn extract_command_strings(&self, command: &str) -> Vec<String> {
+    pub fn extract_command_strings(&mut self, command: &str) -> Vec<String> {
         self.extract_command_strings_fallback(command)
     }
 
@@ -134,6 +137,22 @@ impl ShellParser {
                                     .collect::<Vec<_>>()
                                     .join(" ");
                                 command_strings.push(xargs_cmd);
+                            }
+                        }
+
+                        // eval は引数をシェルとして再評価するため、内側の文字列も解析する
+                        if cmd_name == "eval" {
+                            let args = self.get_command_arguments(node, source);
+                            if let Some(eval_cmd) = Self::join_eval_args(&args) {
+                                command_strings.extend(self.extract_command_strings(&eval_cmd));
+                            }
+                        }
+
+                        // find -exec/-execdir は後続の引数をコマンドとして実行する
+                        if cmd_name == "find" {
+                            let args = self.get_command_arguments(node, source);
+                            for exec_cmd in Self::extract_find_exec_commands(&args) {
+                                command_strings.extend(self.extract_command_strings(&exec_cmd));
                             }
                         }
                     }
@@ -220,6 +239,20 @@ impl ShellParser {
             }
         }
 
+        // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
+        if cmd_name == "eval" {
+            if let Some(eval_cmd) = Self::join_eval_args(&args) {
+                command_strings.extend(self.extract_command_strings_fallback(&eval_cmd));
+            }
+        }
+
+        // find -exec/-execdir は後続の引数をコマンドとして実行する。
+        if cmd_name == "find" {
+            for exec_cmd in Self::extract_find_exec_commands(&args) {
+                command_strings.extend(self.extract_command_strings_fallback(&exec_cmd));
+            }
+        }
+
         // 引数内のコマンド置換を処理。
         for nested in Self::extract_nested_command_fragments(trimmed) {
             command_strings.extend(self.extract_command_strings_fallback(&nested));
@@ -264,6 +297,24 @@ impl ShellParser {
                         if let Some(xargs_cmd) = Self::extract_xargs_from_args(&args) {
                             if !commands.contains(&xargs_cmd) {
                                 commands.push(xargs_cmd);
+                            }
+                        }
+                    }
+
+                    // AST レベルで eval を処理
+                    if cmd_name == "eval" {
+                        if let Some(eval_cmd) = Self::join_eval_args(&args) {
+                            for nested_cmd in self.extract_commands(&eval_cmd) {
+                                Self::push_unique_command(commands, &nested_cmd);
+                            }
+                        }
+                    }
+
+                    // AST レベルで find -exec/-execdir を処理
+                    if cmd_name == "find" {
+                        for exec_cmd in Self::extract_find_exec_commands(&args) {
+                            for nested_cmd in self.extract_commands(&exec_cmd) {
+                                Self::push_unique_command(commands, &nested_cmd);
                             }
                         }
                     }
@@ -352,6 +403,39 @@ impl ShellParser {
     #[cfg(feature = "ast-parser")]
     fn extract_xargs_from_args(args: &[String]) -> Option<String> {
         args.iter().find(|arg| !arg.starts_with('-')).cloned()
+    }
+
+    /// eval の引数を再解析用のコマンド文字列へ戻す。
+    fn join_eval_args(args: &[String]) -> Option<String> {
+        (!args.is_empty()).then(|| args.join(" "))
+    }
+
+    /// find の -exec/-execdir 述語から実行コマンド文字列を取り出す。
+    fn extract_find_exec_commands(args: &[String]) -> Vec<String> {
+        let mut commands = Vec::new();
+        let mut i = 0;
+
+        while i < args.len() {
+            if FIND_EXEC_PREDICATES.contains(&args[i].as_str()) {
+                let start = i + 1;
+                let mut end = start;
+                while end < args.len() && !Self::is_find_exec_terminator(&args[end]) {
+                    end += 1;
+                }
+                if start < end {
+                    commands.push(args[start..end].join(" "));
+                }
+                i = end;
+            }
+            i += 1;
+        }
+
+        commands
+    }
+
+    /// find -exec の終端記号かどうかを判定する。
+    fn is_find_exec_terminator(arg: &str) -> bool {
+        matches!(arg, ";" | r"\;" | "+")
     }
 
     /// command ノードからコマンド名を取得する。
@@ -835,14 +919,7 @@ impl ShellParser {
 
         // ラッパーコマンドを展開
         if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
-            if let Some(command_index) = Self::find_wrapped_command_index(&cmd, &args) {
-                commands.push(args[command_index].clone());
-                let remaining: Vec<String> = args[command_index + 1..].to_vec();
-                if !remaining.is_empty() {
-                    let remaining_str = remaining.join(" ");
-                    commands.extend(self.extract_commands_from_segment_fallback(&remaining_str));
-                }
-            }
+            self.expand_wrapper_commands_fallback(&cmd, &args, &mut commands);
         }
 
         // shell -c "command" を処理
@@ -867,12 +944,62 @@ impl ShellParser {
             }
         }
 
+        // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
+        if cmd == "eval" {
+            if let Some(eval_cmd) = Self::join_eval_args(&args) {
+                commands.extend(self.extract_commands_fallback(&eval_cmd));
+            }
+        }
+
+        // find -exec/-execdir は後続の引数をコマンドとして実行する。
+        if cmd == "find" {
+            for exec_cmd in Self::extract_find_exec_commands(&args) {
+                commands.extend(self.extract_commands_fallback(&exec_cmd));
+            }
+        }
+
         // 引数中のコマンド置換を処理（例: echo $(rm -rf /tmp)）。
         for nested in Self::extract_nested_command_fragments(trimmed) {
             commands.extend(self.extract_commands_fallback(&nested));
         }
 
         commands
+    }
+
+    /// フォールバックパーサーでラッパーコマンドの実行対象を展開する。
+    /// `sudo -u root bash -c 'rm -rf /'` のように wrapper → shell -c が
+    /// 連続する場合でも、シェルに渡される内側のコマンドを落とさない。
+    fn expand_wrapper_commands_fallback(
+        &self,
+        wrapper: &str,
+        args: &[String],
+        commands: &mut Vec<String>,
+    ) {
+        let Some(command_index) = Self::find_wrapped_command_index(wrapper, args) else {
+            return;
+        };
+
+        let command_name = &args[command_index];
+        Self::push_unique_command(commands, command_name);
+
+        let remaining = &args[command_index + 1..];
+
+        if SHELL_COMMANDS.contains(&command_name.as_str()) {
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
+                commands.extend(self.extract_commands_fallback(&shell_cmd));
+            }
+        }
+
+        if COMMAND_WRAPPERS.contains(&command_name.as_str()) {
+            self.expand_wrapper_commands_fallback(command_name, remaining, commands);
+        }
+    }
+
+    /// 同じコマンド名を重複して追加しない。
+    fn push_unique_command(commands: &mut Vec<String>, command: &str) {
+        if !commands.iter().any(|existing| existing == command) {
+            commands.push(command.to_string());
+        }
     }
 
     /// クォート（`'` `"`）と括弧 `()` を考慮して、単一文字 `sep` で分割する。
@@ -1169,6 +1296,29 @@ mod tests {
         assert!(command_strings.iter().any(|s| s == "npm install"));
     }
 
+    #[test]
+    fn test_extract_command_strings_from_eval() {
+        let mut parser = ShellParser::new();
+        let command_strings = parser.extract_command_strings("eval 'npm install'");
+        assert!(
+            command_strings.iter().any(|s| s == "npm install"),
+            "eval の内側のコマンド文字列を抽出すべき: {:?}",
+            command_strings
+        );
+    }
+
+    #[test]
+    fn test_extract_command_strings_from_find_exec() {
+        let mut parser = ShellParser::new();
+        let command_strings =
+            parser.extract_command_strings(r"find . -name package.json -exec npm install \;");
+        assert!(
+            command_strings.iter().any(|s| s == "npm install"),
+            "find -exec の実行コマンド文字列を抽出すべき: {:?}",
+            command_strings
+        );
+    }
+
     // === ラッパー・サブシェル検出テスト ===
 
     #[test]
@@ -1253,6 +1403,32 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("pgrep node | xargs -r kill -9");
         assert!(commands.contains(&"xargs".to_string()));
+        assert!(commands.contains(&"kill".to_string()));
+    }
+
+    #[test]
+    fn test_extract_eval_inner_command() {
+        // eval の引数はシェルとして再評価されるため、内側のコマンドも抽出する
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("eval 'rm -rf /tmp/test'");
+        assert!(commands.contains(&"eval".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_find_exec_command() {
+        // find -exec/-execdir は後続の引数をコマンドとして実行する
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r"find . -name '*.tmp' -exec rm -rf {} \;");
+        assert!(commands.contains(&"find".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_find_execdir_command_with_plus_terminator() {
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("find . -type f -execdir kill -9 {} +");
+        assert!(commands.contains(&"find".to_string()));
         assert!(commands.contains(&"kill".to_string()));
     }
 
@@ -2281,6 +2457,21 @@ mod tests {
         let commands = parser.extract_commands_from_segment_fallback("timeout 10 sudo rm -rf /tmp");
         let rm_count = commands.iter().filter(|c| *c == "rm").count();
         assert_eq!(rm_count, 1, "二重ラッパーでも rm は1回だけ: {:?}", commands);
+    }
+
+    #[test]
+    fn test_fallback_wrapper_shell_c_extracts_inner_command() {
+        // wrapper の実行対象が shell -c の場合、内側の危険コマンドまで抽出する
+        let parser = ShellParser::new();
+        let commands =
+            parser.extract_commands_from_segment_fallback("sudo -u root bash -c 'rm -rf /tmp'");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "sudo 経由の bash -c から rm が抽出されるべき: {:?}",
+            commands
+        );
+        let rm_count = commands.iter().filter(|c| *c == "rm").count();
+        assert_eq!(rm_count, 1, "rm は1回だけ: {:?}", commands);
     }
 
     #[test]

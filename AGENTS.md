@@ -14,7 +14,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 ## Key Features
 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
-2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
+2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands, `eval`, `find -exec`/`-execdir`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
@@ -113,7 +113,8 @@ cargo run -- version     # Show version
 - PostToolUse Allow: `{}` (追加コンテキストがある場合は `hookSpecificOutput.additionalContext` を含む)
 - PostToolUse Block: `{"decision":"block","reason":"..."}`
 - Stop output: Allow = `{}`, Block = `{"decision":"block","reason":"..."}`
-- Fail-closed errors: `{"decision":"block","reason":"..."}`
+- 通常の許可/ブロック判定は stdout JSON + exit code 0 で返す（Claude は exit 0 のときだけ stdout JSON を解析する）
+- Fail-closed errors: exit code 2 + stderr に `{"decision":"block","reason":"..."}` を出す
 - 未対応イベント（`StopFailure`, `PermissionRequest`, `PreCompact` 等）は allow でパススルー（Cursor / Codex / Gemini と同じ挙動）
 
 ### Cursor
@@ -133,6 +134,7 @@ cargo run -- version     # Show version
 
 ### Gemini CLI
 - Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events
+- AfterTool の追加コンテキストは `hookSpecificOutput.additionalContext` で返す
 - 未対応イベントは allow でパススルーする（全イベント対応が目的ではないため）
 - Use `--format gemini` when testing
 
@@ -143,6 +145,8 @@ cargo run -- version     # Show version
 - Block output: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
 - PermissionRequest Block output: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 - Missing required Codex fields must be treated as fail-closed parse errors
+- PermissionRequest の parse error も PermissionRequest 専用 deny schema で返す
+- PostToolUse の追加コンテキストは `hookSpecificOutput.additionalContext` で返す
 - Codex `PreToolUse` / `PermissionRequest` / `PostToolUse` can receive `Bash` and `apply_patch`; `apply_patch` is mapped to `MultiEdit` and its patch command is parsed for changed file paths
 - Official docs: https://developers.openai.com/codex/hooks
 

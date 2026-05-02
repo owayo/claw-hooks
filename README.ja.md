@@ -33,9 +33,9 @@
 - ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`timeout --signal`、`command rm`、bash -c、パイプ内のコマンドを検出）
+- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`timeout --signal`、`command rm`、bash -c、`eval`、`find -exec`、パイプ内のコマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力をAIエージェントに送信（Claude Codeのみ）
+- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力を対応AIエージェント（Claude Code、Gemini CLI、Codex CLI）に送信
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
@@ -193,8 +193,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、パイプ内のコマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、timeout、command、bash -c、xargs）
+- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、パイプ内、`eval`、`find -exec` のコマンドも検出
+- ✅ ラッパー・サブシェル対応（sudo、timeout、command、bash -c、xargs、eval、find -exec）
 - ✅ 単一バイナリ、Python/jq依存なし
 
 一度設定するだけ:
@@ -217,11 +217,11 @@ rm_block_message = "🚫 Use safe-rm instead"
 | 危険なコマンドをブロック | コマンドごとに25行以上のPython | TOML 1行 |
 | カスタムフィルター | フィルターごとに新しいスクリプト | `[[custom_filters]]`に追加 |
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
-| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Codeのみ）* |
+| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Gemini CLI、Codex CLI）* |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
 | Stopフック（lint、通知等） | ユースケースごとにスクリプト作成 | `[[stop_hooks]]`設定 |
 
-\* lint/フォーマッターの出力は`additionalContext`経由でClaude Codeに自動送信され、エージェントが警告を修正できます。
+\* lint/フォーマッターの出力は、対応するフックランタイムでは `additionalContext` 経由で自動送信され、エージェントが警告を修正できます。
 
 ## 動作要件
 
@@ -547,7 +547,7 @@ message = "ユーザーに直接実行を依頼してください"
 
 # 拡張子フック（ファイル書き込み/編集時にトリガー）
 # マップ形式: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
-# 出力（stdout/stderr）はadditionalContextとしてAIエージェントに送信（Claude Codeのみ）
+# 出力（stdout/stderr）は、対応するフックランタイムでは additionalContext としてAIエージェントに送信
 # 各コマンドテンプレートは {file} をちょうど1回含める必要があります
 # 親ディレクトリ遡りパス（../）は安全のため拒否されます
 # シェルのリダイレクトメタ文字（<, >）を含むパスは安全のため拒否されます
@@ -1094,7 +1094,7 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 
 **Claude Code PostToolUse ブロック**: `{"decision":"block","reason":"..."}`
 
-`additionalContext`フィールドはlint警告/エラーをClaude Codeに送信し、エージェントが自動的に問題を修正できます。この機能はClaude CodeのPostToolUseフックでのみ利用可能です。
+`additionalContext`フィールドはlint警告/エラーを、対応するフックランタイムのエージェントへ送信します。`claw-hooks` は Claude Code の `PostToolUse`、Gemini CLI の `AfterTool`、Codex CLI の `PostToolUse` でこの出力を返します。
 
 **Claude Code Stop 許可**: `{}`
 
@@ -1112,7 +1112,15 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 
 ### 終了コード
 
-**Claude Code / Cursor / Windsurf**:
+**Claude Code**:
+| コード | 意味 |
+|--------|------|
+| `0` | 成功。許可/ブロックの決定は stdout の JSON で伝達 |
+| `2` | fail-closed のフックエラー。stderr がフィードバックとして渡される |
+
+Claude Code は exit code `0` のときだけ stdout の JSON を解析します。そのため通常の PreToolUse/PostToolUse/Stop のブロック決定は exit code `0` で返します。パースエラーや空入力は fail-closed のため exit code `2` と stderr を使用します。
+
+**Cursor / Windsurf**:
 | コード | 意味 |
 |--------|------|
 | `0` | 許可 |

@@ -46,26 +46,31 @@ impl FormatAdapter {
     }
 
     /// エージェントフォーマットに基づいて出力をフォーマットする。
-    /// eventパラメータはClaude CodeのAfterFileEditでhookSpecificOutputを含めるために使用される。
+    /// event パラメータはイベント固有の JSON 形式を選ぶために使用する。
     pub fn format_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         match self.format {
             Format::Claude => self.format_claude_output(decision, event),
             Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
-            Format::Gemini => self.format_gemini_output(decision),
+            Format::Gemini => self.format_gemini_output(decision, event),
             Format::Codex => self.format_codex_output(decision, event),
         }
     }
 
     /// 判定結果に対する終了コードを取得する。
     /// 注意: エージェントごとに終了コードのセマンティクスが異なる。
-    /// - Claude: 0 = 許可, 2 = ブロック
+    /// - Claude: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Windsurf: 0 = 許可/Stop, 2 = ブロック（pre_run_command のみ）
     /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
     /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Gemini CLI: 0 = 成功（判定はJSON内）, 2 = システムエラーのみ
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
+            Format::Claude => {
+                // Claude Code: stdout の JSON は exit 0 のときだけ解析される。
+                // フェイルクローズのパースエラーだけは error_exit_code() で exit 2 を使う。
+                0
+            }
             Format::Gemini => {
                 // Gemini CLI: JSON出力が成功した場合は常に0を返す。
                 // 判定（allow/deny）はJSONレスポンスで伝達される。
@@ -105,10 +110,10 @@ impl FormatAdapter {
 
     /// フェイルクローズ時にエラー出力を stderr に書くべきかを返す。
     ///
-    /// Windsurf はブロック時に exit code 2 + stderr からメッセージを読むため、
+    /// Claude/Windsurf はブロック時に exit code 2 + stderr からメッセージを読むため、
     /// パースエラー等のフェイルクローズパスでも stderr に書く必要がある。
     pub fn format_uses_stderr_for_errors(&self) -> bool {
-        matches!(self.format, Format::Windsurf)
+        matches!(self.format, Format::Claude | Format::Windsurf)
     }
 
     /// エラーメッセージを出力用にフォーマットする。
@@ -156,6 +161,44 @@ impl FormatAdapter {
         }
     }
 
+    /// 入力のイベント名を考慮してエラー出力をフォーマットする。
+    ///
+    /// Codex の PermissionRequest は通常の block 形式ではなく専用の deny schema を要求する。
+    pub fn format_error_for_input(&self, message: &str, input: &str) -> String {
+        if self.format == Format::Codex {
+            if let Some(raw_event) = Self::raw_hook_event_name(input) {
+                if matches!(
+                    raw_event.as_str(),
+                    "PermissionRequest" | "permission_request"
+                ) {
+                    let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+                    return serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": {
+                                "behavior": "deny",
+                                "message": error_message
+                            }
+                        }
+                    })
+                    .to_string();
+                }
+            }
+        }
+
+        self.format_error(message)
+    }
+
+    /// 生 JSON からイベント名だけを取り出す。失敗時は通常のエラー形式へフォールバックする。
+    fn raw_hook_event_name(input: &str) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
+        raw.get("hook_event_name")
+            .or_else(|| raw.get("event"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
     /// Codex/Gemini: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
     /// Claude/Cursor/Windsurf: 終了コード2でブロックを表現する。
@@ -166,12 +209,50 @@ impl FormatAdapter {
         }
     }
 
+    /// ツール名が確定した後で tool_input を明示的に解析する。
+    ///
+    /// `ToolInput` は untagged enum なので直接デシリアライズすると、空オブジェクトが
+    /// 全フィールド optional の StopInput に誤マッチする。ツール種別ごとの必須項目を
+    /// ここで検証して fail-closed にする。
+    fn parse_tool_input_for_tool(
+        agent: &str,
+        tool_name: &str,
+        raw_tool_input: &serde_json::Value,
+    ) -> Result<crate::domain::ToolInput> {
+        match tool_name {
+            "Bash" => {
+                let command = raw_tool_input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
+                Ok(crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                    command: command.to_string(),
+                    timeout: raw_tool_input.get("timeout").and_then(|v| v.as_u64()),
+                }))
+            }
+            "Write" | "Edit" | "MultiEdit" => {
+                let file = serde_json::from_value::<crate::domain::FileOperationInput>(
+                    raw_tool_input.clone(),
+                )
+                .map_err(|e| anyhow!("Failed to parse {} tool_input: {}", agent, e))?;
+                if file.file_path.is_empty() {
+                    return Err(anyhow!("Missing tool_input.file_path field"));
+                }
+                Ok(crate::domain::ToolInput::File(file))
+            }
+            _ => Ok(crate::domain::ToolInput::Other(raw_tool_input.clone())),
+        }
+    }
+
     // === Claude Code フォーマット ===
 
     fn parse_claude_input(&self, input: &str) -> Result<HookInput> {
         debug!(raw_input = %input, "{} raw input", self.log_prefix());
 
-        let claude_input: ClaudeInput = serde_json::from_str(input)
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
+        let claude_input: ClaudeInput = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
 
         let raw_event = claude_input.hook_event_name.clone();
@@ -195,9 +276,11 @@ impl FormatAdapter {
                 return Ok(HookInput {
                     event: HookEvent::BeforePrompt, // パススルー用
                     tool_name: raw_event,
-                    tool_input: claude_input
-                        .tool_input
-                        .unwrap_or(crate::domain::ToolInput::Other(serde_json::json!({}))),
+                    tool_input: raw
+                        .get("tool_input")
+                        .cloned()
+                        .map(crate::domain::ToolInput::Other)
+                        .unwrap_or_else(|| crate::domain::ToolInput::Other(serde_json::json!({}))),
                     session_id: claude_input.session_id,
                 });
             }
@@ -220,8 +303,6 @@ impl FormatAdapter {
             // 注意: serde(untagged)のToolInputはStopInputの全フィールドがオプションのため、
             // tool_inputオブジェクトをOther(Value)ではなくStop(StopInput)として
             // デシリアライズする可能性があるため、生の入力を再パースする。
-            let raw: serde_json::Value = serde_json::from_str(input)
-                .map_err(|e| anyhow!("Failed to re-parse raw input: {}", e))?;
             // agent_type はルートレベルまたは tool_input 内にある場合がある
             let root_agent_type = raw
                 .get("agent_type")
@@ -261,9 +342,11 @@ impl FormatAdapter {
             let tool_name = claude_input
                 .tool_name
                 .ok_or_else(|| anyhow!("Missing tool_name field"))?;
-            let tool_input = claude_input
+            let raw_tool_input = claude_input
                 .tool_input
                 .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+            let tool_input =
+                Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input)?;
             (tool_name, tool_input)
         };
 
@@ -697,7 +780,7 @@ struct ClaudeInput {
 
     /// ツール入力（Stop/Notification イベントでは省略可）
     #[serde(default)]
-    tool_input: Option<crate::domain::ToolInput>,
+    tool_input: Option<serde_json::Value>,
 
     /// セッション識別子
     #[serde(default)]
@@ -1313,6 +1396,25 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_bash_empty_object_is_error() {
+        // 空 tool_input が StopInput に誤マッチして fail-open しないこと
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let input =
+            r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn test_gemini_write_empty_object_is_error() {
+        // ファイル編集後フックでは file_path が必須
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("Gemini tool_input"));
+    }
+
+    #[test]
     fn test_gemini_output_allow() {
         let adapter = FormatAdapter::new(Format::Gemini, 0);
         let output = adapter
@@ -1336,6 +1438,23 @@ mod tests {
         assert!(output.contains(r#""decision":"deny""#));
         assert!(output.contains("reason"));
         assert!(output.contains("rm command blocked"));
+    }
+
+    #[test]
+    fn test_gemini_output_after_file_edit_allow_context() {
+        let adapter = FormatAdapter::new(Format::Gemini, 0);
+        let output = adapter
+            .format_output(
+                &Decision::allow_with_context("formatted".to_string()),
+                HookEvent::AfterFileEdit,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "allow");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "formatted"
+        );
     }
 
     #[test]
@@ -1884,6 +2003,23 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_output_after_file_edit_allow_context() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::allow_with_context("formatted".to_string()),
+                HookEvent::AfterFileEdit,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "formatted"
+        );
+    }
+
+    #[test]
     fn test_codex_output_permission_request_block_uses_deny_decision() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter
@@ -1907,6 +2043,21 @@ mod tests {
         );
         assert!(parsed.get("decision").is_none());
         assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn test_codex_permission_request_error_uses_deny_decision() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{}}"#;
+        let output = adapter.format_error_for_input("Failed to parse input", input);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(parsed["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(parsed.get("decision").is_none());
     }
 
     #[test]
@@ -2363,13 +2514,13 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_exit_code_block_before_command_two() {
-        // Claude: Block + BeforeCommand → 2
+    fn test_claude_exit_code_block_before_command_zero() {
+        // Claude: JSON block 判定を stdout で返すため exit 0
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
     }
 
     #[test]
@@ -2588,14 +2739,16 @@ mod tests {
     }
 
     #[test]
-    fn test_non_windsurf_uses_stdout_for_errors() {
-        // Windsurf 以外は stdout に出力
-        for format in [
-            Format::Claude,
-            Format::Cursor,
-            Format::Gemini,
-            Format::Codex,
-        ] {
+    fn test_claude_uses_stderr_for_errors() {
+        // Claude の exit 2 フェイルクローズでは stdout JSON が無視されるため stderr に出す
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        assert!(adapter.format_uses_stderr_for_errors());
+    }
+
+    #[test]
+    fn test_json_error_formats_use_stdout_for_errors() {
+        // Cursor/Gemini/Codex はエラー判定を stdout JSON で伝達する
+        for format in [Format::Cursor, Format::Gemini, Format::Codex] {
             let adapter = FormatAdapter::new(format, 0);
             assert!(
                 !adapter.format_uses_stderr_for_errors(),
@@ -2940,7 +3093,7 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_exit_code_stop_block_is_two() {
+    fn test_claude_exit_code_stop_block_is_zero() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let code = adapter.exit_code(
             &Decision::Block {
@@ -2948,7 +3101,7 @@ mod tests {
             },
             HookEvent::Stop,
         );
-        assert_eq!(code, 2);
+        assert_eq!(code, 0);
     }
 
     // === use_stderr エッジケーステスト ===
@@ -3080,6 +3233,24 @@ mod tests {
             "tool_input 欠落エラーのメッセージが不適切: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_claude_bash_empty_object_is_error() {
+        // 空 tool_input が StopInput に誤マッチして fail-open しないこと
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn test_claude_write_empty_object_is_error() {
+        // ファイル編集後フックでは file_path が必須
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("Claude tool_input"));
     }
 
     #[test]
@@ -3427,7 +3598,7 @@ struct GeminiInput {
 
     /// ツール入力（ツール以外のイベントでは省略可）
     #[serde(default)]
-    tool_input: Option<crate::domain::ToolInput>,
+    tool_input: Option<serde_json::Value>,
 
     /// セッション識別子
     #[serde(default)]
@@ -3554,7 +3725,7 @@ impl FormatAdapter {
         let raw_tool_name = gemini_input
             .tool_name
             .ok_or_else(|| anyhow!("Missing tool_name field"))?;
-        let tool_input = gemini_input
+        let raw_tool_input = gemini_input
             .tool_input
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
 
@@ -3572,6 +3743,7 @@ impl FormatAdapter {
             // 不明なツールはそのまま保持
             other => other.to_string(),
         };
+        let tool_input = Self::parse_tool_input_for_tool("Gemini", &tool_name, &raw_tool_input)?;
 
         debug!(
             agent = self.format.label(),
@@ -3590,19 +3762,30 @@ impl FormatAdapter {
         })
     }
 
-    fn format_gemini_output(&self, decision: &Decision) -> Result<String> {
+    fn format_gemini_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         let output = match decision {
-            Decision::Allow { .. } => GeminiOutput {
+            Decision::Allow {
+                additional_context: Some(ctx),
+            } if event == HookEvent::AfterFileEdit => {
+                let truncated = truncate_output(ctx, self.output_max_length);
+                serde_json::json!({
+                    "decision": "allow",
+                    "hookSpecificOutput": {
+                        "additionalContext": truncated
+                    }
+                })
+            }
+            Decision::Allow { .. } => serde_json::json!(GeminiOutput {
                 decision: "allow".to_string(),
                 reason: None,
-            },
+            }),
             Decision::Block { message } => {
                 let normalized = normalize_lint_output(message);
                 let truncated = truncate_output(&normalized, self.output_max_length);
-                GeminiOutput {
+                serde_json::json!(GeminiOutput {
                     decision: "deny".to_string(),
                     reason: Some(truncated),
-                }
+                })
             }
         };
         serde_json::to_string(&output)
@@ -3714,30 +3897,7 @@ impl FormatAdapter {
                 .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
             crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
         } else {
-            match mapped_tool_name.as_str() {
-                "Bash" => {
-                    let command = raw_tool_input
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
-                    crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                        command: command.to_string(),
-                        timeout: None,
-                    })
-                }
-                "Write" | "Edit" | "MultiEdit" | "Read" => {
-                    // untagged enum への暗黙的デシリアライズを避け、
-                    // 明示的に FileOperationInput にデシリアライズする。
-                    // 空オブジェクト時に ToolInput::Stop に誤マッチするのを防ぐ。
-                    serde_json::from_value::<crate::domain::FileOperationInput>(
-                        raw_tool_input.clone(),
-                    )
-                    .map(crate::domain::ToolInput::File)
-                    .map_err(|e| anyhow!("Failed to parse Codex tool_input: {}", e))?
-                }
-                _ => crate::domain::ToolInput::Other(raw_tool_input.clone()),
-            }
+            Self::parse_tool_input_for_tool("Codex", &mapped_tool_name, raw_tool_input)?
         };
 
         debug!(
@@ -3762,6 +3922,17 @@ impl FormatAdapter {
         // PermissionRequest の Block は専用の hookSpecificOutput で deny を返す。
         // その他の Block は legacy 形式 {"decision":"block","reason":"..."} を使用する。
         let output = match decision {
+            Decision::Allow {
+                additional_context: Some(ctx),
+            } if event == HookEvent::AfterFileEdit => {
+                let truncated = truncate_output(ctx, self.output_max_length);
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": truncated
+                    }
+                })
+            }
             Decision::Allow { .. } => serde_json::json!({}),
             Decision::Block { message } => {
                 let normalized = normalize_lint_output(message);

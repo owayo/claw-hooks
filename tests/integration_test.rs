@@ -50,7 +50,7 @@ fn test_block_kill_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "Kill command should be blocked");
+    assert_eq!(exit_code, 0, "Kill command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny: {}",
@@ -64,7 +64,7 @@ fn test_block_pkill_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pkill node"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "pkill command should be blocked");
+    assert_eq!(exit_code, 0, "pkill command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -76,7 +76,7 @@ fn test_block_killall_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"killall python"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "killall command should be blocked");
+    assert_eq!(exit_code, 0, "killall command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -88,7 +88,7 @@ fn test_block_rm_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "rm command should be blocked");
+    assert_eq!(exit_code, 0, "rm command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -101,7 +101,7 @@ fn test_block_rmdir_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rmdir old_folder"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "rmdir command should be blocked");
+    assert_eq!(exit_code, 0, "rmdir command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -113,7 +113,7 @@ fn test_piped_command_with_kill() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ps aux | grep node | xargs kill"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "Piped command with kill should be blocked");
+    assert_eq!(exit_code, 0, "Piped command with kill should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -125,7 +125,7 @@ fn test_chained_command_with_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd /tmp && rm -rf test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "Chained command with rm should be blocked");
+    assert_eq!(exit_code, 0, "Chained command with rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny"
@@ -263,7 +263,7 @@ fn test_block_dd_command_by_default() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"dd if=/dev/zero of=test.img bs=1M count=1"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "dd command should be blocked by default");
+    assert_eq!(exit_code, 0, "dd command should be blocked by default");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate deny: {}",
@@ -274,14 +274,14 @@ fn test_block_dd_command_by_default() {
 #[test]
 fn test_invalid_json_input() {
     let input = "not valid json";
-    let (stdout, _stderr, exit_code) = run_hook(input);
+    let (_stdout, stderr, exit_code) = run_hook(input);
 
     // 不正な JSON はエラーとして扱われる
     assert_ne!(exit_code, 0, "Invalid JSON should fail");
     assert!(
-        stdout.contains("Failed to parse"),
+        stderr.contains("Failed to parse"),
         "Should indicate parsing failure: {}",
-        stdout
+        stderr
     );
 }
 
@@ -627,7 +627,7 @@ fn test_custom_filter_blocks_yarn_after_semicolon() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo \"install\"; yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn command should be blocked");
+    assert_eq!(exit_code, 0, "yarn command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -667,7 +667,7 @@ fn test_custom_filter_blocks_direct_yarn_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "Direct yarn command should be blocked");
+    assert_eq!(exit_code, 0, "Direct yarn command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -683,7 +683,7 @@ fn test_custom_filter_blocks_yarn_in_chained_commands() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd project && yarn add react"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn in chained command should be blocked");
+    assert_eq!(exit_code, 0, "yarn in chained command should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -699,7 +699,7 @@ fn test_custom_filter_blocks_yarn_after_pipe() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn after pipe should be blocked");
+    assert_eq!(exit_code, 0, "yarn after pipe should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -715,7 +715,7 @@ fn test_custom_filter_blocks_yarn_in_sh_c() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sh -c \"yarn install\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn in sh -c should be blocked");
+    assert_eq!(exit_code, 0, "yarn in sh -c should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -731,7 +731,7 @@ fn test_custom_filter_blocks_yarn_in_bash_c() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c \"yarn add react\""}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn in bash -c should be blocked");
+    assert_eq!(exit_code, 0, "yarn in bash -c should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -747,7 +747,7 @@ fn test_custom_filter_blocks_yarn_in_subshell() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"(cd project && yarn install)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn in subshell should be blocked");
+    assert_eq!(exit_code, 0, "yarn in subshell should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -764,7 +764,7 @@ fn test_custom_filter_blocks_yarn_in_command_substitution() {
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
     assert_eq!(
-        exit_code, 2,
+        exit_code, 0,
         "yarn in command substitution should be blocked"
     );
     assert!(
@@ -798,7 +798,7 @@ fn test_custom_filter_blocks_yarn_in_complex_pipeline() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat package.json | jq '.dependencies' | yarn install"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn in complex pipeline should be blocked");
+    assert_eq!(exit_code, 0, "yarn in complex pipeline should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -814,7 +814,7 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"NODE_ENV=production yarn build"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
-    assert_eq!(exit_code, 2, "yarn with env prefix should be blocked");
+    assert_eq!(exit_code, 0, "yarn with env prefix should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -939,36 +939,36 @@ fn test_gemini_format_session_start_passthrough() {
 
 #[test]
 fn test_empty_input_is_fail_closed() {
-    let (stdout, _stderr, exit_code) = run_hook("");
+    let (_stdout, stderr, exit_code) = run_hook("");
 
     assert_eq!(
         exit_code, 2,
         "Empty input should result in block (fail-closed)"
     );
     assert!(
-        stdout.contains("fail-closed"),
+        stderr.contains("fail-closed"),
         "Output should indicate fail-closed: {}",
-        stdout
+        stderr
     );
     assert!(
-        stdout.contains(r#""decision":"block""#),
+        stderr.contains(r#""decision":"block""#),
         "Output should indicate block: {}",
-        stdout
+        stderr
     );
 }
 
 #[test]
 fn test_malformed_json_is_fail_closed() {
-    let (stdout, _stderr, exit_code) = run_hook("{");
+    let (_stdout, stderr, exit_code) = run_hook("{");
 
     assert_eq!(
         exit_code, 2,
         "Malformed JSON should result in block (fail-closed)"
     );
     assert!(
-        stdout.contains("fail-closed"),
+        stderr.contains("fail-closed"),
         "Output should indicate fail-closed: {}",
-        stdout
+        stderr
     );
 }
 
@@ -1111,7 +1111,7 @@ fn test_block_sudo_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "sudo rm should be blocked");
+    assert_eq!(exit_code, 0, "sudo rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1124,7 +1124,7 @@ fn test_block_sudo_non_interactive_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo -n rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "sudo -n rm should be blocked");
+    assert_eq!(exit_code, 0, "sudo -n rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1137,7 +1137,7 @@ fn test_block_sudo_long_option_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo --user root rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "sudo --user root rm should be blocked");
+    assert_eq!(exit_code, 0, "sudo --user root rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1151,7 +1151,7 @@ fn test_block_timeout_long_option_rm() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(
-        exit_code, 2,
+        exit_code, 0,
         "timeout --signal TERM 10 rm should be blocked"
     );
     assert!(
@@ -1166,7 +1166,7 @@ fn test_block_command_wrapper_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"command rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "command rm should be blocked");
+    assert_eq!(exit_code, 0, "command rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1179,7 +1179,7 @@ fn test_block_bash_c_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c 'rm -rf /tmp/test'"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "bash -c rm should be blocked");
+    assert_eq!(exit_code, 0, "bash -c rm should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1192,7 +1192,7 @@ fn test_block_sudo_kill() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo kill -9 1234"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "sudo kill should be blocked");
+    assert_eq!(exit_code, 0, "sudo kill should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1205,7 +1205,7 @@ fn test_block_sudo_dd() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo dd if=/dev/zero of=/dev/sda"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "sudo dd should be blocked");
+    assert_eq!(exit_code, 0, "sudo dd should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1218,7 +1218,7 @@ fn test_block_xargs_kill() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pgrep node | xargs kill -9"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "xargs kill should be blocked");
+    assert_eq!(exit_code, 0, "xargs kill should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1231,7 +1231,7 @@ fn test_block_rm_in_subshell() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"(cd /tmp && rm -rf test)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "rm in subshell should be blocked");
+    assert_eq!(exit_code, 0, "rm in subshell should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",
@@ -1244,7 +1244,33 @@ fn test_block_rm_in_command_substitution() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo $(rm -rf /tmp/test)"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
-    assert_eq!(exit_code, 2, "rm in command substitution should be blocked");
+    assert_eq!(exit_code, 0, "rm in command substitution should be blocked");
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_rm_in_eval() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"eval 'rm -rf /tmp/test'"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 0, "rm in eval should be blocked");
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "Output should indicate block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_rm_in_find_exec() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"find . -name '*.tmp' -exec rm -rf {} \\;"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 0, "rm in find -exec should be blocked");
     assert!(
         stdout.contains(r#""permissionDecision":"deny""#),
         "Output should indicate block: {}",

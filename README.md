@@ -33,9 +33,9 @@
 - ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `sudo --user`, `timeout --signal`, `command rm`, bash -c, pipes)
+- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection (sudo, `sudo -n`, `sudo --user`, `timeout --signal`, `command rm`, bash -c, `eval`, `find -exec`, pipes)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to AI agent (Claude Code only)
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to supported AI agents (Claude Code, Gemini CLI, Codex CLI)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent where the hook runtime supports stop-time feedback (Windsurf runs best-effort)
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s), kills hung processes with SIGKILL
@@ -193,8 +193,8 @@ Rules:
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `timeout --signal TERM 10 rm`, `command rm`, `cd /tmp && rm`, commands in pipes
-- ✅ Handles wrappers and subshells (sudo, timeout, command, bash -c, xargs)
+- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `timeout --signal TERM 10 rm`, `command rm`, `cd /tmp && rm`, commands in pipes, `eval`, and `find -exec`
+- ✅ Handles wrappers and subshells (sudo, timeout, command, bash -c, xargs, eval, find -exec)
 - ✅ Single binary, no Python/jq dependencies
 
 Configure once:
@@ -217,11 +217,11 @@ Configure once:
 | Block dangerous commands | 25+ lines Python per command | 1 line TOML |
 | Custom filters | New script per filter | Add to `[[custom_filters]]` |
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
-| Lint output to agent | Manual JSON construction | Automatic (Claude Code only)* |
+| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Gemini CLI, Codex CLI)* |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
 | Stop hooks (lint, notifications, etc.) | Custom scripts per use case | `[[stop_hooks]]` config |
 
-\* Lint/formatter output is automatically passed to Claude Code via `additionalContext`, enabling the agent to fix warnings.
+\* Lint/formatter output is automatically passed via `additionalContext` where the agent hook runtime supports it, enabling the agent to fix warnings.
 
 ## Requirements
 
@@ -547,7 +547,7 @@ message = "Ask the user to run this command manually"
 
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
-# Output (stdout/stderr) is passed to AI agent as additionalContext (Claude Code only)
+# Output (stdout/stderr) is passed as additionalContext where the hook runtime supports it
 # Each command template must contain exactly one {file}
 # Parent-directory traversal paths (../) are rejected for safety
 # Shell redirection metacharacters (<, >) in file paths are rejected for safety
@@ -1094,7 +1094,7 @@ Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow becau
 
 **Claude Code PostToolUse Block**: `{"decision":"block","reason":"..."}`
 
-The `additionalContext` field passes lint warnings/errors to Claude Code, allowing it to fix issues automatically. This feature is only available for Claude Code's PostToolUse hooks.
+The `additionalContext` field passes lint warnings/errors to the agent where the hook runtime supports it. `claw-hooks` emits it for Claude Code `PostToolUse`, Gemini CLI `AfterTool`, and Codex CLI `PostToolUse`.
 
 **Claude Code Stop Allow**: `{}`
 
@@ -1112,7 +1112,15 @@ The `additionalContext` field passes lint warnings/errors to Claude Code, allowi
 
 ### Exit Codes
 
-**Claude Code / Cursor / Windsurf**:
+**Claude Code**:
+| Code | Meaning |
+|------|---------|
+| `0` | Success; allow/block decisions are parsed from stdout JSON |
+| `2` | Fail-closed hook error; stderr is sent back as feedback |
+
+Claude Code only parses stdout JSON on exit code `0`, so normal PreToolUse/PostToolUse/Stop block decisions are returned with exit code `0`. Parse errors and empty input still use exit code `2` with stderr for fail-closed behavior.
+
+**Cursor / Windsurf**:
 | Code | Meaning |
 |------|---------|
 | `0` | Allow |

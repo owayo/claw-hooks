@@ -37,9 +37,13 @@ optional = true
 default = ["ast-parser"]
 ast-parser = ["tree-sitter", "tree-sitter-bash"]
 
+# Unix では timeout 時にプロセスグループ全体を SIGKILL するため libc を使う。
+# Windows では同等の Job Object 実装は未対応のため、libc 依存は不要。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
+
 [dev-dependencies]
 tempfile = "3.27.0"
-libc = "0.2.186"
 
 [profile.release]
 lto = true

@@ -38,9 +38,9 @@
 - 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力を対応AIエージェント（Claude Code、Gemini CLI、Codex CLI）に送信
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
-- ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）、ハングしたプロセスをSIGKILLで終了
+- ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）。Unix ではプロセスグループ全体を SIGKILL で終了するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
-- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` のような同じ単語で始まる行が連続するノイズの多い進捗ログをトークン効率のために圧縮
+- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`, `^`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` のような同じ単語で始まる行が連続するノイズの多い進捗ログをトークン効率のために圧縮。`^` の圧縮は ruff / clippy / rustc が出す長い範囲マーカーを縮約する用途。
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLI、Codex CLIに対応
 
@@ -193,7 +193,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、パイプ内、`eval`、`find -exec` のコマンドも検出
+- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`find -exec` のコマンドも検出
 - ✅ ラッパー・サブシェル対応（sudo、timeout、command、bash -c、xargs、eval、find -exec）
 - ✅ 単一バイナリ、Python/jq依存なし
 
@@ -551,6 +551,7 @@ message = "ユーザーに直接実行を依頼してください"
 # 各コマンドテンプレートは {file} をちょうど1回含める必要があります
 # 親ディレクトリ遡りパス（../）は安全のため拒否されます
 # シェルのリダイレクトメタ文字（<, >）を含むパスは安全のため拒否されます
+# Windows では `cmd /c` のメタ文字（%, !, ^, "）も変数展開インジェクション防止のため拒否されます
 [extension_hooks]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]
 ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]

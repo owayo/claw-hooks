@@ -7,20 +7,21 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.4.103
+- **Version**: 26.5.100
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
 ## Key Features
 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
-2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands, `eval`, `find -exec`/`-execdir`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
+2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands, single `&` (background), newline separators, `eval`, `find -exec`/`-execdir`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
-4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked)
+4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked; on Windows, `cmd /c` shell metacharacters such as `%`, `!`, `^`, `"` are also rejected from file paths to prevent variable-expansion injection)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
 6. **Subagent Events**: NanoBuddy notifications on subagent start
-7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`) plus trailing progress ellipsis compression, repeated-prefix line collapsing for noisy progress logs (e.g., cargo `Compiling foo v1.0`), and character-count-based output length truncation for token efficiency
+7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`, `^`) plus trailing progress ellipsis compression, repeated-prefix line collapsing for noisy progress logs (e.g., cargo `Compiling foo v1.0`), and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields. Unknown/unsupported event names are passed through as allow (fail-open) to keep claw-hooks within its intentional scope.
+9. **Process Group Isolation (Unix)**: Hook subprocesses are placed in their own process group via `setpgid`, so timeouts kill the whole tree (`killpg`) — preventing grandchild leaks like `sh -c 'sleep ...'` after the shell is signaled.
 
 ## Project Structure
 

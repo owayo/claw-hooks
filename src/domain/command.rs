@@ -5,6 +5,8 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt as _;
 #[cfg(windows)]
 use std::os::windows::process::ExitStatusExt as _;
@@ -15,6 +17,41 @@ pub(crate) const TIMEOUT_EXIT_CODE: i32 = 124;
 
 /// タイムアウト時にstderrに付加されるプレフィックス。
 const TIMEOUT_STDERR_PREFIX: &str = "[Command timed out after";
+
+/// Unix で子プロセスを新しいプロセスグループに配置する。
+/// `Command::process_group(0)` 相当の挙動を `pre_exec` 経由で安定 API のみで実現する。
+/// （`process_group` は Rust 1.64 以降で安定化済みだが、明示的な意図を残すため pre_exec を使う）
+///
+/// 効果: プロセスグループID == 子プロセスPID となるため、子の孫プロセス
+/// （例: `sh -c 'sleep 600'` の `sleep`）も同じプロセスグループに属し、
+/// `killpg(pid, SIGKILL)` でグループ全体を停止できる。
+#[cfg(unix)]
+fn configure_unix_process_group(cmd: &mut Command) {
+    // Safety: pre_exec で呼ぶ関数は async-signal-safe である必要がある。
+    // setpgid(0, 0) は POSIX の async-signal-safe 関数として規定されている。
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+/// Unix で子プロセスのプロセスグループ全体を SIGKILL で停止する。
+/// `child.kill()` は子プロセスのみを対象とするため、`sh -c 'sleep'` のような
+/// シェル経由のケースで孫プロセスがゾンビ/孤児として残るのを防ぐ。
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let pgid = pid as i32;
+    // killpg は EPERM/ESRCH 等の失敗もあり得るが、フェイルセーフに留める。
+    // 戻り値は意図的に無視する（後続で SIGKILL 直送 + wait で確実に回収する）。
+    unsafe {
+        let _ = libc::killpg(pgid, libc::SIGKILL);
+    }
+}
 
 /// タイムアウトメタデータ付きのコマンド出力。
 pub struct TimedOutput {
@@ -83,7 +120,13 @@ pub fn run_with_timeout_tracked(
                         "⏰ Command timed out after {}s: {}",
                         timeout_secs, command_desc
                     );
-                    // 子プロセスを強制終了（Unixの場合SIGKILLを送信）
+                    // Unix では子プロセスのプロセスグループ全体を SIGKILL する。
+                    // `child.kill()` は直接の子のみを対象とするため、
+                    // `sh -c 'sleep'` のような孫プロセスが孤児として残ってしまう。
+                    // configure_unix_process_group で setpgid 済みのため
+                    // 子の PID == プロセスグループID で killpg 可能。
+                    #[cfg(unix)]
+                    kill_process_group(child.id());
                     let _ = child.kill();
                     // ゾンビプロセスを回収
                     let _ = child.wait();
@@ -149,6 +192,9 @@ pub fn run_with_timeout(
 
 /// パイプ接続されたstdout/stderrと追加の環境変数でコマンドを起動する。
 /// ストップフックがループ防止用の環境変数を子プロセスに伝播するために使用。
+///
+/// Unix では子プロセスを新しいプロセスグループに配置し、タイムアウト時に
+/// プロセスグループ全体を確実に停止できるようにする。
 pub fn spawn_piped_with_env(
     program: &str,
     args: &[String],
@@ -167,8 +213,24 @@ pub fn spawn_piped_with_env(
     for &(key, value) in envs {
         cmd.env(key, value);
     }
+    #[cfg(unix)]
+    configure_unix_process_group(&mut cmd);
     cmd.spawn()
         .map_err(|e| format!("Failed to execute '{}': {}", program, e))
+}
+
+/// 任意の `Command` ビルダーに対して、Unix では新しいプロセスグループに配置する設定を施す。
+/// `Command::new(...)` を直接組み立てるパス（例: extension hook）から再利用できる。
+///
+/// Windows ではノーオペレーション。`#[cfg(unix)]` 制約のない呼び出し側で安全に使えるよう
+/// 公開する。
+pub fn configure_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    configure_unix_process_group(cmd);
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
 }
 
 #[cfg(test)]
@@ -455,5 +517,39 @@ mod tests {
         let output = run_with_timeout(child, 10, "exit 124").unwrap();
         assert!(!is_timeout_output(&output));
         assert_eq!(output.status.code(), Some(TIMEOUT_EXIT_CODE));
+    }
+
+    /// Unix で `sh -c 'sleep'` のような孫プロセスがタイムアウト時に
+    /// 確実に停止することを確認する。
+    /// プロセスグループ kill が機能していなければ、`sh` だけ kill されて
+    /// `sleep` が孤児プロセスとして残ってしまう。
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_kills_grandchild_process() {
+        // 一時マーカーファイルを設定: sleep が完走したらマーカーを書き込む。
+        // タイムアウトで sleep が殺されればマーカーは書き込まれない。
+        let marker = std::env::temp_dir().join(format!(
+            "claw-hooks-grandchild-marker-{}",
+            std::process::id()
+        ));
+        let marker_path = marker.to_str().unwrap();
+        // 既存マーカーを掃除
+        let _ = std::fs::remove_file(&marker);
+
+        // 30秒スリープ後にマーカー作成。1秒タイムアウトで kill。
+        let cmd = format!("sleep 30 && touch {}", marker_path);
+        let child = spawn_piped("sh", &["-c".to_string(), cmd.clone()]).unwrap();
+        let result = run_with_timeout(child, 1, &cmd);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status.code(), Some(TIMEOUT_EXIT_CODE));
+
+        // killpg が孫プロセスを停止できたなら、しばらく待ってもマーカーは作成されない。
+        // 念のため余裕を持って待機する。
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !marker.exists(),
+            "孫プロセスのスリープがタイムアウトで停止しなかった: {} が残存",
+            marker_path
+        );
     }
 }

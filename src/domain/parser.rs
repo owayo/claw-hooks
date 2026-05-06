@@ -884,7 +884,7 @@ impl ShellParser {
     fn extract_commands_fallback(&self, command: &str) -> Vec<String> {
         let mut commands = Vec::new();
 
-        for segment in Self::split_respecting_quotes(command, ';') {
+        for segment in Self::split_top_level_terminators(command) {
             for part in Self::split_by_logical_ops(segment) {
                 for pipe_part in Self::split_respecting_quotes(part, '|') {
                     if !pipe_part.is_empty() {
@@ -1002,9 +1002,79 @@ impl ShellParser {
         }
     }
 
+    /// トップレベルのコマンド終端子で分割する。
+    /// `;`、改行 (`\n`)、単独の `&` (バックグラウンド実行) を区切りとして扱う。
+    /// 引用符内、サブシェル `(...)` の内側、エスケープされた文字は分割しない。
+    /// `&&` や `||` はここでは分割せず、後続の split_by_logical_ops に委ねる。
+    fn split_top_level_terminators(s: &str) -> Vec<&str> {
+        let mut result = Vec::new();
+        let mut current_start = 0;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escape_next = false;
+        let mut paren_depth = 0usize;
+        let mut chars = s.char_indices().peekable();
+
+        while let Some((idx, c)) = chars.next() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+
+            match c {
+                '\\' if !in_single_quote => {
+                    escape_next = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                '(' if !in_single_quote && !in_double_quote => {
+                    paren_depth += 1;
+                }
+                ')' if !in_single_quote && !in_double_quote => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                }
+                ';' | '\n' if !in_single_quote && !in_double_quote && paren_depth == 0 => {
+                    let part = &s[current_start..idx];
+                    if !part.trim().is_empty() {
+                        result.push(part.trim());
+                    }
+                    current_start = idx + c.len_utf8();
+                }
+                '&' if !in_single_quote && !in_double_quote && paren_depth == 0 => {
+                    let next_is_amp = chars.peek().is_some_and(|(_, nc)| *nc == '&');
+                    if next_is_amp {
+                        // `&&` (論理 AND) は後続の split_by_logical_ops に委ねる。
+                        // ここで2文字目の `&` を消費しておかないと、次のループ反復で
+                        // 単独 `&` として誤って分割されてしまう。
+                        let _ = chars.next();
+                    } else {
+                        // 単独 `&` (バックグラウンド実行) はここで分割する。
+                        let part = &s[current_start..idx];
+                        if !part.trim().is_empty() {
+                            result.push(part.trim());
+                        }
+                        current_start = idx + c.len_utf8();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let remaining = &s[current_start..];
+        if !remaining.trim().is_empty() {
+            result.push(remaining.trim());
+        }
+
+        result
+    }
+
     /// クォート（`'` `"`）と括弧 `()` を考慮して、単一文字 `sep` で分割する。
     /// クォート/括弧の内側の `sep` は区切りとして扱わない。
-    /// `;` や `|` をシェルの構造を保ったまま分割するために使う。
+    /// `|` をシェルの構造を保ったまま分割するために使う。
     fn split_respecting_quotes(s: &str, sep: char) -> Vec<&str> {
         let mut result = Vec::new();
         let mut current_start = 0;
@@ -1204,7 +1274,7 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
             '"' if !in_single_quote => {
                 in_double_quote = !in_double_quote;
             }
-            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+            ' ' | '\t' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
                 if !current.is_empty() {
                     parts.push(current.clone());
                     current.clear();
@@ -1257,6 +1327,68 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("echo hello; echo world");
         assert!(commands.iter().filter(|c| *c == "echo").count() >= 2);
+    }
+
+    #[test]
+    fn test_extract_background_amp_separator() {
+        // 単独の `&` (バックグラウンド実行) でもコマンドが分割されること。
+        // 後続コマンドが見落とされると危険コマンドブロックが回避される。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo ok & rm -rf /tmp/dummy");
+        assert!(commands.contains(&"echo".to_string()));
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "single `&` should split commands; got {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_newline_separator() {
+        // 改行で区切られた複数コマンドも個別に抽出できること。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo ok\nrm -rf /tmp/dummy");
+        assert!(commands.contains(&"echo".to_string()));
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "newline should split commands; got {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_amp_inside_quotes_not_split() {
+        // 引用符内の `&` はコマンド分離子として扱わない。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo 'a & b' && ls");
+        assert!(commands.contains(&"echo".to_string()));
+        assert!(commands.contains(&"ls".to_string()));
+        assert!(!commands.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_split_top_level_terminators_basic() {
+        // セミコロン、改行、単独 `&` で分割される。
+        let result = ShellParser::split_top_level_terminators("a; b\nc & d");
+        assert_eq!(result, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_split_top_level_terminators_double_amp_preserved() {
+        // `&&` は分割しない（後続の split_by_logical_ops に委ねる）。
+        let result = ShellParser::split_top_level_terminators("a && b");
+        assert_eq!(result, vec!["a && b"]);
+    }
+
+    #[test]
+    fn test_split_top_level_terminators_quoted_separators_kept() {
+        // 引用符内・サブシェル内の分離子は無視する。
+        let result = ShellParser::split_top_level_terminators("echo 'a;b'");
+        assert_eq!(result, vec!["echo 'a;b'"]);
+        let result = ShellParser::split_top_level_terminators("echo \"a;b\"");
+        assert_eq!(result, vec!["echo \"a;b\""]);
+        let result = ShellParser::split_top_level_terminators("(a; b); c");
+        assert_eq!(result, vec!["(a; b)", "c"]);
     }
 
     #[test]

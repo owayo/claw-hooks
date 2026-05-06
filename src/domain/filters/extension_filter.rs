@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use tracing::{debug, info, warn};
 
 use super::Filter;
-use crate::domain::command::run_with_timeout;
+use crate::domain::command::{configure_process_group, run_with_timeout};
 use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, FileOperationInput, HookEvent, HookInput, ToolInput};
 
@@ -86,7 +86,11 @@ impl ExtensionHookFilter {
 
         // インジェクションを引き起こすシェルメタ文字を防止
         // 注: シェルは使用しないが、一部ツールがこれらを解釈する可能性がある
-        const DANGEROUS_CHARS: &[char] = &['`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\0'];
+        // Windows では `cmd /c` 経由のため `%VAR%` 環境変数展開、`!VAR!` 遅延展開、
+        // `^` エスケープ、`"` クォート切替が攻撃ベクタになり得るため一律拒否する。
+        const DANGEROUS_CHARS: &[char] = &[
+            '`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\0', '%', '!', '^', '"',
+        ];
         for c in DANGEROUS_CHARS {
             if file_path.contains(*c) {
                 return Err(format!("Path contains dangerous character: {:?}", c));
@@ -200,6 +204,9 @@ impl ExtensionHookFilter {
 
         cmd.args(&parsed.args_after);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Unix では子プロセスを新しいプロセスグループに配置し、タイムアウト時に
+        // 孫プロセス (例: `sh -c 'sleep'` の `sleep`) も含めて確実に停止できるようにする。
+        configure_process_group(&mut cmd);
 
         // ログ用に展開済みのコマンド文字列を構築
         let actual_command = {
@@ -671,6 +678,17 @@ mod tests {
         assert!(ExtensionHookFilter::validate_file_path("file&bg").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file>out").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file<input").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_rejects_windows_cmd_meta_chars() {
+        // Windows の `cmd /c` 経由でファイルパスが渡されると、`%VAR%` が環境変数展開、
+        // `!VAR!` が遅延展開、`^` がエスケープ、`"` がクォート切替として扱われ、
+        // パス中にこれらが含まれると追加コマンドが注入される可能性がある。
+        assert!(ExtensionHookFilter::validate_file_path("file%X%.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file!X!.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file^calc.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("file\"injected.rs").is_err());
     }
 
     #[test]

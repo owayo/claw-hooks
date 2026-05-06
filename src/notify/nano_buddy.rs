@@ -14,6 +14,10 @@ mod macos {
         fn notify_register_check(name: *const i8, out_token: *mut c_int) -> u32;
         fn notify_set_state(token: c_int, state: u64) -> u32;
         fn notify_post(name: *const i8) -> u32;
+        // Apple notify(3): registration を解放する。
+        // notify_register_check で取得した token は notify_cancel で解放しないと
+        // プロセス内のリソースがリークする。
+        fn notify_cancel(token: c_int) -> u32;
     }
 
     // DistributedNotificationCenter用のCore Foundation型定義
@@ -106,6 +110,10 @@ mod macos {
             }
             let _ = notify_set_state(token, encode_ext(ext));
             let _ = notify_post(name.as_ptr());
+            // notify_register_check で取得した token を解放する。
+            // 解放しないと extension hook が呼ばれるたびにプロセス内の
+            // registration リソースが累積する。
+            let _ = notify_cancel(token);
         }
     }
 

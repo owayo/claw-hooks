@@ -87,7 +87,8 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
 /// - 各行の先頭・末尾の空白を除去
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
-/// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`）を1文字に圧縮
+/// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`, `^`）を1文字に圧縮
+///   `^` は ruff / clippy / rust 等の lint 出力で範囲を示すマーカーとして使われる
 /// - 連続する空行を1行に圧縮
 /// - 同じ単語で始まる行が4行以上連続する場合、4行目以降を集約（cargo の `Compiling ...` 連発などを対象）
 pub fn normalize_lint_output(output: &str) -> String {
@@ -183,12 +184,12 @@ fn leading_prefix_word(line: &str) -> Option<&str> {
 }
 
 /// 同一文字が連続する装飾文字をトークン効率のために圧縮する。
-/// 対象: `.`, `=`, `-`, `─`, `━`
+/// 対象: `.`, `=`, `-`, `─`, `━`, `^`
 /// ルール:
-/// - `=`, `-`, `─`, `━` は4回以上の連続で1文字に圧縮
+/// - `=`, `-`, `─`, `━`, `^` は4回以上の連続で1文字に圧縮
 /// - `.` は4回以上の連続、または行末の3連続以上で1文字に圧縮
 ///
-/// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`
+/// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -213,7 +214,7 @@ fn collapse_repeated_chars(input: &str) -> String {
 
 /// 装飾文字かどうかを判定する。
 fn is_decorative_char(c: char) -> bool {
-    matches!(c, '.' | '=' | '-' | '─' | '━')
+    matches!(c, '.' | '=' | '-' | '─' | '━' | '^')
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -1044,6 +1045,9 @@ mod tests {
         assert_eq!(collapse_repeated_chars("─────"), "─");
         assert_eq!(collapse_repeated_chars("━━━━━"), "━");
         assert_eq!(collapse_repeated_chars("------"), "-");
+        // ruff / clippy / rust の lint 出力で使われる範囲マーカー
+        assert_eq!(collapse_repeated_chars("^^^^"), "^");
+        assert_eq!(collapse_repeated_chars("^^^^^^^^^^^^"), "^");
     }
 
     #[test]
@@ -1084,8 +1088,18 @@ mod tests {
     fn test_collapse_repeated_chars_ignores_non_decorative() {
         // 装飾文字以外は対象外
         assert_eq!(collapse_repeated_chars("aaaaa"), "aaaaa");
+        // `#` は markdown 見出し、`*` は markdown 強調と用法が重なるため装飾扱いしない
         assert_eq!(collapse_repeated_chars("#####"), "#####");
         assert_eq!(collapse_repeated_chars("*****"), "*****");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_caret_marker() {
+        // 単体の caret や2-3個の連続は維持（XOR 演算子等の用法を破壊しない）
+        assert_eq!(collapse_repeated_chars("a ^ b"), "a ^ b");
+        assert_eq!(collapse_repeated_chars("^^^"), "^^^");
+        // 行内の長い caret マーカーも圧縮対象
+        assert_eq!(collapse_repeated_chars("| ^^^^^^"), "| ^");
     }
 
     #[test]

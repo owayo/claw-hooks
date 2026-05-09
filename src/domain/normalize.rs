@@ -87,8 +87,10 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
 /// - 各行の先頭・末尾の空白を除去
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
-/// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`, `^`）を1文字に圧縮
-///   `^` は ruff / clippy / rust 等の lint 出力で範囲を示すマーカーとして使われる
+/// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`）を1文字に圧縮
+///   - `^` は ruff / clippy / rust 等の lint 出力で範囲を示すマーカーとして使われる
+///   - `·` (U+00B7) は biome 等が空白を視覚化するため diff 行に多用する
+///   - `→` (U+2192) は biome 等がタブを視覚化するため diff 行に多用する
 /// - 連続する空行を1行に圧縮
 /// - 同じ単語で始まる行が4行以上連続する場合、4行目以降を集約（cargo の `Compiling ...` 連発などを対象）
 pub fn normalize_lint_output(output: &str) -> String {
@@ -184,12 +186,13 @@ fn leading_prefix_word(line: &str) -> Option<&str> {
 }
 
 /// 同一文字が連続する装飾文字をトークン効率のために圧縮する。
-/// 対象: `.`, `=`, `-`, `─`, `━`, `^`
+/// 対象: `.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`
 /// ルール:
-/// - `=`, `-`, `─`, `━`, `^` は4回以上の連続で1文字に圧縮
+/// - `=`, `-`, `─`, `━`, `^`, `·`, `→` は4回以上の連続で1文字に圧縮
 /// - `.` は4回以上の連続、または行末の3連続以上で1文字に圧縮
 ///
-/// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`
+/// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`,
+///     `············` → `·`, `→→→→` → `→`
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -213,8 +216,11 @@ fn collapse_repeated_chars(input: &str) -> String {
 }
 
 /// 装飾文字かどうかを判定する。
+/// `·` (U+00B7) と `→` (U+2192) は biome 等が diff 行で空白・タブを
+/// 視覚化する際に大量に出力するため、4 文字以上連続した場合のみ
+/// 1 文字に圧縮してトークン効率を高める。
 fn is_decorative_char(c: char) -> bool {
-    matches!(c, '.' | '=' | '-' | '─' | '━' | '^')
+    matches!(c, '.' | '=' | '-' | '─' | '━' | '^' | '·' | '→')
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -277,20 +283,39 @@ fn strip_common_path_prefix(text: &str) -> String {
 
 /// lint出力テキストから絶対パスを抽出する。
 /// `/path/file.rs:10:5`、`-->/path/file.rs:10:5`、`/path/file.ts(10,5)` 等の形式に対応。
+///
+/// 行単位で最初の `/` を探し、`:` `(` まで（または改行）をパスとして扱うため、
+/// `My Documents` のようにスペースを含むディレクトリパスも正しく抽出できる。
+/// 直前文字が空白・行頭・`-` `>` `=` のいずれか（rustc の `--> file:line` 等を許容）の場合のみ
+/// パスの開始位置として採用し、`http://` のような URL を誤抽出しないようにする。
 fn extract_absolute_paths(text: &str) -> Vec<&str> {
-    text.split_whitespace()
-        .filter_map(|token| {
-            let start = token.find('/')?;
-            let rest = &token[start..];
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let mut search_from = 0;
+        while let Some(rel_start) = line[search_from..].find('/') {
+            let start = search_from + rel_start;
+            let prev = line[..start].chars().next_back();
+            let is_path_start = match prev {
+                None => true,
+                Some(c) if c.is_ascii_whitespace() => true,
+                Some('-') | Some('>') | Some('=') => true,
+                _ => false,
+            };
+            if !is_path_start {
+                // パス開始位置として採用しない場合でも、続く `/` を探索する
+                search_from = start + 1;
+                continue;
+            }
+            let rest = &line[start..];
             let end = rest.find([':', '(']).unwrap_or(rest.len());
             let path = &rest[..end];
             if path.matches('/').count() >= 2 && path.len() > 2 {
-                Some(path)
-            } else {
-                None
+                paths.push(path);
             }
-        })
-        .collect()
+            search_from = start + end.max(1);
+        }
+    }
+    paths
 }
 
 /// パス群の最長共通ディレクトリプレフィックスを算出する。
@@ -1045,6 +1070,8 @@ mod tests {
         assert_eq!(collapse_repeated_chars("─────"), "─");
         assert_eq!(collapse_repeated_chars("━━━━━"), "━");
         assert_eq!(collapse_repeated_chars("------"), "-");
+        assert_eq!(collapse_repeated_chars("······"), "·");
+        assert_eq!(collapse_repeated_chars("→→→→→→"), "→");
         // ruff / clippy / rust の lint 出力で使われる範囲マーカー
         assert_eq!(collapse_repeated_chars("^^^^"), "^");
         assert_eq!(collapse_repeated_chars("^^^^^^^^^^^^"), "^");
@@ -1235,6 +1262,22 @@ mod tests {
         assert!(result.is_ascii() || result.chars().count() > 0);
         assert!(result.contains("main.rs:10"));
         assert!(result.contains("lib.rs:20"));
+    }
+
+    #[test]
+    fn test_strip_common_path_prefix_paths_with_spaces() {
+        // スペースを含むディレクトリ名でもファイル単位の共通プレフィックスを除去する
+        let input = "/Users/dev/My Project/src/main.rs:10 error\n/Users/dev/My Project/src/lib.rs:20 warning";
+        let result = strip_common_path_prefix(input);
+        assert_eq!(result, "main.rs:10 error\nlib.rs:20 warning");
+    }
+
+    #[test]
+    fn test_extract_absolute_paths_ignores_urls() {
+        // URL のスラッシュは絶対パスとして扱わない
+        let input = "see https://example.com/a/b and /Users/dev/project/src/main.rs:10";
+        let paths = extract_absolute_paths(input);
+        assert_eq!(paths, vec!["/Users/dev/project/src/main.rs"]);
     }
 
     // === collapse_repeated_prefix_lines: 同じ単語で始まる行の集約 ===

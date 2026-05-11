@@ -193,8 +193,8 @@ Rules:
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `timeout --signal TERM 10 rm`, `command rm`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, and `find -exec`
-- ✅ Handles wrappers and subshells (sudo, timeout, command, bash -c, xargs, eval, find -exec)
+- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`, `bash -lc 'rm ...'`, `cmd /c del`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, `xargs -I`, `xargs sh -c`, and `find -exec`
+- ✅ Handles wrappers and subshells (sudo, timeout, command, exec, bash -c/-lc, cmd /c, xargs, eval, find -exec)
 - ✅ Single binary, no Python/jq dependencies
 
 Configure once:
@@ -511,7 +511,7 @@ dd_block_message = "🚫 dd command blocked for safety."
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
 
-# Hook command timeout in seconds (default: 60)
+# Hook command timeout in seconds (default: 60, max: 86400)
 # Commands exceeding this timeout will be killed (SIGKILL)
 # hook_timeout = 60
 
@@ -686,7 +686,7 @@ All three approaches can be combined: use the global config for shared rules, `.
 ### Conditional Stop Hooks (Project-wide Lint)
 
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
-**Timeout handling:** When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
+**Timeout handling:** `hook_timeout` accepts values up to `86400` seconds. When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
 
 Windsurf is the main exception here: its `post_cascade_response` hook is an asynchronous post-hook, so stop hooks still run but failures are treated as best-effort and are not surfaced back to the agent as a block.
 
@@ -704,7 +704,7 @@ Windsurf is the main exception here: its `post_cascade_response` hook is an asyn
 | Field | Description |
 |-------|-------------|
 | `file_exists` | Run only when this file exists in the working directory |
-| `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
+| `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; on Unix the file must have an executable bit; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
 
 ```toml
 # Stage-based execution: analysis → lint → commit

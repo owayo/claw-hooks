@@ -193,8 +193,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`find -exec` のコマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、timeout、command、bash -c、xargs、eval、find -exec）
+- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec` のコマンドも検出
+- ✅ ラッパー・サブシェル対応（sudo、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）
 - ✅ 単一バイナリ、Python/jq依存なし
 
 一度設定するだけ:
@@ -511,7 +511,7 @@ dd_block_message = "🚫 dd command blocked for safety."
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # デフォルト: config.tomlと同じディレクトリ
 
-# フックコマンドタイムアウト（秒）（デフォルト: 60）
+# フックコマンドタイムアウト（秒）（デフォルト: 60、最大: 86400）
 # このタイムアウトを超えたコマンドはkill（SIGKILL）されます
 # hook_timeout = 60
 
@@ -686,7 +686,7 @@ condition = { file_exists = "tsconfig.json" }
 ### 条件付きStopフック（プロジェクト全体Lint）
 
 `condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。`commands`配列内のすべてのコマンドは**並列実行**されます。失敗したコマンドの出力はすべて収集され、AIエージェントにブロック理由としてまとめて返されます。
-**タイムアウトの扱い:** `hook_timeout` を超えたコマンドは claw-hooks がプロセスを強制終了（SIGKILL）し、タイムアウト通知をログに記録しますが、ブロック理由には含めません。これはセッション終了がタイムアウトで止まることを防ぐためです。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）は引き続きブロック対象です。
+**タイムアウトの扱い:** `hook_timeout` は最大 `86400` 秒まで指定できます。`hook_timeout` を超えたコマンドは claw-hooks がプロセスを強制終了（SIGKILL）し、タイムアウト通知をログに記録しますが、ブロック理由には含めません。これはセッション終了がタイムアウトで止まることを防ぐためです。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）は引き続きブロック対象です。
 
 ただし Windsurf は例外で、`post_cascade_response` が非同期の事後フックであるため、Stopフック自体は実行されても失敗はベストエフォート扱いとなり、AI エージェントへのブロックとしては返されません。
 
@@ -704,7 +704,7 @@ condition = { file_exists = "tsconfig.json" }
 | フィールド | 説明 |
 |-----------|------|
 | `file_exists` | 作業ディレクトリにこのファイルが存在する場合のみ実行 |
-| `command_exists` | このコマンドがPATH上に存在する場合のみ実行（Windows の `PATHEXT` を考慮。`./tool` や `/usr/bin/tool` のような明示パスも判定可能） |
+| `command_exists` | このコマンドがPATH上に存在する場合のみ実行（Windows の `PATHEXT` を考慮。Unix では実行ビットが必要。`./tool` や `/usr/bin/tool` のような明示パスも判定可能） |
 
 ```toml
 # ステージベースの実行: 分析 → lint → コミット

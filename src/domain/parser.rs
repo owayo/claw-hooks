@@ -9,11 +9,13 @@ use tree_sitter::{Node, Parser};
 /// 実コマンドを実行するラッパーコマンド
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
-    "command",
+    "command", "exec",
 ];
 
 /// -c フラグでコマンド文字列を実行できるシェル
-const SHELL_COMMANDS: &[&str] = &["bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash"];
+const SHELL_COMMANDS: &[&str] = &[
+    "bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash", "cmd",
+];
 
 /// find で後続引数をコマンドとして実行する述語
 const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
@@ -127,16 +129,11 @@ impl ShellParser {
                         // xargs を処理 - 実行されるコマンドを抽出
                         if cmd_name == "xargs" {
                             let args = self.get_command_arguments(node, source);
-                            // xargs 対象コマンド文字列を構築
-                            let xargs_args: Vec<_> =
-                                args.iter().filter(|a| !a.starts_with('-')).collect();
-                            if !xargs_args.is_empty() {
-                                let xargs_cmd = xargs_args
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                command_strings.push(xargs_cmd);
+                            if let Some(xargs_cmd) =
+                                Self::extract_xargs_command_string_from_args(&args)
+                            {
+                                command_strings.push(xargs_cmd.clone());
+                                command_strings.extend(self.extract_command_strings(&xargs_cmd));
                             }
                         }
 
@@ -227,15 +224,9 @@ impl ShellParser {
 
         // xargs 対象コマンドを処理
         if cmd_name == "xargs" {
-            let xargs_args: Vec<_> = args.iter().filter(|a| !a.starts_with('-')).collect();
-            if !xargs_args.is_empty() {
-                command_strings.push(
-                    xargs_args
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                );
+            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
+                command_strings.push(xargs_cmd.clone());
+                command_strings.extend(self.extract_command_strings_fallback(&xargs_cmd));
             }
         }
 
@@ -294,9 +285,10 @@ impl ShellParser {
 
                     // AST レベルで xargs を処理
                     if cmd_name == "xargs" {
-                        if let Some(xargs_cmd) = Self::extract_xargs_from_args(&args) {
-                            if !commands.contains(&xargs_cmd) {
-                                commands.push(xargs_cmd);
+                        if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args)
+                        {
+                            for nested_cmd in self.extract_commands(&xargs_cmd) {
+                                Self::push_unique_command(commands, &nested_cmd);
                             }
                         }
                     }
@@ -392,17 +384,82 @@ impl ShellParser {
     /// shell -c 形式の引数から実行文字列を取り出す。
     fn extract_shell_c_from_args(args: &[String]) -> Option<String> {
         for (i, arg) in args.iter().enumerate() {
-            if arg == "-c" && i + 1 < args.len() {
+            let lower = arg.to_ascii_lowercase();
+            if matches!(lower.as_str(), "/c" | "/k") && i + 1 < args.len() {
+                return Some(args[i + 1..].join(" "));
+            }
+
+            let has_shell_c = arg == "-c"
+                || (arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg.chars().skip(1).any(|c| c == 'c'));
+            if has_shell_c && i + 1 < args.len() {
                 return Some(args[i + 1].clone());
             }
         }
         None
     }
 
-    /// xargs の引数から実行コマンドを取り出す。
-    #[cfg(feature = "ast-parser")]
-    fn extract_xargs_from_args(args: &[String]) -> Option<String> {
-        args.iter().find(|arg| !arg.starts_with('-')).cloned()
+    /// xargs の引数から実行コマンド文字列を取り出す。
+    fn extract_xargs_command_string_from_args(args: &[String]) -> Option<String> {
+        Self::find_xargs_command_index(args).map(|index| args[index..].join(" "))
+    }
+
+    /// xargs のオプションを読み飛ばし、実行対象コマンドの位置を返す。
+    fn find_xargs_command_index(args: &[String]) -> Option<usize> {
+        let mut i = 0usize;
+        while i < args.len() {
+            let arg = &args[i];
+
+            if arg == "--" {
+                return (i + 1 < args.len()).then_some(i + 1);
+            }
+
+            if arg.starts_with('-') {
+                if Self::xargs_flag_takes_arg(arg) {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+
+            return Some(i);
+        }
+
+        None
+    }
+
+    /// xargs で次トークンを値として消費するオプションか判定する。
+    fn xargs_flag_takes_arg(flag: &str) -> bool {
+        let (base_flag, has_inline_value) = match flag.split_once('=') {
+            Some((base, _)) => (base, true),
+            None => (flag, false),
+        };
+
+        if has_inline_value {
+            return false;
+        }
+
+        if base_flag.starts_with("--") {
+            return matches!(
+                base_flag,
+                "--arg-file"
+                    | "--delimiter"
+                    | "--eof"
+                    | "--max-args"
+                    | "--max-chars"
+                    | "--max-lines"
+                    | "--max-procs"
+                    | "--process-slot-var"
+                    | "--replace"
+            );
+        }
+
+        matches!(
+            base_flag,
+            "-a" | "-d" | "-E" | "-I" | "-L" | "-n" | "-P" | "-s"
+        )
     }
 
     /// eval の引数を再解析用のコマンド文字列へ戻す。
@@ -518,6 +575,7 @@ impl ShellParser {
     const NICE_FLAGS_WITH_ARGS: &[&str] = &["-n"];
     const IONICE_FLAGS_WITH_ARGS: &[&str] = &["-c", "-n"];
     const DOAS_FLAGS_WITH_ARGS: &[&str] = &["-u"];
+    const EXEC_FLAGS_WITH_ARGS: &[&str] = &["-a"];
     const SUDO_LONG_FLAGS_WITH_ARGS: &[&str] = &[
         "--user",
         "--group",
@@ -576,6 +634,7 @@ impl ShellParser {
             "nice" => Self::NICE_FLAGS_WITH_ARGS,
             "ionice" => Self::IONICE_FLAGS_WITH_ARGS,
             "doas" => Self::DOAS_FLAGS_WITH_ARGS,
+            "exec" => Self::EXEC_FLAGS_WITH_ARGS,
             _ => &[],
         }
     }
@@ -924,23 +983,15 @@ impl ShellParser {
 
         // shell -c "command" を処理
         if SHELL_COMMANDS.contains(&cmd.as_str()) {
-            for (i, arg) in args.iter().enumerate() {
-                if arg == "-c" && i + 1 < args.len() {
-                    let shell_cmd = &args[i + 1];
-                    commands.extend(self.extract_commands_fallback(shell_cmd));
-                    break;
-                }
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
+                commands.extend(self.extract_commands_fallback(&shell_cmd));
             }
         }
 
         // xargs を処理
         if cmd == "xargs" {
-            for arg in &args {
-                if arg.starts_with('-') {
-                    continue;
-                }
-                commands.push(arg.clone());
-                break;
+            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
+                commands.extend(self.extract_commands_fallback(&xargs_cmd));
             }
         }
 
@@ -1498,6 +1549,15 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_exec_wrapper() {
+        // exec は現在のシェルを指定コマンドで置き換えて実行する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("exec rm -rf /tmp/test");
+        assert!(commands.contains(&"exec".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
     fn test_extract_env_wrapper() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("env PATH=/usr/bin rm file.txt");
@@ -1514,11 +1574,29 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_bash_combined_c_flag() {
+        // bash -lc のように -c が他フラグと結合されても内側のコマンドを抽出する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("bash -lc 'rm -rf /tmp/test'");
+        assert!(commands.contains(&"bash".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
     fn test_extract_sh_c_subshell() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("sh -c \"kill -9 1234\"");
         assert!(commands.contains(&"sh".to_string()));
         assert!(commands.contains(&"kill".to_string()));
+    }
+
+    #[test]
+    fn test_extract_cmd_c_shell() {
+        // Windows の cmd /c 経由で del が実行される場合も検出する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("cmd /c del C:\\tmp\\file.txt");
+        assert!(commands.contains(&"cmd".to_string()));
+        assert!(commands.contains(&"del".to_string()));
     }
 
     #[test]
@@ -1536,6 +1614,25 @@ mod tests {
         let commands = parser.extract_commands("pgrep node | xargs -r kill -9");
         assert!(commands.contains(&"xargs".to_string()));
         assert!(commands.contains(&"kill".to_string()));
+    }
+
+    #[test]
+    fn test_extract_xargs_with_replace_flag() {
+        // -I は次トークンを置換文字列として消費するため、その後の rm が実行対象。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("find . -name '*.tmp' | xargs -I {} rm -rf {}");
+        assert!(commands.contains(&"xargs".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_extract_xargs_shell_c_command() {
+        // xargs が sh -c を実行する場合は、シェル内のコマンドまで再帰的に抽出する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("echo file | xargs sh -c 'rm -f \"$@\"' sh");
+        assert!(commands.contains(&"xargs".to_string()));
+        assert!(commands.contains(&"sh".to_string()));
+        assert!(commands.contains(&"rm".to_string()));
     }
 
     #[test]

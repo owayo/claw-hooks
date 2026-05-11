@@ -87,6 +87,20 @@ pub fn run_with_timeout_tracked(
     timeout_secs: u64,
     command_desc: &str,
 ) -> Result<TimedOutput, String> {
+    let deadline = match Instant::now().checked_add(Duration::from_secs(timeout_secs)) {
+        Some(deadline) => deadline,
+        None => {
+            #[cfg(unix)]
+            kill_process_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Invalid timeout {}s for command '{}': deadline is out of range",
+                timeout_secs, command_desc
+            ));
+        }
+    };
+
     // スレッドで読み取るためにstdout/stderrハンドルの所有権を取得
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
@@ -110,7 +124,6 @@ pub fn run_with_timeout_tracked(
     });
 
     // try_waitポーリングでタイムアウト付きの子プロセス待機
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let (status, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status, false),
@@ -417,6 +430,17 @@ mod tests {
             elapsed.as_secs() < 2,
             "Fast command should return quickly: {:?}",
             elapsed
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_rejects_unrepresentable_deadline() {
+        let child = spawn_piped("sleep", &["30".to_string()]).unwrap();
+        let result = run_with_timeout(child, u64::MAX, "sleep 30");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("Invalid timeout"),
+            "表現できない期限はエラーとして返すべき"
         );
     }
 

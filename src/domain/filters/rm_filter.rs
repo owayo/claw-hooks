@@ -160,7 +160,7 @@ mod tests {
         }
     }
 
-    // === Edge Case Tests ===
+    // === エッジケーステスト ===
 
     #[test]
     fn test_contains_rm_command_with_sudo_wrapper() {
@@ -172,6 +172,8 @@ mod tests {
     fn test_contains_rm_command_with_bash_c_subshell() {
         assert!(contains_rm_command("bash -c 'rm -rf /tmp/test'"));
         assert!(contains_rm_command("sh -c \"rm -rf /tmp/test\""));
+        assert!(contains_rm_command("bash -lc 'rm -rf /tmp/test'"));
+        assert!(contains_rm_command("cmd /c del C:\\tmp\\file.txt"));
     }
 
     #[test]
@@ -255,5 +257,24 @@ mod tests {
     fn test_rm_with_timeout_wrapper() {
         assert!(contains_rm_command("timeout 30 rm -rf /tmp/test"));
         assert!(contains_rm_command("timeout --signal TERM 10 rm file"));
+    }
+
+    #[test]
+    fn test_rm_with_exec_wrapper() {
+        assert!(contains_rm_command("exec rm -rf /tmp/test"));
+    }
+
+    #[test]
+    fn test_rm_with_xargs_replace_flag() {
+        assert!(contains_rm_command(
+            "find . -name '*.tmp' | xargs -I {} rm -rf {}"
+        ));
+    }
+
+    #[test]
+    fn test_rm_with_xargs_shell_c() {
+        assert!(contains_rm_command(
+            "echo file | xargs sh -c 'rm -f \"$@\"' sh"
+        ));
     }
 }

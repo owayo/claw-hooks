@@ -3,6 +3,8 @@
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::validation;
@@ -62,7 +64,7 @@ pub struct Config {
     #[serde(default)]
     pub nano_buddy: bool,
 
-    /// フックコマンド実行のタイムアウト（秒、デフォルト: 60）
+    /// フックコマンド実行のタイムアウト（秒、デフォルト: 60、最大: 86400）
     #[serde(default = "default_hook_timeout")]
     pub hook_timeout: u64,
 
@@ -249,7 +251,7 @@ impl HookCondition {
         let command_path = Path::new(cmd);
         // 明示的なパス（"./tool", "/usr/bin/tool", "dir\\tool.exe"）は直接チェック。
         if command_path.components().count() > 1 || command_path.is_absolute() {
-            return command_path.is_file();
+            return Self::is_executable_command_file(command_path);
         }
 
         let Some(path) = std::env::var_os("PATH") else {
@@ -279,12 +281,12 @@ impl HookCondition {
 
             for dir in std::env::split_paths(&path) {
                 let base = dir.join(cmd);
-                if base.is_file() {
+                if Self::is_executable_command_file(&base) {
                     return true;
                 }
                 if !has_extension {
                     for ext in &pathext {
-                        if dir.join(format!("{}{}", cmd, ext)).is_file() {
+                        if Self::is_executable_command_file(&dir.join(format!("{}{}", cmd, ext))) {
                             return true;
                         }
                     }
@@ -295,7 +297,21 @@ impl HookCondition {
 
         #[cfg(not(windows))]
         {
-            std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
+            std::env::split_paths(&path).any(|dir| Self::is_executable_command_file(&dir.join(cmd)))
+        }
+    }
+
+    /// パスがコマンドとして実行可能な通常ファイルか確認する。
+    fn is_executable_command_file(path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            path.metadata()
+                .is_ok_and(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+        }
+
+        #[cfg(not(unix))]
+        {
+            path.is_file()
         }
     }
 }
@@ -1028,6 +1044,27 @@ mod tests {
         assert!(!HookCondition::command_in_path(
             "/nonexistent/path/to/command"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_command_in_path_absolute_path_non_executable_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+
+        // 通常ファイルが存在しても、実行ビットが無いものはコマンドとして扱わない。
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(!HookCondition::command_in_path(path.to_str().unwrap()));
+
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(HookCondition::command_in_path(path.to_str().unwrap()));
     }
 
     #[test]

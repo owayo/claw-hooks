@@ -14,22 +14,65 @@ const KILL_COMMANDS: &[&str] = &[
 ];
 
 /// xargs 経由の kill コマンドが含まれるか判定する。
-/// xargs の最初の非フラグ引数が実際に実行されるコマンドであるため、
-/// それのみを検査する（後続引数はコマンドの引数であり実行対象ではない）。
+/// 値を取る xargs オプションを読み飛ばし、実際に実行されるコマンドだけを検査する。
 fn contains_xargs_kill(command: &str) -> bool {
     for segment in command.split('|') {
         let trimmed = segment.trim();
         if trimmed.starts_with("xargs") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            // xargs の最初の非フラグ引数 = 実行されるコマンド
-            if let Some(cmd) = parts.iter().skip(1).find(|a| !a.starts_with('-')) {
-                if KILL_COMMANDS.contains(cmd) {
+            if let Some(cmd) = find_xargs_command(&parts[1..]) {
+                if KILL_COMMANDS.contains(&cmd) {
                     return true;
                 }
             }
         }
     }
     false
+}
+
+fn find_xargs_command<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        if *arg == "--" {
+            index += 1;
+            break;
+        }
+
+        if !arg.starts_with('-') {
+            break;
+        }
+
+        index += if xargs_flag_takes_separate_value(arg) {
+            2
+        } else {
+            1
+        };
+    }
+
+    args.get(index).copied()
+}
+
+fn xargs_flag_takes_separate_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-a" | "--arg-file"
+            | "-d"
+            | "--delimiter"
+            | "-E"
+            | "-e"
+            | "--eof"
+            | "-I"
+            | "-i"
+            | "--replace"
+            | "-L"
+            | "--max-lines"
+            | "-n"
+            | "--max-args"
+            | "-P"
+            | "--max-procs"
+            | "--process-slot-var"
+    )
 }
 
 /// kill 関連コマンドをブロックするフィルターを作成する。
@@ -164,7 +207,7 @@ mod tests {
         }
     }
 
-    // === Edge Case Tests ===
+    // === エッジケーステスト ===
 
     #[test]
     fn test_contains_kill_command_with_sudo_wrapper() {
@@ -181,6 +224,18 @@ mod tests {
     #[test]
     fn test_contains_kill_command_with_xargs_double_dash() {
         assert!(contains_kill_command("pgrep node | xargs -- kill -9"));
+    }
+
+    #[test]
+    fn test_contains_kill_command_with_xargs_replace_flag() {
+        assert!(contains_kill_command("pgrep node | xargs -I {} kill -9 {}"));
+    }
+
+    #[test]
+    fn test_contains_kill_command_with_xargs_shell_c() {
+        assert!(contains_kill_command(
+            "pgrep node | xargs sh -c 'kill -9 \"$@\"' sh"
+        ));
     }
 
     #[test]
@@ -266,6 +321,7 @@ mod tests {
     fn test_contains_xargs_kill_with_flags() {
         assert!(contains_xargs_kill("ps | xargs -n1 kill"));
         assert!(contains_xargs_kill("ps | xargs -P4 kill"));
+        assert!(contains_xargs_kill("ps | xargs -I {} kill -9 {}"));
     }
 
     #[test]

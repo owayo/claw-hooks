@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 use super::types::ProjectConfig;
 use super::{Config, CustomFilter, StopHook};
 
+/// フックコマンドの最大タイムアウト秒数。
+/// フックは短時間で終わる前提のため、1日を超える値は設定ミスとして扱う。
+pub(crate) const MAX_HOOK_TIMEOUT_SECS: u64 = 86_400;
+
 /// 設定を検証する。
 pub fn validate(config: &Config) -> Result<()> {
     // ログパスの検証（NUL文字を含まないこと）
@@ -14,10 +18,24 @@ pub fn validate(config: &Config) -> Result<()> {
         bail!("Invalid log_path: contains null character");
     }
 
+    validate_hook_timeout(config.hook_timeout, "hook_timeout")?;
     validate_custom_filters(&config.custom_filters)?;
     validate_extension_hooks(&config.extension_hooks)?;
     validate_stop_hooks(&config.stop_hooks)?;
 
+    Ok(())
+}
+
+/// フックコマンドのタイムアウト値を検証する。
+fn validate_hook_timeout(timeout_secs: u64, field: &str) -> Result<()> {
+    if timeout_secs > MAX_HOOK_TIMEOUT_SECS {
+        bail!(
+            "{} must be <= {} seconds, got {}",
+            field,
+            MAX_HOOK_TIMEOUT_SECS,
+            timeout_secs
+        );
+    }
     Ok(())
 }
 
@@ -121,6 +139,9 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
 /// プロジェクトレベルの設定を検証する。
 /// `Some` のフィールドのみ検証（プロジェクト設定で指定されたもの）。
 pub fn validate_project(config: &ProjectConfig) -> Result<()> {
+    if let Some(timeout_secs) = config.hook_timeout {
+        validate_hook_timeout(timeout_secs, "hook_timeout")?;
+    }
     if let Some(ref filters) = config.custom_filters {
         validate_custom_filters(filters)?;
     }
@@ -244,6 +265,18 @@ mod tests {
         let mut config = default_config();
         config.log_path = PathBuf::from("bad\0path");
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_hook_timeout_too_large() {
+        let mut config = default_config();
+        config.hook_timeout = MAX_HOOK_TIMEOUT_SECS + 1;
+        let err = validate(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("hook_timeout"),
+            "エラーメッセージに hook_timeout が含まれるべき: {}",
+            err
+        );
     }
 
     #[test]
@@ -461,7 +494,7 @@ mod tests {
         assert!(validate_stop_hooks(&hooks).is_err());
     }
 
-    // === validate_project tests ===
+    // === プロジェクト設定バリデーションテスト ===
 
     #[test]
     fn test_validate_project_empty() {
@@ -486,10 +519,19 @@ mod tests {
     fn test_validate_project_invalid_custom_filters() {
         let pc = ProjectConfig {
             custom_filters: Some(vec![CustomFilter {
-                command: "[".to_string(), // invalid regex
+                command: "[".to_string(), // 無効な正規表現
                 args: vec![],
                 message: "msg".to_string(),
             }]),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_err());
+    }
+
+    #[test]
+    fn test_validate_project_rejects_hook_timeout_too_large() {
+        let pc = ProjectConfig {
+            hook_timeout: Some(MAX_HOOK_TIMEOUT_SECS + 1),
             ..Default::default()
         };
         assert!(validate_project(&pc).is_err());
@@ -568,7 +610,7 @@ mod tests {
         assert!(validate_project(&pc).is_ok());
     }
 
-    // === Stage validation tests ===
+    // === ステージバリデーションテスト ===
 
     #[test]
     fn test_validate_stop_hooks_stage_valid_range() {

@@ -14,7 +14,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 ## Key Features
 
 1. **Command Blocking**: `rm`/`kill`/`dd` → suggest `safe-rm`/`safe-kill`
-2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands, single `&` (background), newline separators, `eval`, `find -exec`/`-execdir`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`)
+2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with fallback parsing that also handles subshells/command substitutions/env-prefix commands, single `&` (background), newline separators, `eval`, `find -exec`/`-execdir`, `xargs -I`/`xargs sh -c`, Windows `cmd /c`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked; on Windows, `cmd /c` shell metacharacters such as `%`, `!`, `^`, `"` are also rejected from file paths to prevent variable-expansion injection)
 5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)

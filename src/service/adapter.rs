@@ -1625,10 +1625,11 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let reason = parsed["reason"].as_str().unwrap();
         // 各行の先頭の空白が除去されていること
+        // `-->` は rustc 位置マーカー圧縮で `->` になる
         assert!(reason.contains("error: unused"));
-        assert!(reason.contains("--> src/main.rs:1:1"));
+        assert!(reason.contains("-> src/main.rs:1:1"));
         assert!(!reason.contains("    error"));
-        assert!(!reason.contains("        -->"));
+        assert!(!reason.contains("        ->"));
     }
 
     #[test]

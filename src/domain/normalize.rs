@@ -190,9 +190,10 @@ fn leading_prefix_word(line: &str) -> Option<&str> {
 /// ルール:
 /// - `=`, `-`, `─`, `━`, `^`, `·`, `→` は4回以上の連続で1文字に圧縮
 /// - `.` は4回以上の連続、または行末の3連続以上で1文字に圧縮
+/// - `-` が2回以上連続して直後に `>` が続く場合は1文字に圧縮（`-->` → `->`、rustc の位置マーカー対策）
 ///
 /// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`,
-///     `············` → `·`, `→→→→` → `→`
+///     `············` → `·`, `→→→→` → `→`, `-->` → `->`, `---->` → `->`
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -204,7 +205,9 @@ fn collapse_repeated_chars(input: &str) -> String {
                 chars.next();
                 count += 1;
             }
-            let should_collapse = count >= 4 || (c == '.' && count >= 3 && chars.peek().is_none());
+            let should_collapse = count >= 4
+                || (c == '.' && count >= 3 && chars.peek().is_none())
+                || (c == '-' && count >= 2 && chars.peek() == Some(&'>'));
             if !should_collapse {
                 for _ in 1..count {
                     result.push(c);
@@ -1118,6 +1121,47 @@ mod tests {
         // `#` は markdown 見出し、`*` は markdown 強調と用法が重なるため装飾扱いしない
         assert_eq!(collapse_repeated_chars("#####"), "#####");
         assert_eq!(collapse_repeated_chars("*****"), "*****");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_arrow_marker() {
+        // rustc の位置マーカー `-->` を `->` に圧縮
+        assert_eq!(collapse_repeated_chars("-->"), "->");
+        assert_eq!(collapse_repeated_chars("--->"), "->");
+        assert_eq!(collapse_repeated_chars("---->"), "->");
+        // 周囲に文字があっても矢印部分のみ圧縮
+        assert_eq!(
+            collapse_repeated_chars("  --> src/main.rs:10:5"),
+            "  -> src/main.rs:10:5"
+        );
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_arrow_preserves_single_hyphen_arrow() {
+        // 単一ハイフンの `->`（Rust の関数戻り型等）は圧縮対象外で保持
+        assert_eq!(
+            collapse_repeated_chars("fn foo() -> u32"),
+            "fn foo() -> u32"
+        );
+        assert_eq!(collapse_repeated_chars("->"), "->");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_double_hyphen_not_followed_by_gt() {
+        // `--` の直後が `>` でなければ通常ルール（4回以上で圧縮）が適用される
+        assert_eq!(collapse_repeated_chars("--feature"), "--feature");
+        assert_eq!(collapse_repeated_chars("a -- b"), "a -- b");
+    }
+
+    #[test]
+    fn test_normalize_collapses_rustc_location_marker() {
+        // E2E: rustc 出力に頻出する `--> path:line:col` が `-> path:line:col` になる
+        let input = "error[E0308]: mismatched types\n  --> src/main.rs:10:5";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "error[E0308]: mismatched types\n-> src/main.rs:10:5"
+        );
     }
 
     #[test]

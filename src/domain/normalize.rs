@@ -112,7 +112,8 @@ pub fn normalize_lint_output(output: &str) -> String {
         }
         prev_blank = false;
         let collapsed = collapse_whitespace(trimmed);
-        lines.push(collapse_repeated_chars(&collapsed));
+        let collapsed = collapse_repeated_chars(&collapsed);
+        lines.push(collapse_space_separated_decorative(&collapsed));
     }
 
     // 末尾の空行を除去
@@ -213,6 +214,52 @@ fn collapse_repeated_chars(input: &str) -> String {
                     result.push(c);
                 }
             }
+        }
+    }
+    result
+}
+
+/// `→ → → → → → →` や `· · · · · ·` のような「装飾文字＋単一スペース」の
+/// 繰り返しパターンを 1 文字に圧縮する。biome 等が diff 行で
+/// 連続する空白/タブを 1 文字ごとに視覚化したときに、
+/// 同じ文字がスペースを挟んで大量に出現するためトークンが膨らむ。
+///
+/// 対象は `·` (U+00B7) と `→` (U+2192) のみ。
+/// 直前にすでに `collapse_whitespace` が走っている前提で、
+/// 区切りは ASCII の単一スペース 1 個に限定する。
+///
+/// ルール:
+/// - パターン `c( c){3,}` (= c が 4 回以上、間に単一スペース 1 個) を `c` に置き換える
+/// - 圧縮後に末尾がさらに別の文字に続く場合はスペースを 1 個残す
+///   例: `→ → → → → → → Google` → `→ Google`
+fn collapse_space_separated_decorative(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == '→' || c == '·') && i + 2 < chars.len() && chars[i + 1] == ' ' && chars[i + 2] == c
+        {
+            // パターン `c( c)+` を最大まで走査する。
+            // `last_c` は走査中に確認できている最後の `c` の位置を指す。
+            let mut count = 1u32;
+            let mut last_c = i;
+            while last_c + 2 < chars.len() && chars[last_c + 1] == ' ' && chars[last_c + 2] == c {
+                count += 1;
+                last_c += 2;
+            }
+            if count >= 4 {
+                // 圧縮: 最後の `c` の次の位置へジャンプする。
+                // 末尾以外なら直後のスペースはそのまま残るため `→ Google` のような形になる。
+                result.push(c);
+                i = last_c + 1;
+            } else {
+                result.push(c);
+                i += 1;
+            }
+        } else {
+            result.push(c);
+            i += 1;
         }
     }
     result
@@ -1427,5 +1474,232 @@ mod tests {
         assert_eq!(leading_prefix_word("123 foo"), None);
         assert_eq!(leading_prefix_word("--> file.rs"), None);
         assert_eq!(leading_prefix_word(""), None);
+    }
+
+    // === collapse_space_separated_decorative テスト ===
+
+    #[test]
+    fn test_collapse_space_separated_arrow_compresses_long_run() {
+        // 4回以上のスペース区切り `→` パターンが圧縮される
+        assert_eq!(
+            collapse_space_separated_decorative("→ → → → Google"),
+            "→ Google"
+        );
+        assert_eq!(
+            collapse_space_separated_decorative("→ → → → → → → Google"),
+            "→ Google"
+        );
+    }
+
+    #[test]
+    fn test_collapse_space_separated_middot_compresses_long_run() {
+        // `·` も同じく 4 回以上の連続で圧縮
+        assert_eq!(
+            collapse_space_separated_decorative("text · · · · · end"),
+            "text · end"
+        );
+    }
+
+    #[test]
+    fn test_collapse_space_separated_preserves_short_runs() {
+        // 3 個以下はそのまま残る
+        assert_eq!(
+            collapse_space_separated_decorative("→ → → end"),
+            "→ → → end"
+        );
+        assert_eq!(collapse_space_separated_decorative("→ end"), "→ end");
+        assert_eq!(collapse_space_separated_decorative("· · ·"), "· · ·");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_at_end_of_line() {
+        // 圧縮対象が行末で終わる場合
+        assert_eq!(collapse_space_separated_decorative("→ → → → →"), "→");
+        assert_eq!(collapse_space_separated_decorative("a → → → →"), "a →");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_not_decorative_char_unchanged() {
+        // 対象外の文字 (例: `-`) はこの関数では圧縮しない
+        assert_eq!(
+            collapse_space_separated_decorative("- - - - end"),
+            "- - - - end"
+        );
+    }
+
+    #[test]
+    fn test_collapse_space_separated_multiple_spaces_not_collapsed() {
+        // スペースが 2 個以上ある場合は別の関数の責任 (collapse_whitespace 後を想定)
+        // この関数では単一スペースのパターンのみを対象とする
+        let input = "→  →  →  →"; // 2スペース区切り
+        // パターンが一致しないのでそのまま返る
+        assert_eq!(collapse_space_separated_decorative(input), input);
+    }
+
+    #[test]
+    fn test_normalize_collapses_biome_arrow_diff() {
+        // biome の diff 行で `→ → → → → → →` のような可視化が圧縮される
+        let input = "293 │ - → → → → → → → Google";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "293 │ - → Google");
+    }
+
+    #[test]
+    fn test_normalize_collapses_biome_middot_diff() {
+        // biome の diff 行で `·` の可視化が圧縮される
+        let input = "5 │ - → → → → :·\"text-gray-400·dark:text-gray-500\"";
+        let result = normalize_lint_output(input);
+        // → の連続が圧縮される。·は単独・連続2つなので維持。
+        assert!(result.contains("→ :·"));
+        assert!(!result.contains("→ → → → :"));
+    }
+
+    #[test]
+    fn test_collapse_space_separated_handles_empty_input() {
+        assert_eq!(collapse_space_separated_decorative(""), "");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_exactly_four() {
+        // ちょうど 4 個でも圧縮対象 (4 回以上)
+        assert_eq!(collapse_space_separated_decorative("→ → → →"), "→");
+        assert_eq!(collapse_space_separated_decorative("· · · ·"), "·");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_three_preserved() {
+        // 3 個は閾値未満で維持
+        assert_eq!(collapse_space_separated_decorative("→ → →"), "→ → →");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_pattern_inside_text() {
+        // 前後にテキストがあっても圧縮対象の文字パターンが認識される
+        assert_eq!(
+            collapse_space_separated_decorative("text → → → → → more"),
+            "text → more"
+        );
+    }
+
+    #[test]
+    fn test_collapse_space_separated_mixed_decorative() {
+        // 異なる装飾文字が交互に並ぶ場合はそれぞれ独立して扱う
+        let input = "→ → → → · · · · end";
+        let result = collapse_space_separated_decorative(input);
+        assert_eq!(result, "→ · end");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_pattern_followed_by_decorative() {
+        // 圧縮後に直接同じ装飾文字が続かないケース
+        let input = "→ → → → a";
+        assert_eq!(collapse_space_separated_decorative(input), "→ a");
+    }
+
+    #[test]
+    fn test_collapse_space_separated_unicode_safe() {
+        // マルチバイト文字を含む文字列でも UTF-8 境界を壊さない
+        let input = "あ → → → → い";
+        let result = collapse_space_separated_decorative(input);
+        // 「あ → い」の形になり、result も有効な UTF-8
+        assert_eq!(result, "あ → い");
+        assert!(result.is_char_boundary(0));
+        assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn test_collapse_space_separated_no_pattern_passthrough() {
+        // パターンに一致しないテキストはそのまま
+        assert_eq!(
+            collapse_space_separated_decorative("hello world"),
+            "hello world"
+        );
+        // 単一の装飾文字
+        assert_eq!(collapse_space_separated_decorative("→"), "→");
+        assert_eq!(collapse_space_separated_decorative("·"), "·");
+    }
+
+    // === 既存ロジックのエッジケース補強 ===
+
+    #[test]
+    fn test_collapse_repeated_chars_arrow_chain_long_prefix() {
+        // `----->` のようなさらに長いプレフィックスも `->` に圧縮される
+        assert_eq!(collapse_repeated_chars("------>"), "->");
+        assert_eq!(collapse_repeated_chars("text ----> end"), "text -> end");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_only_dot_run_at_end() {
+        // 行末 3 連続 `.` の圧縮 (`text...` → `text.`)
+        assert_eq!(collapse_repeated_chars("text..."), "text.");
+        // 4 連続 `.` も圧縮
+        assert_eq!(collapse_repeated_chars("....more"), ".more");
+    }
+
+    #[test]
+    fn test_normalize_keeps_short_decorative_lines() {
+        // 装飾文字数が閾値未満の行はそのまま出力される
+        let input = "title\n---\n=== sub ===\ntext";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "title\n---\n=== sub ===\ntext");
+    }
+
+    #[test]
+    fn test_normalize_handles_carriage_return_lines() {
+        // CR を含む行も `\n` ベースで処理される (split による分割)
+        let input = "line1\r\nline2\r\nline3";
+        let result = normalize_lint_output(input);
+        // CR は通常文字として残るが、トリミングで除去される (\r は trim 対象)
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+        assert!(result.contains("line3"));
+    }
+
+    #[test]
+    fn test_truncate_output_does_not_split_multibyte() {
+        // マルチバイト文字境界で切り詰めても UTF-8 境界を壊さない
+        let input = "あいうえおかきくけこ"; // 10文字
+        let result = truncate_output(input, 5);
+        // 5 文字以下に切り詰められ、UTF-8 として有効
+        assert!(result.chars().count() <= 5);
+        assert!(result.is_char_boundary(0));
+        assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn test_strip_common_path_prefix_paths_in_quotes() {
+        // 引用符で囲まれた絶対パスでも、前置文字 (`"`、`'`) は path 開始位置として
+        // 認識されないので元の入力どおりに維持される
+        let input = "see \"/home/user/proj/main.rs\" and \"/home/user/proj/lib.rs\"";
+        let result = strip_common_path_prefix(input);
+        // パスは絶対パスとして抽出されないため、共通プレフィックスも除去されない
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_empty_input() {
+        // 空入力でもパニックしない
+        let lines: Vec<String> = vec![];
+        let result = collapse_repeated_prefix_lines(lines);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_single_long_run() {
+        // 同じ単語の長い連続のみ
+        let lines = vec![
+            "Building foo".to_string(),
+            "Building bar".to_string(),
+            "Building baz".to_string(),
+            "Building qux".to_string(),
+            "Building fred".to_string(),
+            "Building waldo".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines);
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result[3],
+            "... (and 3 more lines starting with \"Building\")"
+        );
     }
 }

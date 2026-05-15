@@ -166,6 +166,8 @@ mod tests {
     fn test_contains_rm_command_with_sudo_wrapper() {
         assert!(contains_rm_command("sudo rm -rf /tmp/test"));
         assert!(contains_rm_command("sudo -u root rm -rf /tmp/test"));
+        assert!(contains_rm_command("sudo FOO=bar rm -rf /tmp/test"));
+        assert!(contains_rm_command("sudo -u root FOO=bar rm -rf /tmp/test"));
     }
 
     #[test]

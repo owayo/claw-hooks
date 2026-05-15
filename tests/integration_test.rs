@@ -97,6 +97,21 @@ fn test_block_rm_command() {
 }
 
 #[test]
+fn test_block_sudo_rm_with_env_assignment() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo FOO=bar rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "sudo の環境変数代入を挟んだ rm もブロックされるべき"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "出力は deny を示すべき"
+    );
+}
+
+#[test]
 fn test_block_rmdir_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rmdir old_folder"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

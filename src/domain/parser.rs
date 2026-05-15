@@ -688,6 +688,13 @@ impl ShellParser {
                 continue;
             }
 
+            // sudo は `sudo VAR=value command` 形式でコマンド直前の環境変数代入を受け付ける。
+            // ここを実行対象コマンドとして扱うと、後続の rm/kill/dd を見落とす。
+            if wrapper == "sudo" && Self::is_env_assignment_token(arg) {
+                i += 1;
+                continue;
+            }
+
             if arg.starts_with('-') {
                 if Self::wrapper_flag_takes_arg(wrapper, arg) {
                     i += 2;
@@ -2233,6 +2240,19 @@ mod tests {
         assert_eq!(
             ShellParser::find_wrapped_command_index("sudo", &args),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_sudo_env_assignment_rm() {
+        // sudo VAR=value rm -rf / → sudo が受け取る環境変数代入をスキップ
+        let args: Vec<String> = vec!["VAR=value", "rm", "-rf", "/"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("sudo", &args),
+            Some(1)
         );
     }
 

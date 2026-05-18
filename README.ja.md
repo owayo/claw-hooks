@@ -33,7 +33,7 @@
 - ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`sudo VAR=value rm`、`timeout --signal`、`command rm`、bash -c、`eval`、`find -exec`、パイプ内のコマンドを検出）
+- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（sudo、`sudo -n`、`sudo --user`、`sudo VAR=value rm`、`timeout --signal`、`command rm`、bash -c、`eval`、`find -exec`、パイプ内のコマンド、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドを検出）
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
 - 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力を対応AIエージェント（Claude Code、Gemini CLI、Codex CLI）に送信
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
@@ -193,7 +193,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec` のコマンドも検出
+- ✅ `sudo rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
 - ✅ ラッパー・サブシェル対応（sudo、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）
 - ✅ 単一バイナリ、Python/jq依存なし
 

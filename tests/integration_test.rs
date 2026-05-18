@@ -97,6 +97,70 @@ fn test_block_rm_command() {
 }
 
 #[test]
+fn test_block_backslash_escaped_rm_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"r\\m -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "シェルの quote removal 後に rm になるコマンドはブロックされるべき"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "出力は deny を示すべき: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_quoted_concatenated_rm_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"r''m -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "引用符連結により rm になるコマンドはブロックされるべき"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "出力は deny を示すべき: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_ansi_c_quoted_rm_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"$'r\\x6d' -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "Bash の ANSI-C quoting で rm になるコマンドはブロックされるべき"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "出力は deny を示すべき: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_block_escaped_sudo_rm_command() {
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"s\\udo rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "quote removal 後に sudo になるラッパー経由の rm もブロックされるべき"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "出力は deny を示すべき: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_block_sudo_rm_with_env_assignment() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo FOO=bar rm -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

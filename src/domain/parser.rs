@@ -365,12 +365,11 @@ impl ShellParser {
                 | "concatenation"
                     if found_command_name =>
                 {
+                    let raw = &source[child.byte_range()];
                     let text = if strip_quotes {
-                        source[child.byte_range()]
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string()
+                        Self::normalize_shell_word(raw)
                     } else {
-                        source[child.byte_range()].to_string()
+                        raw.to_string()
                     };
                     args.push(text);
                 }
@@ -501,28 +500,13 @@ impl ShellParser {
         for child in node.children(&mut node.walk()) {
             match child.kind() {
                 "command_name" => {
-                    // command_name 内の実文字列を取得する。
-                    for inner in child.children(&mut child.walk()) {
-                        if inner.kind() == "word" {
-                            return Some(
-                                source[inner.byte_range()]
-                                    .trim_matches(|c| c == '"' || c == '\'')
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    // フォールバック: command_name 自体を使う。
-                    return Some(
-                        source[child.byte_range()]
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string(),
-                    );
+                    // command_name 全体を正規化して、`r\m` や `r''m` のような
+                    // シェルの quote removal 後に実行されるコマンド名で判定する。
+                    return Some(Self::normalize_shell_word(&source[child.byte_range()]));
                 }
                 "word" => {
                     // simple_command の先頭 word がコマンド名である場合に拾う。
-                    let text = source[child.byte_range()]
-                        .trim_matches(|c| c == '"' || c == '\'')
-                        .to_string();
+                    let text = Self::normalize_shell_word(&source[child.byte_range()]);
                     if !text.starts_with('-') && !text.contains('=') {
                         return Some(text);
                     }
@@ -531,6 +515,145 @@ impl ShellParser {
             }
         }
         None
+    }
+
+    /// シェルの quote removal に近い形で1トークンを正規化する。
+    ///
+    /// tree-sitter-bash は `r\m` や `r''m` の raw 表記を保持するため、
+    /// 危険コマンド判定ではシェルが実際に実行するコマンド名へ寄せる必要がある。
+    fn normalize_shell_word(word: &str) -> String {
+        let mut result = String::with_capacity(word.len());
+        let mut chars = word.chars().peekable();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+
+        while let Some(c) = chars.next() {
+            match c {
+                '$' if !in_single_quote && !in_double_quote => {
+                    if chars.peek() == Some(&'\'') {
+                        // Bash の ANSI-C quoting: $'r\x6d' は quote removal 後に `rm`。
+                        let _ = chars.next();
+                        result.push_str(&Self::read_ansi_c_quoted(&mut chars));
+                    } else if chars.peek() == Some(&'"') {
+                        // Bash の $"..." はロケール翻訳文字列。未翻訳時は通常の二重引用と同じ。
+                        // `$` 自体は quote removal 後のコマンド名に残らないため捨てる。
+                    } else {
+                        result.push(c);
+                    }
+                }
+                '\\' if !in_single_quote => {
+                    if let Some(next) = chars.next() {
+                        if in_double_quote && !matches!(next, '$' | '`' | '"' | '\\' | '\n' | '\r')
+                        {
+                            result.push('\\');
+                        }
+                        if next != '\n' && next != '\r' {
+                            result.push(next);
+                        }
+                    } else {
+                        result.push(c);
+                    }
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                _ => result.push(c),
+            }
+        }
+
+        result
+    }
+
+    /// Bash の ANSI-C quoted string (`$'...'`) をコマンド名比較用に展開する。
+    fn read_ansi_c_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+        let mut result = String::new();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => break,
+                '\\' => {
+                    if let Some(decoded) = Self::read_ansi_c_escape(chars) {
+                        result.push(decoded);
+                    }
+                }
+                _ => result.push(c),
+            }
+        }
+
+        result
+    }
+
+    /// ANSI-C quoted string 内のバックスラッシュエスケープを1文字読む。
+    fn read_ansi_c_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+        let escaped = chars.next()?;
+        match escaped {
+            'a' => Some('\x07'),
+            'b' => Some('\x08'),
+            'e' | 'E' => Some('\x1b'),
+            'f' => Some('\x0c'),
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            'v' => Some('\x0b'),
+            '\\' => Some('\\'),
+            '\'' => Some('\''),
+            '"' => Some('"'),
+            '\n' | '\r' => None,
+            'x' => Self::read_radix_escape(chars, 2, 16),
+            'u' => Self::read_radix_escape(chars, 4, 16),
+            'U' => Self::read_radix_escape(chars, 8, 16),
+            '0'..='7' => {
+                let mut digits = String::from(escaped);
+                digits.push_str(&Self::take_while_limited(chars, 2, |c| {
+                    matches!(c, '0'..='7')
+                }));
+                u32::from_str_radix(&digits, 8)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ => Some(escaped),
+        }
+    }
+
+    /// 最大桁数付きの基数エスケープを読む。
+    fn read_radix_escape(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        max_digits: usize,
+        radix: u32,
+    ) -> Option<char> {
+        let digits = Self::take_while_limited(chars, max_digits, |c| c.is_digit(radix));
+        if digits.is_empty() {
+            return None;
+        }
+        u32::from_str_radix(&digits, radix)
+            .ok()
+            .and_then(char::from_u32)
+    }
+
+    /// 条件に合う文字を最大 `limit` 文字まで取り出す。
+    fn take_while_limited<F>(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        limit: usize,
+        mut predicate: F,
+    ) -> String
+    where
+        F: FnMut(char) -> bool,
+    {
+        let mut result = String::new();
+        while result.len() < limit {
+            let Some(&next) = chars.peek() else {
+                break;
+            };
+            if !predicate(next) {
+                break;
+            }
+            result.push(next);
+            let _ = chars.next();
+        }
+        result
     }
 
     /// ラッパー引数を処理して実行対象コマンドを見つける
@@ -1240,45 +1363,7 @@ impl ShellParser {
 
     /// コマンドと引数を抽出する（文字列ベースのフォールバック）。
     fn extract_command_with_args_fallback(&self, command: &str) -> (String, Vec<String>) {
-        let mut parts = Vec::new();
-        let mut current = String::new();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escape_next = false;
-
-        for c in command.trim().chars() {
-            if escape_next {
-                current.push(c);
-                escape_next = false;
-                continue;
-            }
-
-            match c {
-                '\\' if !in_single_quote => {
-                    escape_next = true;
-                }
-                '\'' if !in_double_quote => {
-                    in_single_quote = !in_single_quote;
-                }
-                '"' if !in_single_quote => {
-                    in_double_quote = !in_double_quote;
-                }
-                ' ' | '\t' if !in_single_quote && !in_double_quote => {
-                    if !current.is_empty() {
-                        parts.push(current.clone());
-                        current.clear();
-                    }
-                }
-                _ => {
-                    current.push(c);
-                }
-            }
-        }
-
-        if !current.is_empty() {
-            parts.push(current);
-        }
-
+        let mut parts = parse_shell_tokens(command);
         if parts.is_empty() {
             return (String::new(), Vec::new());
         }
@@ -1317,6 +1402,7 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
 
     for c in command.trim().chars() {
         if escape_next {
+            // 分割判定ではエスケープを考慮しつつ、quote removal は後段に任せる。
             current.push(c);
             escape_next = false;
             continue;
@@ -1324,17 +1410,20 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
 
         match c {
             '\\' if !in_single_quote => {
+                current.push(c);
                 escape_next = true;
             }
             '\'' if !in_double_quote => {
+                current.push(c);
                 in_single_quote = !in_single_quote;
             }
             '"' if !in_single_quote => {
+                current.push(c);
                 in_double_quote = !in_double_quote;
             }
             ' ' | '\t' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
                 if !current.is_empty() {
-                    parts.push(current.clone());
+                    parts.push(ShellParser::normalize_shell_word(&current));
                     current.clear();
                 }
             }
@@ -1345,7 +1434,7 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
     }
 
     if !current.is_empty() {
-        parts.push(current);
+        parts.push(ShellParser::normalize_shell_word(&current));
     }
 
     parts
@@ -1422,6 +1511,55 @@ mod tests {
         assert!(commands.contains(&"echo".to_string()));
         assert!(commands.contains(&"ls".to_string()));
         assert!(!commands.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_extract_backslash_escaped_command_name() {
+        // シェルは `r\m` を quote removal 後に `rm` として実行する。
+        // raw 表記のままだと危険コマンドブロックを回避できてしまう。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r"r\m -rf /tmp/dummy");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "escaped command name should normalize to rm; got {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_quoted_concatenated_command_name() {
+        // シェルでは `r''m` も quote removal 後に `rm` として実行される。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("r''m -rf /tmp/dummy");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "quoted command name should normalize to rm; got {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_ansi_c_quoted_command_name() {
+        // Bash の $'...' 形式も quote removal 後のコマンド名で判定する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r"$'r\x6d' -rf /tmp/dummy");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "ANSI-C quoted command name should normalize to rm; got {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_locale_quoted_command_name() {
+        // Bash の $"..." は未翻訳なら通常の二重引用と同じコマンド名になる。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r#"$"rm" -rf /tmp/dummy"#);
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "locale quoted command name should normalize to rm; got {:?}",
+            commands
+        );
     }
 
     #[test]
@@ -2501,6 +2639,18 @@ mod tests {
         let commands = parser.extract_commands("sudo rm -rf /");
         assert!(commands.contains(&"sudo".to_string()));
         assert!(commands.contains(&"rm".to_string()));
+    }
+
+    #[test]
+    fn test_process_wrapper_escaped_sudo_rm() {
+        // `s\udo` は quote removal 後に `sudo` なので、内側の rm も抽出する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(r"s\udo rm -rf /");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "escaped sudo wrapper should expose wrapped rm; got {:?}",
+            commands
+        );
     }
 
     #[test]

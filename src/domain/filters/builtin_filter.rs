@@ -229,4 +229,47 @@ mod tests {
         let input = make_bash_input("echo hello && testcmd --flag");
         assert!(filter.applies_to(&input));
     }
+
+    #[test]
+    fn test_permission_request_event_is_applied() {
+        // BeforeCommand と同じく PermissionRequest でも該当する Bash コマンドはブロック対象
+        let filter = make_test_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::PermissionRequest,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "testcmd --flag".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_permission_request_safe_command_allowed() {
+        // PermissionRequest でも対象外コマンドは applies_to=false
+        let filter = make_test_filter(true, None);
+        let input = HookInput {
+            event: HookEvent::PermissionRequest,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "safe_command".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_extra_check_returns_false_does_not_block() {
+        // コマンド名が一致せず extra_check も false を返す場合はブロックしない
+        fn never_block(_cmd: &str) -> bool {
+            false
+        }
+        let filter = make_test_filter(true, Some(never_block));
+        let input = make_bash_input("safe_command --no-match");
+        assert!(!filter.applies_to(&input));
+    }
 }

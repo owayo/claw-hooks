@@ -87,6 +87,9 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
 /// - 各行の先頭・末尾の空白を除去
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
+/// - biome の重複行番号 `X X │ text` (X 同一) を `X │ text` に圧縮
+///   - unchanged context line では old/new が同一整数になるため redundant
+///   - old != new のときは情報として保持する
 /// - 連続する装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`）を1文字に圧縮
 ///   - `^` は ruff / clippy / rust 等の lint 出力で範囲を示すマーカーとして使われる
 ///   - `·` (U+00B7) は biome 等が空白を視覚化するため diff 行に多用する
@@ -112,6 +115,7 @@ pub fn normalize_lint_output(output: &str) -> String {
         }
         prev_blank = false;
         let collapsed = collapse_whitespace(trimmed);
+        let collapsed = collapse_duplicate_diff_context_line_number(&collapsed);
         let collapsed = collapse_repeated_chars(&collapsed);
         lines.push(collapse_space_separated_decorative(&collapsed));
     }
@@ -217,6 +221,43 @@ fn collapse_repeated_chars(input: &str) -> String {
         }
     }
     result
+}
+
+/// Biome の diff 行に現れる重複行番号 `X X │ text` (X が同一の整数) を
+/// `X │ text` に圧縮する。
+///
+/// Biome の diff フォーマット:
+/// - `X Y │ text` (X==Y)          = unchanged context line (両側で同じ行)
+/// - `X │ - text`                  = 削除行
+/// - `Y │ + text`                  = 追加行
+///
+/// unchanged context line では old/new が必ず同じ整数になるため、片方は
+/// 完全に冗長。`-`/`+` プレフィックスの有無で context と diff は判別可能なため、
+/// 同一整数のときに限定して圧縮する。
+/// old != new (差分前後で context 行番号がズレる稀なケース) では情報として
+/// 保持する必要があるため圧縮しない。
+fn collapse_duplicate_diff_context_line_number(line: &str) -> String {
+    let Some((line_numbers, text)) = line.split_once(" │ ") else {
+        return line.to_string();
+    };
+
+    let mut parts = line_numbers.split(' ');
+    let Some(old_line) = parts.next() else {
+        return line.to_string();
+    };
+    let Some(new_line) = parts.next() else {
+        return line.to_string();
+    };
+
+    if parts.next().is_none()
+        && old_line == new_line
+        && !old_line.is_empty()
+        && old_line.bytes().all(|b| b.is_ascii_digit())
+    {
+        return format!("{old_line} │ {text}");
+    }
+
+    line.to_string()
 }
 
 /// `→ → → → → → →` や `· · · · · ·` のような「装飾文字＋単一スペース」の
@@ -1682,6 +1723,102 @@ mod tests {
         let lines: Vec<String> = vec![];
         let result = collapse_repeated_prefix_lines(lines);
         assert!(result.is_empty());
+    }
+
+    // === collapse_duplicate_diff_context_line_number: biome の重複行番号圧縮 ===
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_same_numbers() {
+        // X == Y のとき X に圧縮される
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("129 129 │ data"),
+            "129 │ data"
+        );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("1 1 │ {"),
+            "1 │ {"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_different_numbers_preserved() {
+        // X != Y のときは情報として保持し圧縮しない
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("10 9 │ data"),
+            "10 9 │ data"
+        );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("100 200 │ context"),
+            "100 200 │ context"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_single_number_preserved() {
+        // 行番号が片方のみ (削除/追加行) はそのまま保持
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("131 │ - text"),
+            "131 │ - text"
+        );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("132 │ + text"),
+            "132 │ + text"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_no_pipe_separator() {
+        // `│` がない行はそのまま保持
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("129 129 data"),
+            "129 129 data"
+        );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("plain text"),
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_non_digit_preserved() {
+        // 数値以外のトークン (例: `a a │`) は誤検知防止のため圧縮しない
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("a a │ text"),
+            "a a │ text"
+        );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("- - │ text"),
+            "- - │ text"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_three_tokens_preserved() {
+        // 数値が3つ以上ある場合 (想定外フォーマット) は圧縮しない
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("1 1 1 │ text"),
+            "1 1 1 │ text"
+        );
+    }
+
+    #[test]
+    fn test_collapse_duplicate_diff_context_line_number_empty_text_preserved() {
+        // 行末が `│ ` で終わるケース (text が空) も圧縮対象
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("42 42 │ "),
+            "42 │ "
+        );
+    }
+
+    #[test]
+    fn test_normalize_collapses_biome_diff_context_lines_e2e() {
+        // E2E: biome 形式の diff で context line のみ重複行番号が圧縮される
+        let input = "131 │ - → log(\n132 │ + → log(\n129 129 │ data\n130 130 │ });";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "131 │ - → log(\n132 │ + → log(\n129 │ data\n130 │ });"
+        );
     }
 
     #[test]

@@ -510,6 +510,7 @@ dd_block_message = "🚫 dd command blocked for safety."
 # デバッグログ
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # デフォルト: config.tomlと同じディレクトリ
+# デバッグログにはフックイベントの概要のみを記録し、tool_input/content の生データは保存しません
 
 # フックコマンドタイムアウト（秒）（デフォルト: 60、最大: 86400）
 # このタイムアウトを超えたコマンドはkill（SIGKILL）されます

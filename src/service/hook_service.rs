@@ -10,6 +10,7 @@ use crate::cli::Format;
 use crate::config::Config;
 use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
+use crate::service::log_sanitizer::summarize_hook_input;
 
 /// フックイベント処理サービス。
 pub struct HookService {
@@ -64,7 +65,7 @@ impl HookService {
             process::exit(self.adapter.error_exit_code());
         }
 
-        debug!("Received input: {}", input);
+        debug!("Received input: {}", summarize_hook_input(&input));
 
         // フォーマットアダプターで入力をパース
         let hook_input: HookInput = match self.adapter.parse_input(&input) {

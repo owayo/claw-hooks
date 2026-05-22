@@ -1,0 +1,74 @@
+//! フック入力をログ用に安全な概要へ変換する補助処理。
+
+use serde_json::Value;
+
+/// 生のフック入力 JSON から、機密になり得る本文を含まない概要を作る。
+///
+/// `tool_input.command` や `tool_input.content`、編集前後の全文はログへ残さない。
+/// デバッグログは原因調査に必要なイベント種別と入力サイズだけを記録する。
+pub(crate) fn summarize_hook_input(input: &str) -> String {
+    let bytes = input.len();
+    let Ok(raw) = serde_json::from_str::<Value>(input) else {
+        return format!("invalid_json bytes={bytes}");
+    };
+
+    let event = raw
+        .get("hook_event_name")
+        .or_else(|| raw.get("event"))
+        .or_else(|| raw.get("agent_action_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+
+    let tool = raw
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            raw.get("tool_info")
+                .and_then(|tool_info| tool_info.get("tool_name"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("-");
+
+    let session_id = raw.get("session_id").and_then(Value::as_str).unwrap_or("-");
+
+    format!("event={event} tool={tool} session_id={session_id} bytes={bytes}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_hook_input_does_not_include_sensitive_tool_input() {
+        let input = r#"{
+            "session_id": "session-1",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {
+                "command": "echo super-secret-token",
+                "content": "API_KEY=super-secret-token",
+                "old_string": "old secret",
+                "new_string": "new secret"
+            }
+        }"#;
+
+        let summary = summarize_hook_input(input);
+
+        assert!(summary.contains("event=PostToolUse"));
+        assert!(summary.contains("tool=Write"));
+        assert!(summary.contains("session_id=session-1"));
+        assert!(summary.contains("bytes="));
+        assert!(!summary.contains("super-secret-token"));
+        assert!(!summary.contains("API_KEY"));
+        assert!(!summary.contains("old secret"));
+        assert!(!summary.contains("new secret"));
+    }
+
+    #[test]
+    fn summarize_hook_input_handles_invalid_json_without_echoing_input() {
+        let summary = summarize_hook_input("not json with secret");
+
+        assert_eq!(summary, "invalid_json bytes=20");
+        assert!(!summary.contains("secret"));
+    }
+}

@@ -12,6 +12,7 @@ use tracing::debug;
 
 use crate::cli::Format;
 use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output, truncate_output};
+use crate::service::log_sanitizer::summarize_hook_input;
 
 /// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
@@ -248,7 +249,7 @@ impl FormatAdapter {
     // === Claude Code フォーマット ===
 
     fn parse_claude_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
@@ -394,7 +395,7 @@ impl FormatAdapter {
     // === Cursor フォーマット ===
 
     fn parse_cursor_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 
         // Cursor は全フックに hook_event_name フィールドを送信するため、
         // これを使ってイベントを安全に識別する。
@@ -637,7 +638,7 @@ impl FormatAdapter {
     // === Windsurf フォーマット ===
 
     fn parse_windsurf_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
@@ -3661,7 +3662,7 @@ impl FormatAdapter {
     // === Gemini CLI フォーマット ===
 
     fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
@@ -3797,12 +3798,12 @@ impl FormatAdapter {
     // 公式ドキュメント: https://developers.openai.com/codex/hooks
 
     fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
-        debug!(raw_input = %input, "{} raw input", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Codex input: {}", e))?;
 
-        debug!(parsed = %raw, "{} parsed JSON", self.log_prefix());
+        debug!(input = %summarize_hook_input(input), "{} parsed JSON", self.log_prefix());
 
         // イベント名は必須。互換性のため "event" エイリアスも受け付ける。
         let raw_event = raw

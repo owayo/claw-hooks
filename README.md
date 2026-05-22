@@ -510,6 +510,7 @@ dd_block_message = "🚫 dd command blocked for safety."
 # Debug logging
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
+# Debug logs record hook event summaries only. Raw tool input/content is not written.
 
 # Hook command timeout in seconds (default: 60, max: 86400)
 # Commands exceeding this timeout will be killed (SIGKILL)

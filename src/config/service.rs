@@ -205,8 +205,9 @@ debug = false
 # args = ["install", "uninstall"]
 # message = "Use `uv pip` instead"
 
-# Timeout in seconds for hook command execution (default: 60)
-# Commands exceeding this timeout will be killed (SIGKILL)
+# Timeout in seconds for reported stop hooks and extension hook commands (default: 60)
+# Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
+# report=false stop hooks are started detached and are not waited on.
 # hook_timeout = 60
 
 # Maximum length of output messages in characters (default: 1000)
@@ -230,6 +231,7 @@ debug = false
 # Commands in the same stage run in parallel; stages run sequentially (1→5).
 # stage: 1-5 (default: 5) — lower stages run first
 # report: true/false (default: true if condition is set, false otherwise)
+# report=false starts commands detached; stdout/stderr are discarded.
 # [[stop_hooks]]
 # commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 

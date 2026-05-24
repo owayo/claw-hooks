@@ -513,7 +513,9 @@ debug = false
 # Debug logs record hook event summaries only. Raw tool input/content is not written.
 
 # Hook command timeout in seconds (default: 60, max: 86400)
-# Commands exceeding this timeout will be killed (SIGKILL)
+# Applies to reported stop hooks and extension hook commands.
+# Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
+# report=false stop hooks are started detached and are not waited on.
 # hook_timeout = 60
 
 # Output max length in characters (default: 1000, 0 = unlimited)
@@ -562,6 +564,8 @@ message = "Ask the user to run this command manually"
 
 # Stop hooks (triggered when agent loop ends)
 # All commands in the array are executed in parallel.
+# Hooks without a condition default to report=false and are started detached;
+# stdout/stderr are discarded, so redirect output yourself if needed.
 # [[stop_hooks]]
 # commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 
@@ -687,7 +691,7 @@ All three approaches can be combined: use the global config for shared rules, `.
 ### Conditional Stop Hooks (Project-wide Lint)
 
 Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
-**Timeout handling:** `hook_timeout` accepts values up to `86400` seconds. When a command exceeds `hook_timeout`, claw-hooks kills the process (SIGKILL) and logs a timeout notice, but does not count it as a blocking failure. This prevents session shutdown from stalling on slow commands. Normal command failures — including those that explicitly exit with code `124` — still block as usual.
+**Timeout handling:** `hook_timeout` accepts values up to `86400` seconds. For reported stop hooks (`report = true`), when a command exceeds `hook_timeout`, claw-hooks kills the process tree (SIGKILL) and returns the timeout as a block reason. Normal command failures — including those that explicitly exit with code `124` — also block as usual. `report = false` stop hooks are started detached with stdin/stdout/stderr set to null, so claw-hooks does not wait for them or enforce `hook_timeout`; wrap the command itself with a timeout tool if needed.
 
 Windsurf is the main exception here: its `post_cascade_response` hook is an asynchronous post-hook, so stop hooks still run but failures are treated as best-effort and are not surfaced back to the agent as a block.
 
@@ -733,7 +737,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **Stage execution order:** Stages are executed sequentially from 1 to 5. All hooks in the same stage run in parallel. A stage completes before the next one begins.
 
-**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), failures are logged but do not block — fire-and-forget style. On Windsurf stop hooks, failures are always best-effort because the underlying hook is asynchronous.
+**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf stop hooks, failures are always best-effort because the underlying hook is asynchronous.
 
 ```toml
 # More examples:

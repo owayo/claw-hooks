@@ -513,7 +513,9 @@ debug = false
 # デバッグログにはフックイベントの概要のみを記録し、tool_input/content の生データは保存しません
 
 # フックコマンドタイムアウト（秒）（デフォルト: 60、最大: 86400）
-# このタイムアウトを超えたコマンドはkill（SIGKILL）されます
+# report=true のStopフックと拡張子フックコマンドに適用されます。
+# このタイムアウトを超えたコマンドはkill（SIGKILL）され、失敗として報告されます。
+# report=false のStopフックはデタッチ起動され、完了を待ちません。
 # hook_timeout = 60
 
 # 出力最大長（文字数）（デフォルト: 1000、0 = 無制限）
@@ -562,6 +564,8 @@ message = "ユーザーに直接実行を依頼してください"
 
 # Stopフック（エージェントループ終了時にトリガー）
 # 配列内のすべてのコマンドは並列実行されます。
+# conditionなしのフックはデフォルトで report=false となりデタッチ起動されます。
+# stdout/stderr は破棄されるため、必要ならコマンド側でリダイレクトしてください。
 # [[stop_hooks]]
 # commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS通知音
 
@@ -687,7 +691,7 @@ condition = { file_exists = "tsconfig.json" }
 ### 条件付きStopフック（プロジェクト全体Lint）
 
 `condition`フィールドを持つStopフックは、プロジェクトの構成ファイルに応じてlint/typecheckコマンドを実行します。`commands`配列内のすべてのコマンドは**並列実行**されます。失敗したコマンドの出力はすべて収集され、AIエージェントにブロック理由としてまとめて返されます。
-**タイムアウトの扱い:** `hook_timeout` は最大 `86400` 秒まで指定できます。`hook_timeout` を超えたコマンドは claw-hooks がプロセスを強制終了（SIGKILL）し、タイムアウト通知をログに記録しますが、ブロック理由には含めません。これはセッション終了がタイムアウトで止まることを防ぐためです。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）は引き続きブロック対象です。
+**タイムアウトの扱い:** `hook_timeout` は最大 `86400` 秒まで指定できます。報告対象のStopフック（`report = true`）では、`hook_timeout` を超えたコマンドを claw-hooks がプロセスツリーごと強制終了（SIGKILL）し、タイムアウトをブロック理由として返します。通常のコマンド失敗（終了コード `124` を自ら返す場合を含む）も引き続きブロック対象です。`report = false` のStopフックは stdin/stdout/stderr を null にしてデタッチ起動されるため、claw-hooks は完了待ちも `hook_timeout` の強制も行いません。必要ならコマンド自体を timeout ツールで包んでください。
 
 ただし Windsurf は例外で、`post_cascade_response` が非同期の事後フックであるため、Stopフック自体は実行されても失敗はベストエフォート扱いとなり、AI エージェントへのブロックとしては返されません。
 
@@ -733,7 +737,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **ステージの実行順序:** ステージは1から5の順に逐次実行されます。同じステージ内のすべてのフックは並列実行されます。あるステージの全フックが完了してから次のステージに進みます。
 
-**レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、失敗はログに記録されますがブロックしません（fire-and-forget）。Windsurf の Stop フックだけは基盤側が非同期のため、常にベストエフォートです。
+**レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、コマンドは fire-and-forget 方式で起動され、Hook応答をブロックしません。デタッチコマンドは stdin/stdout/stderr が null になるため、spawn 失敗はログに残りますが、コマンド出力と終了ステータスは収集されません。Windsurf の Stop フックだけは基盤側が非同期のため、常にベストエフォートです。
 
 ```toml
 # その他の例:

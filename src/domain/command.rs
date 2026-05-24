@@ -232,6 +232,38 @@ pub fn spawn_piped_with_env(
         .map_err(|e| format!("Failed to execute '{}': {}", program, e))
 }
 
+/// stdout/stderr/stdin を切り離してコマンドを起動する。
+///
+/// `report=false` の Stop フック用。親プロセスは子を待たないため、Hook 応答を
+/// コマンド完了まで遅延させない。出力は破棄されるので、必要なログはコマンド側で
+/// 明示的にファイル等へ書き出すこと。
+pub fn spawn_detached_with_env(
+    program: &str,
+    args: &[String],
+    envs: &[(&str, &str)],
+) -> Result<u32, String> {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.arg("/c").arg(program).args(args);
+        c
+    } else {
+        let mut c = Command::new(program);
+        c.args(args);
+        c
+    };
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for &(key, value) in envs {
+        cmd.env(key, value);
+    }
+    #[cfg(unix)]
+    configure_unix_process_group(&mut cmd);
+    cmd.spawn()
+        .map(|child| child.id())
+        .map_err(|e| format!("Failed to execute '{}': {}", program, e))
+}
+
 /// 任意の `Command` ビルダーに対して、Unix では新しいプロセスグループに配置する設定を施す。
 /// `Command::new(...)` を直接組み立てるパス（例: extension hook）から再利用できる。
 ///
@@ -253,6 +285,17 @@ mod tests {
     /// テストヘルパー：追加の環境変数なしでspawnする。
     fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child, String> {
         spawn_piped_with_env(program, args, &[])
+    }
+
+    fn wait_for_path(path: &std::path::Path, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        path.exists()
     }
 
     // === spawn_piped テスト ===
@@ -487,6 +530,59 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("no-env"));
+    }
+
+    #[test]
+    fn test_spawn_detached_with_env_returns_without_waiting() {
+        let marker = std::env::temp_dir().join(format!(
+            "claw-hooks-detached-command-{}",
+            std::process::id()
+        ));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        let start = Instant::now();
+        let pid = spawn_detached_with_env(
+            "sh",
+            &[
+                "-c".to_string(),
+                format!("sleep 1; echo detached > '{}'", marker_path),
+            ],
+            &[],
+        )
+        .unwrap();
+
+        assert!(pid > 0);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "デタッチ起動は子プロセス完了を待たないべき"
+        );
+        assert!(!marker.exists());
+        assert!(wait_for_path(&marker, Duration::from_secs(3)));
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn test_spawn_detached_with_env_passes_env_vars() {
+        let marker =
+            std::env::temp_dir().join(format!("claw-hooks-detached-env-{}", std::process::id()));
+        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let _ = std::fs::remove_file(&marker);
+
+        spawn_detached_with_env(
+            "sh",
+            &[
+                "-c".to_string(),
+                format!("printf %s \"$DETACHED_VAR\" > '{}'", marker_path),
+            ],
+            &[("DETACHED_VAR", "detached-env-ok")],
+        )
+        .unwrap();
+
+        assert!(wait_for_path(&marker, Duration::from_secs(3)));
+        let content = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(content, "detached-env-ok");
+        let _ = std::fs::remove_file(marker);
     }
 
     // === run_with_timeout_tracked テスト ===

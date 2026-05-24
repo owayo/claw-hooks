@@ -1,32 +1,15 @@
 //! Stop イベントフックフィルターの実装。
 
-use std::cell::RefCell;
 use std::process::Output;
-use std::thread::JoinHandle;
 
 use tracing::{debug, info, warn};
 
 use super::Filter;
 use crate::config::StopHook;
-use crate::domain::command::{TimedOutput, run_with_timeout_tracked, spawn_piped_with_env};
+use crate::domain::command::{
+    TimedOutput, run_with_timeout_tracked, spawn_detached_with_env, spawn_piped_with_env,
+};
 use crate::domain::{Decision, HookEvent, HookInput};
-
-thread_local! {
-    /// fire-and-forget スレッドのハンドルを一時保存する。
-    /// Decision 返却後、プロセス終了前に join してログ出力を完了させる。
-    static PENDING_HANDLES: RefCell<Vec<JoinHandle<()>>> = const { RefCell::new(Vec::new()) };
-}
-
-/// fire-and-forget スレッドのハンドルを取り出して join する。
-/// Decision を stdout に出力した後、process::exit の前に呼び出す。
-pub fn drain_pending_handles() {
-    PENDING_HANDLES.with(|cell| {
-        let handles = cell.borrow_mut().drain(..).collect::<Vec<_>>();
-        for handle in handles {
-            let _ = handle.join();
-        }
-    });
-}
 
 /// プロセス間の再帰的な Stop フック実行を防止する環境変数。
 /// claw-hooks が Stop フックを実行する際、子プロセスにこの環境変数を設定する。
@@ -103,9 +86,9 @@ impl StopHookFilter {
     }
 
     /// fire-and-forget でコマンドを起動する（report=false 用）。
-    /// stdout/stderr はパイプ接続され、バックグラウンドスレッドでログに記録される。
-    /// 決定には影響せず、スレッドは完全にデタッチされる。
-    fn execute_command_detached(command: &str, timeout_secs: u64, agent_message: Option<&str>) {
+    /// stdout/stderr は破棄し、Hook 本体は子プロセスの完了を待たない。
+    /// 決定にも Hook 応答時間にも影響させないための実行パス。
+    fn execute_command_detached(command: &str, agent_message: Option<&str>) {
         let parts = crate::domain::parse_shell_tokens(command);
         if parts.is_empty() {
             warn!("Empty command for detached execution");
@@ -125,31 +108,11 @@ impl StopHookFilter {
             envs.push((Self::AGENT_MESSAGE_ENV, msg));
         }
 
-        match spawn_piped_with_env(program, args, &envs) {
-            Ok(child) => {
-                let command_owned = command.to_string();
-                let start = std::time::Instant::now();
-                let handle = std::thread::spawn(move || {
-                    match run_with_timeout_tracked(child, timeout_secs, &command_owned) {
-                        Ok(result) => {
-                            let elapsed = start.elapsed();
-                            info!(
-                                "⏰️ Stop hook [{}] completed in {:.2}s",
-                                command_owned,
-                                elapsed.as_secs_f64()
-                            );
-                            Self::log_output(&command_owned, &result.output);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "❌ Fire-and-forget stop hook '{}' failed: {}",
-                                command_owned, e
-                            );
-                        }
-                    }
-                });
-                PENDING_HANDLES.with(|cell| cell.borrow_mut().push(handle));
-            }
+        match spawn_detached_with_env(program, args, &envs) {
+            Ok(pid) => info!(
+                "🚀 Detached stop hook [{}] started with pid={}",
+                command, pid
+            ),
             Err(e) => {
                 warn!(
                     "❌ Failed to spawn fire-and-forget stop hook '{}': {}",
@@ -258,7 +221,7 @@ impl StopHookFilter {
 
         for qc in commands {
             if !qc.report {
-                Self::execute_command_detached(&qc.command, timeout_secs, agent_message);
+                Self::execute_command_detached(&qc.command, agent_message);
                 continue;
             }
 
@@ -569,6 +532,17 @@ mod tests {
             }),
             session_id: None,
         }
+    }
+
+    fn wait_for_path(path: &std::path::Path, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        path.exists()
     }
 
     #[test]
@@ -1442,9 +1416,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fire_and_forget_background_thread_completes() {
-        // fire-and-forget (report=false) でバックグラウンドスレッドが実際に完了し、
-        // 出力をキャプチャしていることをマーカーファイルで間接的に検証する。
+    fn test_fire_and_forget_detached_process_continues_after_decision() {
+        // report=false は Hook 応答を待たせず、子プロセスだけが後続で完了する。
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-ff-complete-{}", std::process::id()));
         let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
@@ -1460,23 +1433,24 @@ mod tests {
             report: Some(false),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
+
+        let start = std::time::Instant::now();
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
-
-        // drain_pending_handles で確実にスレッド完了を待つ
-        drain_pending_handles();
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "report=false の Stop hook は子プロセス完了を待たないべき"
+        );
 
         assert!(
-            marker.exists(),
-            "Background thread should have completed and created marker file"
+            wait_for_path(&marker, std::time::Duration::from_secs(3)),
+            "Detached process should have completed and created marker file"
         );
         let _ = std::fs::remove_file(marker);
     }
 
     #[test]
-    fn test_drain_pending_handles_waits_for_completion() {
-        // drain_pending_handles が呼ばれるまでスレッドが PENDING_HANDLES に保持され、
-        // drain 後に確実に完了していることを検証する。
+    fn test_fire_and_forget_does_not_wait_for_slow_process() {
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-drain-test-{}", std::process::id()));
         let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
@@ -1489,24 +1463,24 @@ mod tests {
             report: Some(false),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
+
+        let start = std::time::Instant::now();
         let decision = filter.execute(&make_stop_input());
         assert!(matches!(decision, Decision::Allow { .. }));
-
-        // Decision 返却直後はまだマーカーファイルが存在しない可能性がある
-        // drain_pending_handles で確実に待つ
-        drain_pending_handles();
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "slow report=false hook should not delay the decision"
+        );
+        assert!(
+            !marker.exists(),
+            "Decision 直後は遅延コマンドの完了を待っていないこと"
+        );
 
         assert!(
-            marker.exists(),
-            "drain_pending_handles should wait for thread completion"
+            wait_for_path(&marker, std::time::Duration::from_secs(3)),
+            "detached command should still complete later"
         );
         let _ = std::fs::remove_file(marker);
-    }
-
-    #[test]
-    fn test_drain_pending_handles_empty_is_noop() {
-        // PENDING_HANDLES が空の場合でもパニックしない
-        drain_pending_handles();
     }
 
     #[test]

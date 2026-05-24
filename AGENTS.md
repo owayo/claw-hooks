@@ -7,7 +7,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.5.102
+- **Version**: 26.5.104
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
@@ -17,7 +17,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 2. **AST Parsing**: tree-sitter-bash for accurate command detection (optional feature `ast-parser`), with shell quote-removal handling (`r\m`, `r''m`, `$'r\x6d'`) and fallback parsing that also handles subshells/command substitutions/env-prefix commands, single `&` (background), newline separators, `eval`, `find -exec`/`-execdir`, `xargs -I`/`xargs sh -c`, Windows `cmd /c`, and wrapper options (e.g., `sudo -n`, `sudo --user root`, `sudo VAR=value rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`)
 3. **Custom Filters**: Regex-based and argument-based command filtering
 4. **Extension Hooks**: Auto-format/lint on AfterFileEdit events only (not on BeforeCommand) with timeout support (`{file}` must appear exactly once, parent-directory traversal and shell redirection paths are blocked; on Windows, `cmd /c` shell metacharacters such as `%`, `!`, `^`, `"` are also rejected from file paths to prevent variable-expansion injection)
-5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup)
+5. **Stop Hooks**: Run commands on agent stop (lint/typecheck, notifications, git commit, cleanup). `report=true` hooks are waited on and failures are returned to the agent; `report=false` hooks are started detached with stdin/stdout/stderr discarded.
 6. **Subagent Events**: NanoBuddy notifications on subagent start
 7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal including absolute paths under directories with spaces, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`) plus trailing progress ellipsis compression and rustc-style location marker compression (`-->` / `---->` → `->`, single-hyphen `->` preserved so function return types stay intact), space-separated decorative run compression for biome diff visualization (`→ → → → → → → Google` → `→ Google`, applies to `·` and `→` with single-space delimiter), biome duplicate diff context line-number compression (`129 129 │ text` → `129 │ text` when both line numbers are identical integers; differing pairs like `10 9 │` are preserved as informative), repeated-prefix line collapsing for noisy progress logs (e.g., cargo `Compiling foo v1.0`), and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields. Unknown/unsupported event names are passed through as allow (fail-open) to keep claw-hooks within its intentional scope.
@@ -52,7 +52,7 @@ src/
 │       ├── dd_filter.rs       # dd blocking
 │       ├── custom_filter.rs   # Regex & Args mode filtering
 │       ├── extension_filter.rs # File extension hooks
-│       ├── stop_filter.rs     # Stop hooks (conditional/unconditional)
+│       ├── stop_filter.rs     # Stop hooks (conditional/reported/detached)
 │       └── subagent_filter.rs # Subagent event handling
 └── notify/              # Notification system
     └── nano_buddy.rs    # NanoBuddy via Darwin Notification API (macOS)

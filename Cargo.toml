@@ -26,7 +26,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.102"
 
 [dependencies.tree-sitter]
-version = "0.26.8"
+version = "0.26.9"
 optional = true
 
 [dependencies.tree-sitter-bash]

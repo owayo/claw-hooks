@@ -1,7 +1,7 @@
 //! ビルトインコマンドフィルターの共通実装。
 
 use super::Filter;
-use crate::domain::parser::ShellParser;
+use crate::domain::parser::{ShellParser, command_key};
 use crate::domain::{Decision, HookEvent, HookInput};
 
 /// ビルトインコマンド（rm, kill, dd）をブロックする共通フィルター。
@@ -38,10 +38,10 @@ impl BuiltinCommandFilter {
         let mut parser = ShellParser::new();
         let extracted = parser.extract_commands(command);
 
-        if extracted
-            .iter()
-            .any(|cmd| self.commands.contains(&cmd.as_str()))
-        {
+        if extracted.iter().any(|cmd| {
+            let key = command_key(cmd);
+            self.commands.iter().any(|blocked| *blocked == key)
+        }) {
             return true;
         }
 
@@ -271,5 +271,47 @@ mod tests {
         let filter = make_test_filter(true, Some(never_block));
         let input = make_bash_input("safe_command --no-match");
         assert!(!filter.applies_to(&input));
+    }
+
+    #[test]
+    fn test_absolute_path_command_is_blocked() {
+        // /bin/rm 等の絶対パス指定でブロックリスト判定をバイパスできないこと
+        let filter = make_test_filter(true, None);
+        assert!(filter.applies_to(&make_bash_input("/bin/testcmd --flag")));
+        assert!(filter.applies_to(&make_bash_input("/usr/bin/testcmd --flag")));
+        assert!(filter.applies_to(&make_bash_input("./testcmd --flag")));
+    }
+
+    #[test]
+    fn test_uppercase_command_is_blocked() {
+        // Windows の `DEL` 等の大文字コマンドが小文字判定経由でブロックされること
+        let filter = make_test_filter(true, None);
+        assert!(filter.applies_to(&make_bash_input("TESTCMD --flag")));
+        assert!(filter.applies_to(&make_bash_input("TestCmd --flag")));
+    }
+
+    #[test]
+    fn test_executable_extension_is_blocked() {
+        // `testcmd.exe` のように Windows 実行ファイル拡張子付きでもブロック対象
+        let filter = make_test_filter(true, None);
+        assert!(filter.applies_to(&make_bash_input("testcmd.exe --flag")));
+        assert!(filter.applies_to(&make_bash_input("TESTCMD.EXE --flag")));
+        assert!(filter.applies_to(&make_bash_input("testcmd.cmd --flag")));
+        assert!(filter.applies_to(&make_bash_input("testcmd.bat --flag")));
+        assert!(filter.applies_to(&make_bash_input("testcmd.com --flag")));
+    }
+
+    #[test]
+    fn test_windows_path_command_is_blocked() {
+        // Windows パス区切り `\` を含む絶対パスでもブロック対象
+        let filter = make_test_filter(true, None);
+        assert!(filter.applies_to(&make_bash_input("C:\\Windows\\testcmd.exe --flag")));
+    }
+
+    #[test]
+    fn test_path_prefixed_wrapper_with_value_option_is_blocked() {
+        // パス付き sudo の値付きオプションで、実行対象コマンドを見落とさないこと
+        let filter = make_test_filter(true, None);
+        assert!(filter.applies_to(&make_bash_input("/usr/bin/sudo -u root testcmd --flag")));
     }
 }

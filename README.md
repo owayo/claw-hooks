@@ -33,7 +33,7 @@
 - ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection and shell quote-removal handling (sudo, `sudo -n`, `sudo --user`, `sudo VAR=value rm`, `timeout --signal`, `command rm`, bash -c, `eval`, `find -exec`, pipes, `r\m`, `r''m`, `$'r\x6d'`)
+- 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection, basename/extension/case normalization (`/bin/rm`, `RM.EXE`), and shell quote-removal handling (sudo, `sudo -n`, `sudo --user`, `sudo VAR=value rm`, `timeout --signal`, `command rm`, bash -c, `eval`, `find -exec`, pipes, `r\m`, `r''m`, `$'r\x6d'`)
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
 - 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to supported AI agents (Claude Code, Gemini CLI, Codex CLI)
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
@@ -188,13 +188,14 @@ Rules:
 - Codex `PostToolUse` with `Bash` remains a pass-through command-output event; `apply_patch` payloads are parsed for changed file paths and can trigger extension hooks.
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
+- Paths containing tabs, newlines, or NUL bytes are rejected.
 - Malformed agent payloads that omit required command/file fields are rejected fail-closed.
 
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `sudo -n rm`, `sudo --user root rm`, `sudo VAR=value rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`, `bash -lc 'rm ...'`, `cmd /c del`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, `xargs -I`, `xargs sh -c`, `find -exec`, and shell quote-removal forms such as `r\m`, `r''m`, and `$'r\x6d'`
-- ✅ Handles wrappers and subshells (sudo, timeout, command, exec, bash -c/-lc, cmd /c, xargs, eval, find -exec)
+- ✅ Detects `sudo rm`, `/usr/bin/sudo -u root rm`, `sudo -n rm`, `sudo --user root rm`, `sudo VAR=value rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`, `bash -lc 'rm ...'`, `cmd /c del`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, `xargs -I`, `xargs sh -c`, `find -exec`, and shell quote-removal forms such as `r\m`, `r''m`, and `$'r\x6d'`
+- ✅ Handles wrappers and subshells (sudo, timeout, command, exec, bash -c/-lc, cmd /c, xargs, eval, find -exec), including path-prefixed wrappers and Windows executable suffixes such as `.exe`, `.cmd`, `.bat`, and `.com`
 - ✅ Single binary, no Python/jq dependencies
 
 Configure once:
@@ -554,6 +555,7 @@ message = "Ask the user to run this command manually"
 # Each command template must contain exactly one {file}
 # Parent-directory traversal paths (../) are rejected for safety
 # Shell redirection metacharacters (<, >) in file paths are rejected for safety
+# Tabs/newlines/NUL are rejected to prevent argument splitting and malformed paths
 # On Windows, cmd metacharacters (%, !, ^, ") are also rejected to prevent variable-expansion injection
 [extension_hooks]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]

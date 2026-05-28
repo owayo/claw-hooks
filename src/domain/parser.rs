@@ -20,6 +20,46 @@ const SHELL_COMMANDS: &[&str] = &[
 /// find で後続引数をコマンドとして実行する述語
 const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
 
+/// コマンド名を判定用のキーに正規化する。
+///
+/// 以下を行う:
+/// - basename 抽出（`/bin/rm`、`./rm`、`C:\Windows\rm.exe` → `rm`）
+/// - 実行可能ファイル拡張子の除去（`.exe`、`.cmd`、`.bat`、`.com`、大文字小文字を問わない）
+/// - 小文字化（`DEL`、`Rm` → `del`、`rm`）
+///
+/// これにより `/bin/rm`・`cmd.exe`・`DEL` などのパス・拡張子・大文字経由のバイパスを防ぐ。
+pub(crate) fn command_key(command: &str) -> String {
+    let leaf = command
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(command);
+    let lower = leaf.to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat", ".com"] {
+        if let Some(stripped) = lower.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    lower
+}
+
+/// SHELL_COMMANDS と一致するかを正規化キーで判定する。
+fn is_shell_command(name: &str) -> bool {
+    let key = command_key(name);
+    SHELL_COMMANDS.iter().any(|s| *s == key)
+}
+
+/// COMMAND_WRAPPERS と一致するかを正規化キーで判定する。
+fn is_command_wrapper(name: &str) -> bool {
+    let key = command_key(name);
+    COMMAND_WRAPPERS.iter().any(|s| *s == key)
+}
+
+/// 与えられた cmd_name が target コマンド（例: "xargs"、"eval"、"find"）かを
+/// パス・拡張子・大文字小文字を考慮して判定する。
+fn matches_command(cmd_name: &str, target: &str) -> bool {
+    command_key(cmd_name) == target
+}
+
 /// tree-sitter-bash を使用した AST ベースのシェルコマンドパーサー。
 pub struct ShellParser {
     #[cfg(feature = "ast-parser")]
@@ -118,7 +158,7 @@ impl ShellParser {
 
                         // shell -c "command" を処理 - ネストされたコマンド文字列を抽出
                         // シェルコマンド抽出にはクォート除去済み引数を使用
-                        if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+                        if is_shell_command(&cmd_name) {
                             let args = self.get_command_arguments(node, source);
                             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                                 let nested = self.extract_command_strings(&shell_cmd);
@@ -127,7 +167,7 @@ impl ShellParser {
                         }
 
                         // xargs を処理 - 実行されるコマンドを抽出
-                        if cmd_name == "xargs" {
+                        if matches_command(&cmd_name, "xargs") {
                             let args = self.get_command_arguments(node, source);
                             if let Some(xargs_cmd) =
                                 Self::extract_xargs_command_string_from_args(&args)
@@ -138,7 +178,7 @@ impl ShellParser {
                         }
 
                         // eval は引数をシェルとして再評価するため、内側の文字列も解析する
-                        if cmd_name == "eval" {
+                        if matches_command(&cmd_name, "eval") {
                             let args = self.get_command_arguments(node, source);
                             if let Some(eval_cmd) = Self::join_eval_args(&args) {
                                 command_strings.extend(self.extract_command_strings(&eval_cmd));
@@ -146,7 +186,7 @@ impl ShellParser {
                         }
 
                         // find -exec/-execdir は後続の引数をコマンドとして実行する
-                        if cmd_name == "find" {
+                        if matches_command(&cmd_name, "find") {
                             let args = self.get_command_arguments(node, source);
                             for exec_cmd in Self::extract_find_exec_commands(&args) {
                                 command_strings.extend(self.extract_command_strings(&exec_cmd));
@@ -216,14 +256,14 @@ impl ShellParser {
         command_strings.push(full_cmd);
 
         // shell -c "command" を処理
-        if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+        if is_shell_command(&cmd_name) {
             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                 command_strings.extend(self.extract_command_strings_fallback(&shell_cmd));
             }
         }
 
         // xargs 対象コマンドを処理
-        if cmd_name == "xargs" {
+        if matches_command(&cmd_name, "xargs") {
             if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
                 command_strings.push(xargs_cmd.clone());
                 command_strings.extend(self.extract_command_strings_fallback(&xargs_cmd));
@@ -231,14 +271,14 @@ impl ShellParser {
         }
 
         // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
-        if cmd_name == "eval" {
+        if matches_command(&cmd_name, "eval") {
             if let Some(eval_cmd) = Self::join_eval_args(&args) {
                 command_strings.extend(self.extract_command_strings_fallback(&eval_cmd));
             }
         }
 
         // find -exec/-execdir は後続の引数をコマンドとして実行する。
-        if cmd_name == "find" {
+        if matches_command(&cmd_name, "find") {
             for exec_cmd in Self::extract_find_exec_commands(&args) {
                 command_strings.extend(self.extract_command_strings_fallback(&exec_cmd));
             }
@@ -267,12 +307,12 @@ impl ShellParser {
                     let args = self.get_command_arguments(node, source);
 
                     // ASTレベルでラッパーコマンドを展開（sudo, env, command など）
-                    if COMMAND_WRAPPERS.contains(&cmd_name.as_str()) {
+                    if is_command_wrapper(&cmd_name) {
                         self.process_wrapper_args(&cmd_name, &args, commands);
                     }
 
                     // AST レベルで shell -c "command" を処理
-                    if SHELL_COMMANDS.contains(&cmd_name.as_str()) {
+                    if is_shell_command(&cmd_name) {
                         if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                             let nested = self.extract_commands(&shell_cmd);
                             for nested_cmd in nested {
@@ -284,7 +324,7 @@ impl ShellParser {
                     }
 
                     // AST レベルで xargs を処理
-                    if cmd_name == "xargs" {
+                    if matches_command(&cmd_name, "xargs") {
                         if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args)
                         {
                             for nested_cmd in self.extract_commands(&xargs_cmd) {
@@ -294,7 +334,7 @@ impl ShellParser {
                     }
 
                     // AST レベルで eval を処理
-                    if cmd_name == "eval" {
+                    if matches_command(&cmd_name, "eval") {
                         if let Some(eval_cmd) = Self::join_eval_args(&args) {
                             for nested_cmd in self.extract_commands(&eval_cmd) {
                                 Self::push_unique_command(commands, &nested_cmd);
@@ -303,7 +343,7 @@ impl ShellParser {
                     }
 
                     // AST レベルで find -exec/-execdir を処理
-                    if cmd_name == "find" {
+                    if matches_command(&cmd_name, "find") {
                         for exec_cmd in Self::extract_find_exec_commands(&args) {
                             for nested_cmd in self.extract_commands(&exec_cmd) {
                                 Self::push_unique_command(commands, &nested_cmd);
@@ -526,6 +566,10 @@ impl ShellParser {
         let mut chars = word.chars().peekable();
         let mut in_single_quote = false;
         let mut in_double_quote = false;
+        let preserve_windows_separators = word.len() >= 3
+            && word.as_bytes()[0].is_ascii_alphabetic()
+            && word.as_bytes()[1] == b':'
+            && word.as_bytes()[2] == b'\\';
 
         while let Some(c) = chars.next() {
             match c {
@@ -543,6 +587,11 @@ impl ShellParser {
                 }
                 '\\' if !in_single_quote => {
                     if let Some(next) = chars.next() {
+                        if preserve_windows_separators && !in_double_quote {
+                            result.push('\\');
+                            result.push(next);
+                            continue;
+                        }
                         if in_double_quote && !matches!(next, '$' | '`' | '"' | '\\' | '\n' | '\r')
                         {
                             result.push('\\');
@@ -671,7 +720,7 @@ impl ShellParser {
             let remaining_args: Vec<String> = args[command_index + 1..].to_vec();
 
             // shell -c の場合は内側のコマンドを抽出
-            if SHELL_COMMANDS.contains(&command_name.as_str()) {
+            if is_shell_command(command_name) {
                 if let Some(shell_cmd) = Self::extract_shell_c_from_args(&remaining_args) {
                     let nested = self.extract_commands(&shell_cmd);
                     for nested_cmd in nested {
@@ -683,7 +732,7 @@ impl ShellParser {
             }
 
             // 次のコマンドもラッパーなら再帰的に処理
-            if COMMAND_WRAPPERS.contains(&command_name.as_str()) {
+            if is_command_wrapper(command_name) {
                 self.process_wrapper_args(command_name, &remaining_args, commands);
             }
         }
@@ -738,19 +787,31 @@ impl ShellParser {
             return Self::wrapper_long_flags_with_args(wrapper).contains(&base_flag);
         }
 
-        // `-uroot` のように短縮フラグへ値が連結されている場合は追加トークン不要。
+        // 短縮フラグの cluster（例: `-nu`、`-uroot`）を解釈する。
+        // - `-uroot`（先頭が値取得フラグで以降が値）→ 追加トークン不要
+        // - `-nu`（cluster の末尾だけが値取得フラグ）→ 追加トークンが必要
+        // - `-nv`（値取得フラグを含まない）→ 追加トークン不要
         if base_flag.len() > 2 {
-            let short_flag = &base_flag[..2];
-            if Self::wrapper_short_flags_with_args(wrapper).contains(&short_flag) {
-                return false;
+            let cluster = &base_flag[1..];
+            let value_flags = Self::wrapper_short_flags_with_args(wrapper);
+            for (idx, ch) in cluster.char_indices() {
+                let opt = format!("-{}", ch);
+                if value_flags.contains(&opt.as_str()) {
+                    // cluster 末尾が値取得フラグなら追加トークン必要、
+                    // それ以前の位置にあれば残りが inline 値とみなされる。
+                    let has_inline_value = idx + ch.len_utf8() < cluster.len();
+                    return !has_inline_value;
+                }
             }
+            return false;
         }
 
         Self::wrapper_short_flags_with_args(wrapper).contains(&base_flag)
     }
 
     fn wrapper_short_flags_with_args(wrapper: &str) -> &'static [&'static str] {
-        match wrapper {
+        let key = command_key(wrapper);
+        match key.as_str() {
             "sudo" => Self::SUDO_FLAGS_WITH_ARGS,
             "env" => Self::ENV_FLAGS_WITH_ARGS,
             "timeout" => Self::TIMEOUT_FLAGS_WITH_ARGS,
@@ -763,7 +824,8 @@ impl ShellParser {
     }
 
     fn wrapper_long_flags_with_args(wrapper: &str) -> &'static [&'static str] {
-        match wrapper {
+        let key = command_key(wrapper);
+        match key.as_str() {
             "sudo" => Self::SUDO_LONG_FLAGS_WITH_ARGS,
             "env" => Self::ENV_LONG_FLAGS_WITH_ARGS,
             "timeout" => Self::TIMEOUT_LONG_FLAGS_WITH_ARGS,
@@ -798,6 +860,7 @@ impl ShellParser {
     fn find_wrapped_command_index(wrapper: &str, args: &[String]) -> Option<usize> {
         let mut i = 0usize;
         let mut timeout_duration_consumed = false;
+        let wrapper_key = command_key(wrapper);
 
         while i < args.len() {
             let arg = &args[i];
@@ -806,20 +869,20 @@ impl ShellParser {
                 return (i + 1 < args.len()).then_some(i + 1);
             }
 
-            if wrapper == "env" && Self::is_env_assignment_token(arg) {
+            if wrapper_key == "env" && Self::is_env_assignment_token(arg) {
                 i += 1;
                 continue;
             }
 
             // sudo は `sudo VAR=value command` 形式でコマンド直前の環境変数代入を受け付ける。
             // ここを実行対象コマンドとして扱うと、後続の rm/kill/dd を見落とす。
-            if wrapper == "sudo" && Self::is_env_assignment_token(arg) {
+            if wrapper_key == "sudo" && Self::is_env_assignment_token(arg) {
                 i += 1;
                 continue;
             }
 
             if arg.starts_with('-') {
-                if Self::wrapper_flag_takes_arg(wrapper, arg) {
+                if Self::wrapper_flag_takes_arg(&wrapper_key, arg) {
                     i += 2;
                 } else {
                     i += 1;
@@ -827,7 +890,7 @@ impl ShellParser {
                 continue;
             }
 
-            if wrapper == "timeout"
+            if wrapper_key == "timeout"
                 && !timeout_duration_consumed
                 && Self::is_timeout_duration_token(arg)
             {
@@ -1107,33 +1170,33 @@ impl ShellParser {
         commands.push(cmd.clone());
 
         // ラッパーコマンドを展開
-        if COMMAND_WRAPPERS.contains(&cmd.as_str()) {
+        if is_command_wrapper(&cmd) {
             self.expand_wrapper_commands_fallback(&cmd, &args, &mut commands);
         }
 
         // shell -c "command" を処理
-        if SHELL_COMMANDS.contains(&cmd.as_str()) {
+        if is_shell_command(&cmd) {
             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                 commands.extend(self.extract_commands_fallback(&shell_cmd));
             }
         }
 
         // xargs を処理
-        if cmd == "xargs" {
+        if matches_command(&cmd, "xargs") {
             if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
                 commands.extend(self.extract_commands_fallback(&xargs_cmd));
             }
         }
 
         // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
-        if cmd == "eval" {
+        if matches_command(&cmd, "eval") {
             if let Some(eval_cmd) = Self::join_eval_args(&args) {
                 commands.extend(self.extract_commands_fallback(&eval_cmd));
             }
         }
 
         // find -exec/-execdir は後続の引数をコマンドとして実行する。
-        if cmd == "find" {
+        if matches_command(&cmd, "find") {
             for exec_cmd in Self::extract_find_exec_commands(&args) {
                 commands.extend(self.extract_commands_fallback(&exec_cmd));
             }
@@ -1165,13 +1228,13 @@ impl ShellParser {
 
         let remaining = &args[command_index + 1..];
 
-        if SHELL_COMMANDS.contains(&command_name.as_str()) {
+        if is_shell_command(command_name) {
             if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
                 commands.extend(self.extract_commands_fallback(&shell_cmd));
             }
         }
 
-        if COMMAND_WRAPPERS.contains(&command_name.as_str()) {
+        if is_command_wrapper(command_name) {
             self.expand_wrapper_commands_fallback(command_name, remaining, commands);
         }
     }
@@ -1608,6 +1671,122 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("NODE_ENV=prod npm install");
         assert!(commands.contains(&"npm".to_string()));
+    }
+
+    #[test]
+    fn test_command_key_basename() {
+        // basename 抽出: /bin/rm → rm
+        assert_eq!(command_key("/bin/rm"), "rm");
+        assert_eq!(command_key("/usr/bin/rm"), "rm");
+        assert_eq!(command_key("./rm"), "rm");
+    }
+
+    #[test]
+    fn test_command_key_windows_path() {
+        // Windows パス区切り `\` も basename として扱う
+        assert_eq!(command_key("C:\\Windows\\rm.exe"), "rm");
+    }
+
+    #[test]
+    fn test_command_key_extension_strip() {
+        // 実行ファイル拡張子の除去
+        assert_eq!(command_key("rm.exe"), "rm");
+        assert_eq!(command_key("rm.CMD"), "rm");
+        assert_eq!(command_key("rm.Bat"), "rm");
+        assert_eq!(command_key("rm.com"), "rm");
+    }
+
+    #[test]
+    fn test_command_key_lowercase() {
+        // 大文字小文字を正規化
+        assert_eq!(command_key("DEL"), "del");
+        assert_eq!(command_key("Rm"), "rm");
+        assert_eq!(command_key("TASKKILL.EXE"), "taskkill");
+    }
+
+    #[test]
+    fn test_command_key_already_normalized() {
+        // 既に正規化されている文字列はそのまま
+        assert_eq!(command_key("rm"), "rm");
+        assert_eq!(command_key("bash"), "bash");
+    }
+
+    #[test]
+    fn test_is_shell_command_recognizes_cmd_exe() {
+        // cmd.exe を cmd と認識する
+        assert!(is_shell_command("cmd.exe"));
+        assert!(is_shell_command("cmd"));
+        assert!(is_shell_command("CMD.EXE"));
+    }
+
+    #[test]
+    fn test_is_shell_command_recognizes_path_prefixed_bash() {
+        // /bin/bash も bash として認識する
+        assert!(is_shell_command("/bin/bash"));
+        assert!(is_shell_command("/usr/bin/sh"));
+    }
+
+    #[test]
+    fn test_is_command_wrapper_recognizes_path_prefixed() {
+        // /usr/bin/sudo も sudo として認識する
+        assert!(is_command_wrapper("/usr/bin/sudo"));
+        assert!(is_command_wrapper("sudo"));
+    }
+
+    #[test]
+    fn test_extract_commands_absolute_path_rm() {
+        // /bin/rm の絶対パス指定でもコマンドが抽出される
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("/bin/rm -rf /tmp/test");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_extract_commands_cmd_exe_del() {
+        // cmd.exe /c del を経由しても del が抽出される
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("cmd.exe /c del C:\\tmp\\file.txt");
+        assert!(commands.iter().any(|c| command_key(c) == "del"));
+    }
+
+    #[test]
+    fn test_extract_commands_windows_path_command() {
+        // Windows ドライブパスの `\` はコマンド名ではパス区切りとして扱う
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("C:\\Windows\\rm.exe C:\\tmp\\file.txt");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_extract_commands_sudo_nu_cluster() {
+        // sudo -nu root rm の cluster short option でも rm が抽出される
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sudo -nu root rm -rf /tmp/test");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_extract_commands_path_prefixed_sudo_with_value_option() {
+        // /usr/bin/sudo のようにラッパーがパス付きでも -u の値を読み飛ばし rm を抽出する
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("/usr/bin/sudo -u root rm -rf /tmp/test");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_extract_commands_path_prefixed_timeout_with_value_option() {
+        // /usr/bin/timeout のようにラッパーがパス付きでも -s と duration を読み飛ばす
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("/usr/bin/timeout -s TERM 10 rm -f /tmp/test");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_extract_commands_timeout_vs_cluster() {
+        // timeout -vs TERM 10 rm の cluster short option でも rm が抽出される
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("timeout -vs TERM 10 rm -f /tmp/test");
+        assert!(commands.iter().any(|c| command_key(c) == "rm"));
     }
 
     #[test]
@@ -2297,6 +2476,39 @@ mod tests {
     fn test_wrapper_flag_takes_arg_sudo_uroot_concatenated() {
         // -uroot は値が連結されているので追加引数不要（false）
         assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-uroot"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_nu_cluster_takes_arg() {
+        // -nu の cluster: 末尾 `u` が値取得フラグ、`n` は値取らない
+        // → 次トークン (`root`) を値として消費すべき（true）
+        assert!(ShellParser::wrapper_flag_takes_arg("sudo", "-nu"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_path_prefixed_sudo() {
+        // パス付きラッパーでも sudo の値付きオプションとして扱う
+        assert!(ShellParser::wrapper_flag_takes_arg("/usr/bin/sudo", "-u"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_timeout_vs_cluster_takes_arg() {
+        // timeout -vs の cluster: 末尾 `s` が値取得フラグ
+        // → 次トークン (`TERM`) を値として消費すべき（true）
+        assert!(ShellParser::wrapper_flag_takes_arg("timeout", "-vs"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_nv_cluster_no_value_flag() {
+        // -nv の cluster: 両方とも値取らないフラグ → 追加トークン不要（false）
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-nv"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_sudo_unroot_inline_value() {
+        // -unroot の cluster: 先頭 `u` が値取得フラグで以降 `nroot` が inline 値
+        // → 追加トークン不要（false）
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-unroot"));
     }
 
     #[test]

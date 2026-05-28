@@ -88,8 +88,10 @@ impl ExtensionHookFilter {
         // 注: シェルは使用しないが、一部ツールがこれらを解釈する可能性がある
         // Windows では `cmd /c` 経由のため `%VAR%` 環境変数展開、`!VAR!` 遅延展開、
         // `^` エスケープ、`"` クォート切替が攻撃ベクタになり得るため一律拒否する。
+        // タブ文字 (`\t`) は POSIX シェルの IFS として単語分割を引き起こすため
+        // `\n` `\r` と同様に拒否する。
         const DANGEROUS_CHARS: &[char] = &[
-            '`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\0', '%', '!', '^', '"',
+            '`', '$', '|', '&', ';', '<', '>', '\n', '\r', '\t', '\0', '%', '!', '^', '"',
         ];
         for c in DANGEROUS_CHARS {
             if file_path.contains(*c) {
@@ -696,6 +698,13 @@ mod tests {
         assert!(ExtensionHookFilter::validate_file_path("file\nname.rs").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file\rname.rs").is_err());
         assert!(ExtensionHookFilter::validate_file_path("file\0name.rs").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path_rejects_tab() {
+        // タブ文字は IFS による単語分割で引数 bleed を起こすため拒否する
+        assert!(ExtensionHookFilter::validate_file_path("file\tname.rs").is_err());
+        assert!(ExtensionHookFilter::validate_file_path("/tmp/foo\tbar.rs").is_err());
     }
 
     #[test]

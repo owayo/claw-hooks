@@ -237,9 +237,16 @@ fn collapse_repeated_chars(input: &str) -> String {
 /// old != new (差分前後で context 行番号がズレる稀なケース) では情報として
 /// 保持する必要があるため圧縮しない。
 fn collapse_duplicate_diff_context_line_number(line: &str) -> String {
-    let Some((line_numbers, text)) = line.split_once(" │ ") else {
-        return line.to_string();
-    };
+    let (line_numbers, text, has_text_separator) =
+        if let Some((line_numbers, text)) = line.split_once(" │ ") {
+            (line_numbers, text, true)
+        } else if let Some(line_numbers) = line.strip_suffix(" │") {
+            // normalize_lint_output は行全体を trim するため、Biome の空 context 行
+            // `42 42 │ ` はここに来る時点で `42 42 │` になっている。
+            (line_numbers, "", false)
+        } else {
+            return line.to_string();
+        };
 
     let mut parts = line_numbers.split(' ');
     let Some(old_line) = parts.next() else {
@@ -254,7 +261,11 @@ fn collapse_duplicate_diff_context_line_number(line: &str) -> String {
         && !old_line.is_empty()
         && old_line.bytes().all(|b| b.is_ascii_digit())
     {
-        return format!("{old_line} │ {text}");
+        return if has_text_separator {
+            format!("{old_line} │ {text}")
+        } else {
+            format!("{old_line} │")
+        };
     }
 
     line.to_string()
@@ -1808,16 +1819,20 @@ mod tests {
             collapse_duplicate_diff_context_line_number("42 42 │ "),
             "42 │ "
         );
+        assert_eq!(
+            collapse_duplicate_diff_context_line_number("42 42 │"),
+            "42 │"
+        );
     }
 
     #[test]
     fn test_normalize_collapses_biome_diff_context_lines_e2e() {
         // E2E: biome 形式の diff で context line のみ重複行番号が圧縮される
-        let input = "131 │ - → log(\n132 │ + → log(\n129 129 │ data\n130 130 │ });";
+        let input = "131 │ - → log(\n132 │ + → log(\n129 129 │ data\n130 130 │ });\n131 131 │";
         let result = normalize_lint_output(input);
         assert_eq!(
             result,
-            "131 │ - → log(\n132 │ + → log(\n129 │ data\n130 │ });"
+            "131 │ - → log(\n132 │ + → log(\n129 │ data\n130 │ });\n131 │"
         );
     }
 

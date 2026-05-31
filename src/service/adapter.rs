@@ -846,11 +846,11 @@ struct CursorStopInput {
 struct CursorSubagentStartInput {
     /// サブエージェント種別: "generalPurpose", "explore", "shell" など
     subagent_type: String,
-    /// サブエージェントに渡されたプロンプト
-    #[serde(default)]
+    /// サブエージェントに渡されたタスク説明（公式フィールド名は "task"）
+    #[serde(rename = "task", default)]
     prompt: Option<String>,
-    /// サブエージェントで使用したモデル
-    #[serde(default)]
+    /// サブエージェントで使用するモデル（公式フィールド名は "subagent_model"）
+    #[serde(rename = "subagent_model", default)]
     #[allow(dead_code)]
     model: Option<String>,
 }
@@ -860,15 +860,15 @@ struct CursorSubagentStartInput {
 struct CursorSubagentStopInput {
     /// サブエージェント種別
     subagent_type: String,
-    /// サブエージェント完了状態: "completed" または "error"
+    /// サブエージェント完了状態: "completed" / "error" / "aborted"
     #[serde(rename = "status")]
     subagent_status: String,
-    /// サブエージェント出力
-    #[serde(default)]
+    /// サブエージェント出力サマリー（公式フィールド名は "summary"）
+    #[serde(rename = "summary", default)]
     #[allow(dead_code)]
     result: Option<String>,
-    /// 実行時間（ミリ秒）
-    #[serde(default)]
+    /// 実行時間（ミリ秒、公式フィールド名は "duration_ms"）
+    #[serde(rename = "duration_ms", default)]
     duration: Option<u64>,
 }
 
@@ -1902,12 +1902,17 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_subagent_start() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"hook_event_name":"subagentStart","subagent_type":"explore","prompt":"Explore the authentication flow","model":"claude-sonnet-4-20250514"}"#;
+        let input = r#"{"hook_event_name":"subagentStart","subagent_type":"explore","task":"Explore the authentication flow","subagent_model":"claude-sonnet-4-20250514"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
         assert_eq!(result.tool_name, "SubagentStart");
         if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
             assert_eq!(sub.subagent_type, Some("explore".to_string()));
+            // 公式フィールド名 "task" から prompt が取得できること
+            assert_eq!(
+                sub.prompt,
+                Some("Explore the authentication flow".to_string())
+            );
         } else {
             panic!("Expected Subagent tool input");
         }
@@ -1916,7 +1921,7 @@ mod tests {
     #[test]
     fn test_cursor_input_parsing_subagent_stop() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        let input = r#"{"hook_event_name":"subagentStop","subagent_type":"generalPurpose","status":"completed","result":"Task done","duration":45000}"#;
+        let input = r#"{"hook_event_name":"subagentStop","subagent_type":"generalPurpose","status":"completed","summary":"Task done","duration_ms":45000}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(
             result.event,
@@ -1927,6 +1932,8 @@ mod tests {
         if let crate::domain::ToolInput::Subagent(ref sub) = result.tool_input {
             assert_eq!(sub.subagent_type, Some("generalPurpose".to_string()));
             assert_eq!(sub.status, Some("completed".to_string()));
+            // 公式フィールド名 "duration_ms" から duration が取得できること
+            assert_eq!(sub.duration, Some(45000));
         } else {
             panic!("Expected Subagent tool input");
         }

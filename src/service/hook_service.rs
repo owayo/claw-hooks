@@ -10,7 +10,7 @@ use crate::cli::Format;
 use crate::config::Config;
 use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
-use crate::service::log_sanitizer::summarize_hook_input;
+use crate::service::log_sanitizer::{summarize_hook_input, summarize_parsed_hook_input};
 
 /// フックイベント処理サービス。
 pub struct HookService {
@@ -161,10 +161,7 @@ impl HookService {
     /// AfterFileEdit イベントの処理（ファイル操作後）。
     fn handle_after_file_edit(&self, input: &HookInput) -> Decision {
         if self.config.debug {
-            debug!(
-                "AfterFileEdit: tool_name={}, tool_input={:?}",
-                input.tool_name, input.tool_input
-            );
+            debug!("AfterFileEdit: {}", summarize_parsed_hook_input(input));
         }
 
         // Write/Edit/MultiEdit の場合、拡張子フック用にフィルターチェーンを実行

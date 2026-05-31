@@ -41,6 +41,7 @@
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s); on Unix the entire process group is killed with SIGKILL so grandchildren of `sh -c '...'` are also stopped
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
 - 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`), trailing progress ellipses, and noisy repeated-prefix progress lines (e.g., cargo `Compiling foo v1.0` runs) for token-efficient output. It also strips common absolute path prefixes, including paths under directories with spaces. The `^` rule trims long range markers commonly produced by ruff / clippy / rustc lint output, while `·` and `→` handle whitespace markers from tools such as Biome — including the space-separated variants seen in diff visualizations (`→ → → → → → → Google` → `→ Google`) and Biome's duplicate diff context line numbers (`129 129 │ text` → `129 │ text`, empty context lines `129 129 │` → `129 │`, with mismatched pairs like `10 9 │` left untouched).
+- 🛡️ **Debug Log Safety** - Debug logs store event/tool/session and input-size summaries only; raw commands, file contents, unknown event payloads, and agent messages are not persisted
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI
 
@@ -511,7 +512,7 @@ dd_block_message = "🚫 dd command blocked for safety."
 # Debug logging
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
-# Debug logs record hook event summaries only. Raw tool input/content is not written.
+# Debug logs record hook event summaries only. Raw commands, file contents, and agent messages are not written.
 
 # Hook command timeout in seconds (default: 60, max: 86400)
 # Applies to reported stop hooks and extension hook commands.

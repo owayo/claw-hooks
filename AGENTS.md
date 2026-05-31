@@ -7,7 +7,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
 - **Language**: Rust (MSRV 1.85)
-- **Version**: 26.5.104
+- **Version**: 26.5.105
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
 
@@ -22,7 +22,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 7. **Output Normalization**: ANSI stripping (CSI/OSC/SS2/SS3), path prefix removal including absolute paths under directories with spaces, repeated decorative character compression (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`) plus trailing progress ellipsis compression and rustc-style location marker compression (`-->` / `---->` → `->`, single-hyphen `->` preserved so function return types stay intact), space-separated decorative run compression for biome diff visualization (`→ → → → → → → Google` → `→ Google`, applies to `·` and `→` with single-space delimiter), biome duplicate diff context line-number compression (`129 129 │ text` → `129 │ text`, empty context lines `129 129 │` → `129 │` when both line numbers are identical integers; differing pairs like `10 9 │` are preserved as informative), repeated-prefix line collapsing for noisy progress logs (e.g., cargo `Compiling foo v1.0`), and character-count-based output length truncation for token efficiency
 8. **Fail-Closed Security**: Block on parse errors, empty input, or missing required agent fields. Unknown/unsupported event names are passed through as allow (fail-open) to keep claw-hooks within its intentional scope.
 9. **Process Group Isolation (Unix)**: Hook subprocesses are placed in their own process group via `setpgid`, so timeouts kill the whole tree (`killpg`) — preventing grandchild leaks like `sh -c 'sleep ...'` after the shell is signaled.
-10. **Debug Log Safety**: Debug logs store hook event summaries (event/tool/session/size) instead of raw hook input, so tool command text and file contents are not persisted to disk.
+10. **Debug Log Safety**: Debug logs store hook event summaries (event/tool/session/size) instead of raw hook input or raw parsed `ToolInput`, so tool command text, file contents, unknown event payloads, and agent messages are not persisted to disk.
 
 ## Project Structure
 

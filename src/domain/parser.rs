@@ -401,8 +401,12 @@ impl ShellParser {
                 "command_name" => {
                     found_command_name = true;
                 }
+                // `number`（裸の整数）も引数に含める。これを欠落させると
+                // `xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm` のような
+                // 「値を取るフラグ + 数値」で数値が脱落し、フラグが後続のコマンド
+                // (rm 等) を値として消費して危険コマンド検出が漏れる。
                 "word" | "string" | "raw_string" | "simple_expansion" | "expansion"
-                | "concatenation"
+                | "concatenation" | "number"
                     if found_command_name =>
                 {
                     let raw = &source[child.byte_range()];
@@ -432,8 +436,17 @@ impl ShellParser {
                 || (arg.starts_with('-')
                     && !arg.starts_with("--")
                     && arg.chars().skip(1).any(|c| c == 'c'));
-            if has_shell_c && i + 1 < args.len() {
-                return Some(args[i + 1].clone());
+            if has_shell_c {
+                // `bash -c -- 'script'` のように -c とスクリプトの間に `--`
+                // （オプション終端）が挟まる場合は読み飛ばす。読み飛ばさないと
+                // `--` をスクリプト本体とみなし、内側の rm 等を取りこぼす。
+                let mut script_idx = i + 1;
+                if args.get(script_idx).map(String::as_str) == Some("--") {
+                    script_idx += 1;
+                }
+                if script_idx < args.len() {
+                    return Some(args[script_idx].clone());
+                }
             }
         }
         None

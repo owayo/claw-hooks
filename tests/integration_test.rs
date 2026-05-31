@@ -502,10 +502,17 @@ fn test_windsurf_format_block_rm_command() {
     let (_stdout, stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
     assert_eq!(exit_code, 2, "rm command should be blocked");
-    // Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る
+    // Windsurf は exit code 2 でブロック時、stderr からプレーンテキストのメッセージを読み取る。
+    // メッセージ本文は設定（rm_block_message）でカスタマイズ可能なため、ここでは
+    // 「生 JSON ではないプレーンテキストのメッセージが存在すること」を検証する。
     assert!(
-        stderr.contains(r#""decision":"block""#),
-        "Windsurf block message should be on stderr: {}",
+        !stderr.trim().is_empty(),
+        "Windsurf block message should be present on stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains(r#""decision""#),
+        "Windsurf block message should be plain text, not raw JSON: {}",
         stderr
     );
 }
@@ -516,10 +523,17 @@ fn test_windsurf_format_block_kill_command() {
     let (_stdout, stderr, exit_code) = run_hook_with_format(input, "windsurf");
 
     assert_eq!(exit_code, 2, "pkill command should be blocked");
-    // Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る
+    // Windsurf は exit code 2 でブロック時、stderr からプレーンテキストのメッセージを読み取る。
+    // メッセージ本文は設定（kill_block_message）でカスタマイズ可能なため、ここでは
+    // 「生 JSON ではないプレーンテキストのメッセージが存在すること」を検証する。
     assert!(
-        stderr.contains(r#""decision":"block""#),
-        "Windsurf block message should be on stderr: {}",
+        !stderr.trim().is_empty(),
+        "Windsurf block message should be present on stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains(r#""decision""#),
+        "Windsurf block message should be plain text, not raw JSON: {}",
         stderr
     );
 }
@@ -546,7 +560,8 @@ fn test_windsurf_format_post_write_code() {
 #[test]
 fn test_cursor_format_stop_completed() {
     // Cursor の stop フックで status=completed を受け取るケース
-    let input = r#"{"status":"completed","loop_count":2}"#;
+    // hook_event_name を含めて実際の stop ディスパッチ経路（CursorStopInput）を通す
+    let input = r#"{"hook_event_name":"stop","status":"completed","loop_count":2}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     // Stop イベントは監視用途のため許可される
@@ -561,7 +576,8 @@ fn test_cursor_format_stop_completed() {
 #[test]
 fn test_cursor_format_stop_aborted() {
     // Cursor の stop フックで status=aborted を受け取るケース
-    let input = r#"{"status":"aborted"}"#;
+    // hook_event_name を含めて実際の stop ディスパッチ経路（CursorStopInput）を通す
+    let input = r#"{"hook_event_name":"stop","status":"aborted"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "stop event should be allowed");
@@ -575,7 +591,8 @@ fn test_cursor_format_stop_aborted() {
 #[test]
 fn test_cursor_format_stop_error() {
     // Cursor の Stop フックで status=error を受け取るケース
-    let input = r#"{"status":"error","loop_count":0}"#;
+    // hook_event_name を含めて実際の stop ディスパッチ経路（CursorStopInput）を通す
+    let input = r#"{"hook_event_name":"stop","status":"error","loop_count":0}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "stop event should be allowed");

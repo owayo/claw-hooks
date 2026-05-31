@@ -123,14 +123,20 @@ impl FormatAdapter {
     pub fn format_error(&self, message: &str) -> String {
         let error_message = format!("🚫 Hook error (fail-closed): {}", message);
         match self.format {
-            Format::Claude | Format::Windsurf => {
-                // Claude/Windsurf: decision + reason でブロック
+            Format::Claude => {
+                // Claude: decision + reason の JSON でブロック（exit 2 + stderr、Claude は JSON を解析する）
                 // セキュリティ: パースエラー時はブロック（フェイルクローズド設計）
                 serde_json::json!({
                     "decision": "block",
                     "reason": error_message
                 })
                 .to_string()
+            }
+            Format::Windsurf => {
+                // Windsurf: stderr はプレーンテキストのエラーメッセージとして扱われる（JSON 解析なし）。
+                // 公式仕様では exit code 2 + stderr 本文をエージェント/UI に提示するため、本文のみを返す。
+                // セキュリティ: exit code 2 自体がブロックを意味するため、フェイルクローズドは維持される。
+                error_message
             }
             Format::Cursor => {
                 // Cursorはpermissionとuser_messageを使用
@@ -748,21 +754,15 @@ impl FormatAdapter {
             return Ok("{}".to_string());
         }
 
-        // Windsurf は Claude Code と同系統の出力形式を使うが、
-        // additionalContext / hookSpecificOutput はサポートしないため簡略化する。
-        let output = match &self.truncate_decision(decision) {
-            Decision::Allow { .. } => crate::domain::HookOutput {
-                decision: None,
-                reason: None,
-                hook_specific_output: None,
-            },
-            Decision::Block { message } => crate::domain::HookOutput {
-                decision: Some("block".to_string()),
-                reason: Some(message.clone()),
-                hook_specific_output: None,
-            },
-        };
-        serde_json::to_string(&output).map_err(|e| anyhow!("Failed to serialize output: {}", e))
+        // Windsurf は stdout/stderr を JSON として解析せず、プレーンテキストとして扱う。
+        // - Allow: 判定は exit code 0 で伝達する。stdout には無害な空 JSON を出力する。
+        // - Block: exit code 2 + stderr のメッセージ本文でブロック理由を提示する（公式仕様）。
+        //   JSON ではなくメッセージ本文のみを返すことで、UI/エージェントに生 JSON が
+        //   そのまま表示されるのを防ぐ。
+        match self.truncate_decision(decision) {
+            Decision::Allow { .. } => Ok("{}".to_string()),
+            Decision::Block { message } => Ok(message),
+        }
     }
 }
 
@@ -1492,8 +1492,9 @@ mod tests {
                 HookEvent::BeforeCommand,
             )
             .unwrap();
-        assert!(output.contains(r#""decision":"block""#));
-        assert!(output.contains("Command blocked for safety"));
+        // Windsurf はブロックメッセージをプレーンテキスト本文として返す（JSON ではない）
+        assert_eq!(output, "Command blocked for safety");
+        assert!(!output.contains(r#""decision""#));
     }
 
     #[test]
@@ -1515,8 +1516,10 @@ mod tests {
     fn test_windsurf_error_format() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let error_output = adapter.format_error("Invalid JSON input");
-        assert!(error_output.contains(r#""decision":"block""#));
+        // Windsurf はエラーメッセージをプレーンテキストで返す（JSON ではない）
         assert!(error_output.contains("fail-closed"));
+        assert!(error_output.contains("Invalid JSON input"));
+        assert!(!error_output.contains(r#""decision""#));
     }
 
     // === Claude Code / Gemini CLI の Stop Block 出力 ===
@@ -3434,12 +3437,15 @@ mod tests {
     }
 
     #[test]
-    fn test_format_error_windsurf_is_valid_json() {
+    fn test_format_error_windsurf_is_plain_text() {
+        // Windsurf は stderr をプレーンテキストとして扱うため、エラーは JSON ではなく本文を返す
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let output = adapter.format_error("test error");
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "block");
-        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
+        assert!(output.contains("test error"));
+        assert!(output.contains("fail-closed"));
+        // JSON ではないこと（decision キーを含まず、JSON としてパースできない）を確認
+        assert!(!output.contains(r#""decision""#));
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_err());
     }
 
     // === Gemini 入力パースのエッジケース ===
@@ -3467,8 +3473,8 @@ mod tests {
     // === Windsurf BeforeCommand Block の出力形式テスト ===
 
     #[test]
-    fn test_windsurf_before_command_block_stderr_is_json() {
-        // Windsurf の BeforeCommand Block は JSON を stderr に書く。
+    fn test_windsurf_before_command_block_stderr_is_plain_text() {
+        // Windsurf の BeforeCommand Block はプレーンテキスト本文を stderr に書く。
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "rm is blocked".to_string(),
@@ -3480,13 +3486,13 @@ mod tests {
             "Windsurf BeforeCommand Block は stderr を使うべき"
         );
 
-        // 出力が有効な JSON であることを確認
+        // 出力がメッセージ本文そのもの（プレーンテキスト）であることを確認
         let output = adapter
             .format_output(&decision, HookEvent::BeforeCommand)
             .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "block");
-        assert_eq!(parsed["reason"], "rm is blocked");
+        assert_eq!(output, "rm is blocked");
+        // JSON ではないことを確認
+        assert!(!output.contains(r#""decision""#));
     }
 
     #[test]

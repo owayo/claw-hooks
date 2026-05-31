@@ -95,7 +95,8 @@ pub fn strip_ansi_codes(input: &str) -> String {
 ///   - `·` (U+00B7) は biome 等が空白を視覚化するため diff 行に多用する
 ///   - `→` (U+2192) は biome 等がタブを視覚化するため diff 行に多用する
 /// - 連続する空行を1行に圧縮
-/// - 同じ単語で始まる行が4行以上連続する場合、4行目以降を集約（cargo の `Compiling ...` 連発などを対象）
+/// - 進捗系の単語（`Compiling` 等）で始まる行が4行以上連続する場合、4行目以降を集約
+///   （診断行 `error:` / `warning:` 等は固有情報があるため対象外）
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -130,23 +131,26 @@ pub fn normalize_lint_output(output: &str) -> String {
     lines.join("\n")
 }
 
-/// 同じ「最初の単語」で始まる行が連続する場合、4行目以降を集約する。
+/// 進捗系の単語で始まる行が連続する場合、4行目以降を集約する。
 /// cargo の `Compiling foo v1.0` のような進捗ログが大量に並ぶケースで
 /// AI に返すフィードバックのトークン量を削減する。
 ///
+/// 集約対象は進捗系の行頭語（`leading_progress_prefix` のホワイトリスト）に
+/// 限定する。`error:` / `warning:` などの診断行は各行に固有情報があるため、
+/// 同じ単語で始まっても集約しない（4 行目以降の情報欠落を防ぐ）。
+///
 /// ルール:
-/// - 行頭の単語（最初の空白までの ASCII 英字始まりトークン）が同一
-/// - その単語が大文字始まりまたは小文字始まりで2文字以上
+/// - 行頭語が進捗系ホワイトリストに含まれ、かつ同一
 /// - 4行以上連続した場合、最初の3行のみ残し、4行目以降は
 ///   `... (and N more lines starting with "<word>")` で要約
 fn collapse_repeated_prefix_lines(lines: Vec<String>) -> Vec<String> {
     let mut result: Vec<String> = Vec::with_capacity(lines.len());
     let mut idx = 0;
     while idx < lines.len() {
-        let prefix = leading_prefix_word(&lines[idx]);
+        let prefix = leading_progress_prefix(&lines[idx]);
         if let Some(word) = prefix {
             let mut run_end = idx + 1;
-            while run_end < lines.len() && leading_prefix_word(&lines[run_end]) == Some(word) {
+            while run_end < lines.len() && leading_progress_prefix(&lines[run_end]) == Some(word) {
                 run_end += 1;
             }
             let run_len = run_end - idx;
@@ -170,9 +174,33 @@ fn collapse_repeated_prefix_lines(lines: Vec<String>) -> Vec<String> {
     result
 }
 
-/// 行頭の集約対象となる単語を返す。
-/// 単語の条件: ASCII 英字始まり、2文字以上、後に空白またはコロンが続く。
-fn leading_prefix_word(line: &str) -> Option<&str> {
+/// 行頭の集約対象となる「進捗系の単語」を返す。
+///
+/// 集約してよいのは cargo / npm 等が大量に出力する進捗ログ
+/// （`Compiling ...` の連発など）に限る。`error:` / `warning:` / `help:` /
+/// `note:` のような診断行は各行に固有の情報を持つため、たとえ同じ単語で
+/// 始まっても集約してはならない（4 行目以降のエラー内容が失われる）。
+/// そのため、進捗系ホワイトリストに一致する単語だけを集約対象として返す。
+///
+/// 単語の条件: ASCII 英字始まり、2文字以上、後に空白またはコロンが続き、
+/// かつ進捗系ホワイトリストに含まれること。
+fn leading_progress_prefix(line: &str) -> Option<&str> {
+    /// cargo / npm 等が連続して大量に出力する進捗ログの行頭語。
+    /// 診断系（error/warning/help/note など）は意図的に含めない。
+    const PROGRESS_WORDS: &[&str] = &[
+        "Building",
+        "Checking",
+        "Compiling",
+        "Documenting",
+        "Downloaded",
+        "Downloading",
+        "Finished",
+        "Fresh",
+        "Installing",
+        "Running",
+        "Updating",
+    ];
+
     let mut end = 0;
     let bytes = line.as_bytes();
     while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
@@ -181,12 +209,18 @@ fn leading_prefix_word(line: &str) -> Option<&str> {
     if end < 2 {
         return None;
     }
-    // 単語の後に空白かコロンがある場合のみ集約対象とする。
+    // 単語の後に空白かコロンがある場合のみ集約候補とする。
     // （`Compiling foo` ✓、`fnname()` ✗、`error[E0001]` ✗）
     let next = bytes.get(end).copied();
-    match next {
-        Some(b' ') | Some(b'\t') | Some(b':') => Some(&line[..end]),
-        _ => None,
+    if !matches!(next, Some(b' ') | Some(b'\t') | Some(b':')) {
+        return None;
+    }
+    let word = &line[..end];
+    // 進捗系のみ集約。診断行は固有情報を持つため集約しない。
+    if PROGRESS_WORDS.contains(&word) {
+        Some(word)
+    } else {
+        None
     }
 }
 
@@ -1508,24 +1542,26 @@ mod tests {
     }
 
     #[test]
-    fn test_leading_prefix_word_with_colon() {
-        // コロンで終わる行も集約対象（例: `error: foo`、`warning: bar`）
-        assert_eq!(leading_prefix_word("error: something"), Some("error"));
-        assert_eq!(leading_prefix_word("Compiling foo"), Some("Compiling"));
+    fn test_leading_progress_prefix_diagnostics_not_matched() {
+        // 診断行（error:/warning:）は進捗系ではないため集約対象にしない（情報欠落防止）。
+        assert_eq!(leading_progress_prefix("error: something"), None);
+        assert_eq!(leading_progress_prefix("warning: bar"), None);
+        // コロン区切りでも進捗系の単語なら認識する
+        assert_eq!(leading_progress_prefix("Compiling foo"), Some("Compiling"));
     }
 
     #[test]
-    fn test_leading_prefix_word_single_char_skipped() {
+    fn test_leading_progress_prefix_single_char_skipped() {
         // 1文字の単語は集約しない
-        assert_eq!(leading_prefix_word("a foo"), None);
+        assert_eq!(leading_progress_prefix("a foo"), None);
     }
 
     #[test]
-    fn test_leading_prefix_word_no_word() {
+    fn test_leading_progress_prefix_no_word() {
         // 行頭が英字でない場合は None
-        assert_eq!(leading_prefix_word("123 foo"), None);
-        assert_eq!(leading_prefix_word("--> file.rs"), None);
-        assert_eq!(leading_prefix_word(""), None);
+        assert_eq!(leading_progress_prefix("123 foo"), None);
+        assert_eq!(leading_progress_prefix("--> file.rs"), None);
+        assert_eq!(leading_progress_prefix(""), None);
     }
 
     // === collapse_space_separated_decorative テスト ===
@@ -1853,5 +1889,60 @@ mod tests {
             result[3],
             "... (and 3 more lines starting with \"Building\")"
         );
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_does_not_collapse_warnings() {
+        // 診断行（warning:）は固有情報を持つため、同じ単語で始まり 4 行以上
+        // 連続しても集約してはならない（4 行目以降のエラー内容の欠落を防ぐ）。
+        let lines = vec![
+            "warning: unused import foo".to_string(),
+            "warning: unused import bar".to_string(),
+            "warning: unused import baz".to_string(),
+            "warning: unused import qux".to_string(),
+            "warning: unused import quux".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        // 全行が保持され、集約行は挿入されない
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_does_not_collapse_errors() {
+        // error: で始まる異なるエラーが連続しても集約しない（情報欠落防止）
+        let lines = vec![
+            "error: mismatched types".to_string(),
+            "error: cannot find value x".to_string(),
+            "error: borrow of moved value".to_string(),
+            "error: unused variable y".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_ignores_non_progress_words() {
+        // 進捗系ホワイトリスト外の単語は集約対象にしない
+        let lines = vec![
+            "Deleting alpha".to_string(),
+            "Deleting beta".to_string(),
+            "Deleting gamma".to_string(),
+            "Deleting delta".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines.clone());
+        assert_eq!(result, lines);
+    }
+
+    #[test]
+    fn test_normalize_collapses_progress_lines_e2e() {
+        // E2E: 進捗系（Compiling）が 4 行以上連続したら 4 行目以降を集約する
+        let input = "Compiling a v1.0\nCompiling b v1.0\nCompiling c v1.0\nCompiling d v1.0\nCompiling e v1.0";
+        let result = normalize_lint_output(input);
+        assert!(result.contains("Compiling a v1.0"));
+        assert!(result.contains("Compiling c v1.0"));
+        assert!(result.contains("and 2 more lines starting with \"Compiling\""));
+        // 4・5 行目の生テキストは集約される
+        assert!(!result.contains("Compiling d v1.0"));
+        assert!(!result.contains("Compiling e v1.0"));
     }
 }

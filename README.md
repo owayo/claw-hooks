@@ -195,7 +195,7 @@ Rules:
 **Why it works better:**
 - ✅ AST-based parsing with tree-sitter-bash for accurate command detection
 - ✅ Quote-aware (detects commands, ignores arguments in quotes)
-- ✅ Detects `sudo rm`, `/usr/bin/sudo -u root rm`, `sudo -n rm`, `sudo --user root rm`, `sudo VAR=value rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`, `bash -lc 'rm ...'`, `cmd /c del`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, `xargs -I`, `xargs sh -c`, `find -exec`, and shell quote-removal forms such as `r\m`, `r''m`, and `$'r\x6d'`
+- ✅ Detects `sudo rm`, `/usr/bin/sudo -u root rm`, `sudo -n rm`, `sudo --user root rm`, `sudo VAR=value rm`, `timeout --signal TERM 10 rm`, `command rm`, `exec rm`, `bash -lc 'rm ...'`, `cmd /c del`, `cd /tmp && rm`, `echo ok & rm` (single `&` background), commands separated by newlines, commands in pipes, `eval`, `xargs -I`, `xargs sh -c`, `find -exec`, value-taking flags with numeric arguments such as `xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`, `bash -c -- 'rm ...'`, `env -S'rm ...'` / `env --split-string`, and shell quote-removal forms such as `r\m`, `r''m`, and `$'r\x6d'`
 - ✅ Handles wrappers and subshells (sudo, timeout, command, exec, bash -c/-lc, cmd /c, xargs, eval, find -exec), including path-prefixed wrappers and Windows executable suffixes such as `.exe`, `.cmd`, `.bat`, and `.com`
 - ✅ Single binary, no Python/jq dependencies
 
@@ -1109,7 +1109,7 @@ The `additionalContext` field passes lint warnings/errors to the agent where the
 
 **Claude Code Stop Block**: `{"decision":"block","reason":"lint errors found..."}`
 
-**Windsurf pre_run_command Block**: Exit code 2 with block message on stderr (Windsurf reads stderr on exit code 2).
+**Windsurf pre_run_command Block**: Exit code 2 with a plain-text block message on stderr — not JSON, since Windsurf displays stderr as text (it reads stderr on exit code 2).
 
 **Windsurf Stop (`post_cascade_response`)**: Always returns `{}`. The hook still runs, but failures are treated as best-effort and are not sent back as a block because Windsurf's stop hook is an asynchronous post-hook.
 

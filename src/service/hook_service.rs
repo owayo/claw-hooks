@@ -38,7 +38,11 @@ impl HookService {
     ///
     /// stdin から JSON 入力を読み取り、処理して stdout に JSON 出力を書き込む。
     /// 入出力フォーマットは設定されたエージェントフォーマットに依存する。
-    pub fn run(&self) -> Result<()> {
+    ///
+    /// 終了コードを `Ok(i32)` で返す。プロセスを直接終了せず呼び出し側に委ねることで、
+    /// 非同期ログ（tracing-appender）のフラッシュ用ガードを確実に drop してから
+    /// 終了できるようにする（ガード未 drop だと終了直前のログが欠落する）。
+    pub fn run(&self) -> Result<i32> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
@@ -62,7 +66,7 @@ impl HookService {
             // セキュリティ: フェイルクローズ - 入力がない場合はブロック
             let output_json = self.adapter.format_error("No input received from stdin");
             self.write_error_output(&mut stdout, &output_json)?;
-            process::exit(self.adapter.error_exit_code());
+            return Ok(self.adapter.error_exit_code());
         }
 
         debug!("Received input: {}", summarize_hook_input(&input));
@@ -129,7 +133,7 @@ impl HookService {
             stdout.flush()?; // パイプのためexit前にフラッシュ
         }
 
-        process::exit(exit_code);
+        Ok(exit_code)
     }
 
     /// フック入力を処理して判定を返す。

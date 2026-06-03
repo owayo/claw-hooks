@@ -23,19 +23,19 @@ fn main() -> Result<()> {
     let config = ConfigService::load(cli.config.as_deref())?;
 
     // デバッグモード時にロギングを初期化。
-    // ガードは main の寿命まで保持してログスレッドを生かしておく必要がある
-    // （ドロップ時にバッファをフラッシュしてからシャットダウンされる）。
-    let _logger_guard = if cli.debug || config.debug {
+    // ガードはコマンド実行が終わるまで保持し、プロセス終了の直前に明示的に drop して
+    // 非同期ログのバッファを確実にフラッシュする（drop しないと終了直前のログが欠落する）。
+    let logger_guard = if cli.debug || config.debug {
         Some(domain::logger::init(&config)?)
     } else {
         None
     };
 
-    // コマンド実行
-    match cli.command {
+    // コマンド実行（終了コードを集約し、ログのフラッシュ後にプロセス終了する）
+    let exit_code: i32 = match cli.command {
         Commands::Hook { format, trace } => {
             let service = HookService::new(config, format, trace);
-            service.run()?;
+            service.run()?
         }
         Commands::Init { path } => {
             let config_path = if let Some(p) = path {
@@ -48,6 +48,7 @@ fn main() -> Result<()> {
             if !cli.quiet {
                 eprintln!("Configuration file created at: {}", config_path.display());
             }
+            0
         }
         Commands::Check => {
             config::validate(&config)?;
@@ -62,11 +63,16 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            0
         }
         Commands::Version => {
             println!("claw-hooks {}", env!("CARGO_PKG_VERSION"));
+            0
         }
-    }
+    };
 
-    Ok(())
+    // 非同期ログ（tracing-appender）のバッファを確実にフラッシュするため、
+    // プロセス終了の直前にロガーガードを明示的に drop する。
+    drop(logger_guard);
+    std::process::exit(exit_code);
 }

@@ -120,20 +120,24 @@ impl ConfigService {
 
     /// プロジェクト設定でのグローバル専用キー（debug, log_path, nano_buddy）の使用を拒否する。
     fn reject_global_only_keys(content: &str, path: &Path) -> Result<()> {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            // コメント行と空行をスキップ
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            for key in GLOBAL_ONLY_KEYS {
-                if trimmed.starts_with(key) && trimmed[key.len()..].trim_start().starts_with('=') {
-                    bail!(
-                        "Project config {} contains '{}' which is only allowed in global config",
-                        path.display(),
-                        key
-                    );
-                }
+        // テキスト行走査ではなく TOML としてパースしてトップレベルキーを照合する。
+        // 行走査だと複数行文字列値の継続行（行頭が `debug =` 等で始まる本文）を
+        // 誤ってキーと判定して正当な設定を誤拒否し、逆に引用符付きキー
+        // （`"debug" = ...`）は素通りしてしまうため、構文解析で正確に判定する。
+        // 注意: toml 1.x の `Value::FromStr` は単一スカラー値用のため、ドキュメント
+        // （key = value の集合）をパースするには `toml::Table` を使う必要がある。
+        let table: toml::Table = match content.parse() {
+            Ok(t) => t,
+            // パースできない場合は、後続の本パースで詳細なエラーになるため何もしない。
+            Err(_) => return Ok(()),
+        };
+        for key in GLOBAL_ONLY_KEYS {
+            if table.contains_key(*key) {
+                bail!(
+                    "Project config {} contains '{}' which is only allowed in global config",
+                    path.display(),
+                    key
+                );
             }
         }
         Ok(())
@@ -481,6 +485,30 @@ commands = ["echo done"]
         let content = "  debug  =  true\n";
         let path = PathBuf::from("test.toml");
         assert!(ConfigService::reject_global_only_keys(content, &path).is_err());
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_allows_multiline_string_with_keylike_body() {
+        // 複数行文字列値の本文に行頭 `debug =` 等が現れても、それは値であって
+        // キーではないため誤って拒否してはならない（行走査ではなく構文解析で判定）。
+        let content = "rm_block_message = \"\"\"\nblocked\ndebug = true\n\"\"\"\n";
+        let path = PathBuf::from("test.toml");
+        assert!(
+            ConfigService::reject_global_only_keys(content, &path).is_ok(),
+            "複数行文字列の本文を誤ってグローバル専用キーと判定してはならない"
+        );
+    }
+
+    #[test]
+    fn test_reject_global_only_keys_detects_quoted_key() {
+        // 引用符付きのトップレベルキー（"debug"）も正しく検出する
+        // （旧来の行頭テキスト走査ではすり抜けていたバイパス）。
+        let content = "\"debug\" = true\n";
+        let path = PathBuf::from("test.toml");
+        assert!(
+            ConfigService::reject_global_only_keys(content, &path).is_err(),
+            "引用符付きキー \"debug\" もグローバル専用キーとして拒否すべき"
+        );
     }
 
     #[test]

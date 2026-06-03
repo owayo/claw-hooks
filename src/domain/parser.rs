@@ -94,6 +94,10 @@ impl ShellParser {
     /// - xargs 付きコマンド
     #[cfg(feature = "ast-parser")]
     pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
+        // スタックオーバーフロー対策: 病的に深い/長い入力は再帰解析を諦め安全側に倒す。
+        if Self::is_pathological_command(command) {
+            return Self::pathological_block_commands();
+        }
         let tree = match self.parser.parse(command, None) {
             Some(tree) => tree,
             None => return self.extract_commands_fallback(command),
@@ -110,7 +114,46 @@ impl ShellParser {
 
     #[cfg(not(feature = "ast-parser"))]
     pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
+        if Self::is_pathological_command(command) {
+            return Self::pathological_block_commands();
+        }
         self.extract_commands_fallback(command)
+    }
+
+    /// 解析対象コマンドが病的に深い/長いか（スタックオーバーフロー対策）。
+    /// 多段にネストしたコマンド置換（`$( $( ... ) )` の連鎖）や極端に長い入力は
+    /// 再帰下降解析でスタックを溢れさせ、SIGABRT で異常終了（フェイルオープン）し得る。
+    /// 上限超過時は解析を諦め、安全側（危険コマンド候補）に倒すための判定。
+    fn is_pathological_command(command: &str) -> bool {
+        /// コマンド文字列長の上限（バイト）。
+        const MAX_COMMAND_LEN: usize = 65_536;
+        /// 括弧ネスト深さの上限。正当なコマンドで超えることはまずない。
+        const MAX_PAREN_DEPTH: usize = 96;
+
+        if command.len() > MAX_COMMAND_LEN {
+            return true;
+        }
+        let mut depth: usize = 0;
+        let mut max_depth: usize = 0;
+        for b in command.bytes() {
+            match b {
+                b'(' => {
+                    depth += 1;
+                    if depth > max_depth {
+                        max_depth = depth;
+                    }
+                }
+                b')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        max_depth > MAX_PAREN_DEPTH
+    }
+
+    /// 病的入力に対して返す、安全側（危険コマンド候補）のコマンド一覧。
+    /// builtin フィルタがこれらを検出して block するため fail-closed になる。
+    fn pathological_block_commands() -> Vec<String> {
+        vec!["rm".to_string(), "kill".to_string(), "dd".to_string()]
     }
 
     /// シェルコマンド文字列から完全なコマンド文字列（コマンド名 + 引数）を抽出する。
@@ -163,6 +206,14 @@ impl ShellParser {
                             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                                 let nested = self.extract_command_strings(&shell_cmd);
                                 command_strings.extend(nested);
+                            }
+                        }
+
+                        // env -S / --split-string を処理（分割文字列をコマンドとして再評価）
+                        if matches_command(&cmd_name, "env") {
+                            let args = self.get_command_arguments(node, source);
+                            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
+                                command_strings.extend(self.extract_command_strings(&env_cmd));
                             }
                         }
 
@@ -262,6 +313,13 @@ impl ShellParser {
             }
         }
 
+        // env -S / --split-string を処理（分割文字列をコマンドとして再評価）
+        if matches_command(&cmd_name, "env") {
+            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
+                command_strings.extend(self.extract_command_strings_fallback(&env_cmd));
+            }
+        }
+
         // xargs 対象コマンドを処理
         if matches_command(&cmd_name, "xargs") {
             if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
@@ -319,6 +377,16 @@ impl ShellParser {
                                 if !commands.contains(&nested_cmd) {
                                     commands.push(nested_cmd);
                                 }
+                            }
+                        }
+                    }
+
+                    // AST レベルで env -S / --split-string を処理
+                    // env は分割文字列をコマンドとして再評価するため、内側も解析する。
+                    if matches_command(&cmd_name, "env") {
+                        if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
+                            for nested_cmd in self.extract_commands(&env_cmd) {
+                                Self::push_unique_command(commands, &nested_cmd);
                             }
                         }
                     }
@@ -447,6 +515,32 @@ impl ShellParser {
                 if script_idx < args.len() {
                     return Some(args[script_idx].clone());
                 }
+            }
+        }
+        None
+    }
+
+    /// env の -S / --split-string の値（コマンド文字列）を取り出す。
+    /// GNU/macOS の env は -S/--split-string で与えた文字列を分割して
+    /// コマンドとして実行するため、内側のコマンドを再帰解析する必要がある。
+    /// 対応形式: `-Scmd`(結合) / `-S cmd`(分離) / `--split-string=cmd` / `--split-string cmd`
+    /// 注意: env 固有処理であり、他コマンドの -S（例: sort -S=メモリ指定）と
+    /// 混同しないよう、呼び出し側で env のときのみ使用すること。
+    fn extract_env_split_string_from_args(args: &[String]) -> Option<String> {
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(value) = arg.strip_prefix("--split-string=") {
+                return (!value.is_empty()).then(|| value.to_string());
+            }
+            if arg == "--split-string" {
+                return args.get(i + 1).cloned();
+            }
+            if let Some(value) = arg.strip_prefix("-S") {
+                if value.is_empty() {
+                    // `-S cmd`（分離形式）: 次トークンが値
+                    return args.get(i + 1).cloned();
+                }
+                // `-Scmd`（結合形式）: -S 直後が値
+                return Some(value.to_string());
             }
         }
         None
@@ -3240,6 +3334,99 @@ mod tests {
             !cmds.iter().any(|c| c == "rm"),
             "rm should NOT leak from quoted string, got: {:?}",
             cmds
+        );
+    }
+
+    // === セキュリティ回帰防止: 危険コマンド検出バイパスの修正 ===
+
+    #[test]
+    fn test_extract_commands_number_arg_does_not_swallow_command() {
+        // 「値を取るフラグ + 数値」で number ノードが脱落し、フラグが後続コマンドを
+        // 消費して検出漏れになるバグの回帰防止。
+        let mut parser = ShellParser::new();
+        for command in [
+            "ls | xargs -n 1 rm -rf",
+            "nice -n 10 rm -rf /tmp/x",
+            "sudo -u 1000 rm -rf /tmp/x",
+        ] {
+            let commands = parser.extract_commands(command);
+            assert!(
+                commands.iter().any(|c| command_key(c) == "rm"),
+                "{command}: rm が検出されるべき: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_bash_c_double_dash() {
+        // `bash -c -- 'script'` で -- を挟むとスクリプトを取りこぼすバグの回帰防止。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("bash -c -- 'rm -rf /tmp/x'");
+        assert!(
+            commands.iter().any(|c| command_key(c) == "rm"),
+            "bash -c -- 'rm...' で rm が検出されるべき: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_env_split_string() {
+        // env -S / --split-string は文字列をコマンドとして再評価するため再帰抽出する。
+        let mut parser = ShellParser::new();
+        for command in [
+            "env -S'rm -rf /tmp/x'",
+            "env -S 'rm -rf /tmp/x'",
+            "env --split-string='rm -rf /tmp/x'",
+            "env --split-string 'rm -rf /tmp/x'",
+        ] {
+            let commands = parser.extract_commands(command);
+            assert!(
+                commands.iter().any(|c| command_key(c) == "rm"),
+                "{command}: rm が検出されるべき: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_env_split_string_is_env_specific() {
+        // env 以外の -S（例: sort -S はメモリサイズ指定）は誤ってコマンド抽出しない。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("sort -S 1G input.txt");
+        assert!(commands.iter().any(|c| command_key(c) == "sort"));
+        assert!(
+            !commands.iter().any(|c| command_key(c) == "rm"),
+            "sort -S を誤ってコマンド抽出してはならない: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_pathological_nesting_fails_closed() {
+        // 多段ネストのコマンド置換でスタックオーバーフロー（フェイルオープン）せず、
+        // 安全側（危険コマンド候補）に倒すことを確認する。
+        let mut deep = String::from("echo safe");
+        for _ in 0..200 {
+            deep = format!("echo $({deep})");
+        }
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(&deep);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+            "深いネストは block コマンドを返すべき: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_long_input_fails_closed() {
+        // 極端に長い入力も安全側に倒す。
+        let long = format!("echo {}", "a".repeat(70_000));
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(&long);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+            "長大入力は block コマンドを返すべき"
         );
     }
 }

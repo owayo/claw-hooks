@@ -6,6 +6,49 @@
 #[cfg(feature = "ast-parser")]
 use tree_sitter::{Node, Parser};
 
+use std::cell::Cell;
+
+/// 再パースを伴う再帰解析（xargs / eval / find -exec / shell -c / env -S の内側
+/// コマンド再評価）の深さ上限。深いネスト入力は再帰下降解析でスタックを溢れさせ
+/// SIGABRT で異常終了（フェイルオープン）し得るため、上限超過時は解析を諦め安全側
+/// （危険コマンド候補）に倒して fail-closed を保つ。正当なコマンドでこの深さに
+/// 達することはまずない。
+const MAX_RECURSION_DEPTH: usize = 64;
+
+thread_local! {
+    /// 再帰解析の現在の深さ（スレッドローカル）。同一スレッドの再帰チェーン内で
+    /// 共有され、`RecursionGuard` により increment / decrement される。
+    static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// 再帰深さを管理する RAII ガード。
+///
+/// `enter()` で深さを +1 し、スコープを抜けると `Drop` で -1 する。
+/// early return や panic でも確実にデクリメントされるためカウンタがリークしない。
+struct RecursionGuard;
+
+impl RecursionGuard {
+    /// 深さを +1 する。すでに上限に達している場合は `None` を返す
+    /// （これ以上再帰せず解析を諦めるべき合図）。
+    fn enter() -> Option<Self> {
+        RECURSION_DEPTH.with(|d| {
+            let depth = d.get();
+            if depth >= MAX_RECURSION_DEPTH {
+                None
+            } else {
+                d.set(depth + 1);
+                Some(RecursionGuard)
+            }
+        })
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        RECURSION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 /// 実コマンドを実行するラッパーコマンド
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
@@ -94,7 +137,11 @@ impl ShellParser {
     /// - xargs 付きコマンド
     #[cfg(feature = "ast-parser")]
     pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
-        // スタックオーバーフロー対策: 病的に深い/長い入力は再帰解析を諦め安全側に倒す。
+        // スタックオーバーフロー対策: 再帰が深すぎる、または病的に深い/長い入力は
+        // 再帰解析を諦め、安全側（危険コマンド候補）に倒して fail-closed を保つ。
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
         if Self::is_pathological_command(command) {
             return Self::pathological_block_commands();
         }
@@ -114,6 +161,9 @@ impl ShellParser {
 
     #[cfg(not(feature = "ast-parser"))]
     pub fn extract_commands(&mut self, command: &str) -> Vec<String> {
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
         if Self::is_pathological_command(command) {
             return Self::pathological_block_commands();
         }
@@ -160,6 +210,15 @@ impl ShellParser {
     /// "npm install" のようなパターンをマッチするためにカスタムフィルターで使用される。
     #[cfg(feature = "ast-parser")]
     pub fn extract_command_strings(&mut self, command: &str) -> Vec<String> {
+        // extract_commands と同様にスタックオーバーフロー対策を行う。
+        // 従来この経路には再帰上限も病的入力チェックも無く、深いネストで
+        // スタックを溢れさせ fail-open になり得た。
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
+        if Self::is_pathological_command(command) {
+            return Self::pathological_block_commands();
+        }
         let tree = match self.parser.parse(command, None) {
             Some(tree) => tree,
             None => return self.extract_command_strings_fallback(command),
@@ -174,6 +233,12 @@ impl ShellParser {
 
     #[cfg(not(feature = "ast-parser"))]
     pub fn extract_command_strings(&mut self, command: &str) -> Vec<String> {
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
+        if Self::is_pathological_command(command) {
+            return Self::pathological_block_commands();
+        }
         self.extract_command_strings_fallback(command)
     }
 
@@ -265,6 +330,10 @@ impl ShellParser {
 
     /// extract_command_strings のフォールバックパーサー
     fn extract_command_strings_fallback(&self, command: &str) -> Vec<String> {
+        // フォールバック経路も内側コマンドを再帰解析するため、再帰深さ上限を適用する。
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
         let mut command_strings = Vec::new();
 
         for segment in Self::split_respecting_quotes(command, ';') {
@@ -1241,6 +1310,11 @@ impl ShellParser {
 
     /// 文字列処理ベースのフォールバックパーサー。
     fn extract_commands_fallback(&self, command: &str) -> Vec<String> {
+        // フォールバック経路も内側コマンドを再帰解析するため、AST 経路と同じ
+        // 再帰深さ上限を適用してスタックオーバーフロー（fail-open）を防ぐ。
+        let Some(_guard) = RecursionGuard::enter() else {
+            return Self::pathological_block_commands();
+        };
         let mut commands = Vec::new();
 
         for segment in Self::split_top_level_terminators(command) {

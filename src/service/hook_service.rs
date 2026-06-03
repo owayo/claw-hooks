@@ -1,7 +1,6 @@
 //! フックイベント処理サービス。
 
 use std::io::{self, Read as _, Write};
-use std::process;
 
 use anyhow::Result;
 use tracing::{debug, error, info};
@@ -93,7 +92,12 @@ impl HookService {
                 // セキュリティ: フェイルクローズ終了コード（2 = block）
                 let output_json = self.adapter.format_error_for_input(&error_msg, &input);
                 self.write_error_output(&mut stdout, &output_json)?;
-                process::exit(self.adapter.error_exit_code());
+                // フェイルクローズ。プロセスを直接終了せず終了コードを返すことで、
+                // 非同期ログ（tracing-appender）のフラッシュ用ガードを呼び出し側
+                // （main）で確実に drop してから終了できるようにする
+                // （process::exit はスタックローカルの drop を実行しないため、
+                //  ここで直接終了するとパースエラー診断ログが欠落し得る）。
+                return Ok(self.adapter.error_exit_code());
             }
         };
 

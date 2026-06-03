@@ -79,6 +79,28 @@ pub fn is_timeout_output(output: &Output) -> bool {
         && output.stderr.starts_with(TIMEOUT_STDERR_PREFIX.as_bytes())
 }
 
+/// リーダースレッドを deadline まで待って join する。
+///
+/// 子プロセスが正常終了していても、バックグラウンドの孫プロセスが stdout/stderr
+/// のパイプを継承して保持し続けると `read_to_end` が EOF を受け取れず `join` が
+/// 無期限にブロックし、設定したタイムアウトが無効化される。これを防ぐため、
+/// deadline 超過時は join を諦め、取得済み（空の可能性あり）バッファを返す。
+///
+/// 子は既に回収済みで PID が再利用される恐れがあるため、ここで killpg はしない。
+/// 残った孫プロセスはプロセス終了時に OS がクリーンアップする。
+fn join_reader_before_deadline(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Vec<u8> {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return Vec::new();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.join().unwrap_or_default()
+}
+
 /// タイムアウト付きでコマンドを実行し、タイムアウトメタデータを返す。
 ///
 /// `Output` のみが必要な場合は `run_with_timeout` を使用する。
@@ -175,9 +197,11 @@ pub fn run_with_timeout_tracked(
         });
     }
 
-    // リーダースレッドから出力を収集（正常なプロセス終了後すぐに完了する）
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
+    // リーダースレッドから出力を収集する（正常終了後は通常すぐ完了する）。
+    // ただし子が早期終了し、バックグラウンドの孫プロセスがパイプを保持し続けると
+    // join が無期限ブロックしタイムアウトが無効化されるため、deadline までで諦める。
+    let stdout = join_reader_before_deadline(stdout_thread, deadline);
+    let stderr = join_reader_before_deadline(stderr_thread, deadline);
 
     Ok(TimedOutput {
         output: Output {

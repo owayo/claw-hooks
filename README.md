@@ -186,7 +186,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 Rules:
 - Each extension hook command template must contain exactly one `{file}` placeholder.
 - Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`, Codex `PostToolUse` with `apply_patch`).
-- Codex `PostToolUse` with `Bash` remains a pass-through command-output event; `apply_patch` payloads are parsed for changed file paths and can trigger extension hooks.
+- Codex `PostToolUse` with `Bash` remains a pass-through command-output event; `apply_patch` payloads are parsed for changed file paths and can trigger extension hooks. Delete-only patches do not run extension hooks because there is no saved file to format or lint.
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
 - Paths containing tabs, newlines, or NUL bytes are rejected.

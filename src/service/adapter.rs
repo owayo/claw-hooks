@@ -2829,6 +2829,29 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_input_post_tool_use_apply_patch_delete_only_has_no_files() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PostToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Delete File: src/removed.rs\n*** End Patch\n"
+            }
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::AfterFileEdit);
+        assert_eq!(result.tool_name, "MultiEdit");
+        if let crate::domain::ToolInput::Files(files) = &result.tool_input {
+            assert!(
+                files.is_empty(),
+                "削除だけの patch では保存後フック対象ファイルを持たない"
+            );
+        } else {
+            panic!("apply_patch は ToolInput::Files に変換されるべき");
+        }
+    }
+
+    #[test]
     fn test_codex_input_pre_tool_use_apply_patch_parses_without_file_path() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{

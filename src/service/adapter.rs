@@ -789,7 +789,6 @@ struct ClaudeInput {
 
     /// このセッションで stop hooks が既に有効かどうか
     #[serde(default)]
-    #[allow(dead_code)]
     stop_hook_active: Option<bool>,
 
     /// エージェントの最後のメッセージ（Stop イベント）

@@ -22,6 +22,7 @@ const MAX_RECURSION_DEPTH: usize = 64;
 /// 深い AST を生み得るため、走査再帰でスタックオーバーフロー（SIGABRT＝fail-open）
 /// を起こし得る。正当なコマンドがこの深さに達することはまず無いため、超過時は
 /// 解析を諦め安全側（危険コマンド候補）に倒して fail-closed を保つ。
+#[cfg(feature = "ast-parser")]
 const MAX_NODE_DEPTH: usize = 500;
 
 thread_local! {
@@ -61,12 +62,15 @@ impl Drop for RecursionGuard {
 /// 実コマンドを実行するラッパーコマンド
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
-    "command", "exec",
+    "command", "exec", "setsid", "stdbuf", "unshare", "nsenter", "setpriv", "chroot", "flock",
+    "taskset", "watch", "busybox", "toybox", "runuser",
 ];
 
-/// -c フラグでコマンド文字列を実行できるシェル
+/// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。
+/// `su` / `runuser` は `-c "cmd"` を sh 経由で実行し、`flock` は `<file> -c cmd` 形式を
+/// 取るため、いずれも shell -c と同様に内側コマンド文字列を再評価する必要がある。
 const SHELL_COMMANDS: &[&str] = &[
-    "bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash", "cmd",
+    "bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash", "cmd", "su", "runuser", "flock",
 ];
 
 /// find で後続引数をコマンドとして実行する述語
@@ -81,10 +85,14 @@ const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
 ///
 /// これにより `/bin/rm`・`cmd.exe`・`DEL` などのパス・拡張子・大文字経由のバイパスを防ぐ。
 pub(crate) fn command_key(command: &str) -> String {
-    let leaf = command
+    // コマンド名位置のブレース展開を最初の選択肢へ畳んでから正規化する。
+    // bash は `{rm,-rf,/p}` を実行前に展開し先頭 `rm` を起動するため、展開しないと
+    // 末尾断片（`p}`）が leaf になり危険コマンド判定をすり抜ける。
+    let expanded = expand_braces_first_choice(command);
+    let leaf = expanded
         .rsplit(['/', '\\'])
         .find(|s| !s.is_empty())
-        .unwrap_or(command);
+        .unwrap_or(&expanded);
     let lower = leaf.to_ascii_lowercase();
     for suffix in [".exe", ".cmd", ".bat", ".com"] {
         if let Some(stripped) = lower.strip_suffix(suffix) {
@@ -92,6 +100,113 @@ pub(crate) fn command_key(command: &str) -> String {
         }
     }
     lower
+}
+
+/// コマンド名位置のブレース展開を「最初の選択肢」で1つの語に畳む。
+///
+/// bash はコマンド位置の `{rm,-rf,/p}` を実行前に `rm -rf /p` へ展開し、先頭トークン
+/// `rm` を起動コマンドとする。`/bin/{rm,ls}` は `/bin/rm /bin/ls`、`{r,}m` は `rm m`
+/// に展開され、いずれも最初の選択肢が起動コマンドになる。セキュリティ判定では最初の
+/// 選択肢のみが実行コマンドになり得るため、それを取り出す。ネスト `{r{m,d},ls}` や
+/// 接頭辞付き `pre{a,b}` も再帰的に畳む。引用された `'{rm,ls}'` は本来展開されないが、
+/// ここでは安全側（過剰に展開）に倒して fail-closed を保つ。
+fn expand_braces_first_choice(word: &str) -> String {
+    if !word.contains('{') {
+        return word.to_string();
+    }
+    let mut out = String::with_capacity(word.len());
+    expand_braces_into(word, &mut out, 0);
+    out
+}
+
+/// ブレース展開の再帰深さ上限。病的入力ガード（`is_pathological_command`）と同じ値。
+/// これを超える深さは正当なコマンドでは生じず、超過時は残りをそのまま追記して
+/// スタックオーバーフローを避ける（runtime 経路では事前に病的入力として block 済み）。
+const MAX_BRACE_EXPAND_DEPTH: usize = 96;
+
+/// `s` を1パスで走査し、コマンド名位置のブレース展開を「最初の非空選択肢」で畳んだ結果を
+/// `out` へ追記する。選んだ選択肢は再帰的に展開する。各バイトは1回だけ走査・コピーされる
+/// ため全体は線形時間（反復ごとに文字列全体を作り直さない）。
+fn expand_braces_into(s: &str, out: &mut String, depth: usize) {
+    if depth > MAX_BRACE_EXPAND_DEPTH {
+        out.push_str(s);
+        return;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut lit_start = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
+            if let Some((close, alt_start, alt_end)) = brace_group_at(bytes, i) {
+                out.push_str(&s[lit_start..i]); // 群より前の literal
+                expand_braces_into(&s[alt_start..alt_end], out, depth + 1); // 選択肢を再帰展開
+                i = close + 1;
+                lit_start = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[lit_start..]); // 末尾の literal
+}
+
+/// `bytes[open] == b'{'` を前提に、その位置から始まる「展開可能な」ブレース群について
+/// (閉じ `}` の位置, 採用する選択肢の開始, 採用する選択肢の終了) のバイト位置を返す。
+/// bash はブレース展開後の最初の「非空」ワードを起動コマンドにするため（`{,rm}` は `rm` を
+/// 起動する）、トップレベルのカンマ区切りのうち最初の非空な選択肢を採用する。全選択肢が空
+/// （`{,}`）なら空へ畳む。カンマを持たない群（`{ cmd; }`）や閉じない群は展開対象外として
+/// None を返す。返す位置はすべて ASCII バイト境界なので、後続のスライスは UTF-8 境界上で安全。
+fn brace_group_at(bytes: &[u8], open: usize) -> Option<(usize, usize, usize)> {
+    let mut depth = 1usize;
+    let mut alt_start = open + 1;
+    let mut first_nonempty: Option<(usize, usize)> = None;
+    let mut has_comma = false;
+    let mut j = open + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if !has_comma {
+                        return None; // トップレベルにカンマが無い → ブレース展開ではない
+                    }
+                    // 末尾の選択肢 alt_start..j も候補に含める。
+                    if first_nonempty.is_none() && j > alt_start {
+                        first_nonempty = Some((alt_start, j));
+                    }
+                    // 非空の選択肢が無ければ（`{,}` 等）空へ畳む。
+                    let (s0, e0) = first_nonempty.unwrap_or((open + 1, open + 1));
+                    return Some((j, s0, e0));
+                }
+            }
+            b',' if depth == 1 => {
+                has_comma = true;
+                if first_nonempty.is_none() && j > alt_start {
+                    first_nonempty = Some((alt_start, j));
+                }
+                alt_start = j + 1;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// コマンド全体のブレース展開を最初の選択肢へ畳んだ文字列を返す（元と異なる場合のみ）。
+///
+/// tree-sitter-bash は先頭 `{` のブレース展開（`{rm,-rf,/p}`）をコマンドではなく
+/// コマンドグループ等として解釈し、`rm` を command_name として取りこぼす。畳んだ
+/// 文字列（`rm`）を再解析することで、AST 経路でもこのバイパスを fail-closed に塞ぐ。
+/// 畳み込みは選択肢を1つに減らすだけなので長さは増えず、再帰解析は必ず停止する。
+#[cfg(feature = "ast-parser")]
+fn brace_expanded_command(command: &str) -> Option<String> {
+    if !command.contains('{') {
+        return None;
+    }
+    let expanded = expand_braces_first_choice(command);
+    (expanded != command).then_some(expanded)
 }
 
 /// SHELL_COMMANDS と一致するかを正規化キーで判定する。
@@ -163,7 +278,15 @@ impl ShellParser {
         let mut commands = Vec::new();
         // 文字列検索の代わりに AST ベースの引数抽出を使用して
         // ラッパーとサブシェルを extract_commands_from_node 内で直接処理する
-        self.extract_commands_from_node(root, command, &mut commands);
+        self.extract_commands_from_node(root, command, &mut commands, 0);
+
+        // tree-sitter は先頭 `{` のブレース展開（`{rm,...}`）をコマンドとして解釈せず
+        // 取りこぼすため、ブレースを最初の選択肢へ畳んだ文字列も解析して補完する。
+        if let Some(expanded) = brace_expanded_command(command) {
+            for nested in self.extract_commands(&expanded) {
+                Self::push_unique_command(&mut commands, &nested);
+            }
+        }
 
         commands
     }
@@ -192,17 +315,21 @@ impl ShellParser {
         if command.len() > MAX_COMMAND_LEN {
             return true;
         }
+        // 括弧 `()` に加えてブレース `{}`（コマンドグループ／ブレース展開）も計数する。
+        // 深いコマンドグループ `{ ...;}` は括弧を使わずにネストでき、括弧のみの計数を
+        // すり抜けて深い AST を生み、走査再帰でスタックを溢れさせ得るため。両者を合算した
+        // 保守的な深さで判定する（多少過大評価しても安全側に倒れるだけ）。
         let mut depth: usize = 0;
         let mut max_depth: usize = 0;
         for b in command.bytes() {
             match b {
-                b'(' => {
+                b'(' | b'{' => {
                     depth += 1;
                     if depth > max_depth {
                         max_depth = depth;
                     }
                 }
-                b')' => depth = depth.saturating_sub(1),
+                b')' | b'}' => depth = depth.saturating_sub(1),
                 _ => {}
             }
         }
@@ -235,7 +362,16 @@ impl ShellParser {
 
         let root = tree.root_node();
         let mut command_strings = Vec::new();
-        self.extract_command_strings_from_node(root, command, &mut command_strings);
+        self.extract_command_strings_from_node(root, command, &mut command_strings, 0);
+
+        // 先頭ブレース展開の取りこぼしを補うため、畳んだ文字列も解析する。
+        if let Some(expanded) = brace_expanded_command(command) {
+            for nested in self.extract_command_strings(&expanded) {
+                if !command_strings.contains(&nested) {
+                    command_strings.push(nested);
+                }
+            }
+        }
 
         command_strings
     }
@@ -259,7 +395,14 @@ impl ShellParser {
         node: Node,
         source: &str,
         command_strings: &mut Vec<String>,
+        depth: usize,
     ) {
+        // AST 走査の再帰がスタックを溢れさせないよう深さ上限を課す。超過時は
+        // 解析を諦め安全側（危険コマンド候補）に倒して fail-closed を保つ。
+        if depth > MAX_NODE_DEPTH {
+            command_strings.extend(Self::pathological_block_commands());
+            return;
+        }
         match node.kind() {
             "command" | "simple_command" => {
                 if let Some(cmd_name) = self.get_command_name(node, source) {
@@ -321,17 +464,32 @@ impl ShellParser {
                 }
                 // コマンド置換のために子ノードに再帰
                 for child in node.children(&mut node.walk()) {
-                    self.extract_command_strings_from_node(child, source, command_strings);
+                    self.extract_command_strings_from_node(
+                        child,
+                        source,
+                        command_strings,
+                        depth + 1,
+                    );
                 }
             }
             "subshell" | "command_substitution" => {
                 for child in node.children(&mut node.walk()) {
-                    self.extract_command_strings_from_node(child, source, command_strings);
+                    self.extract_command_strings_from_node(
+                        child,
+                        source,
+                        command_strings,
+                        depth + 1,
+                    );
                 }
             }
             _ => {
                 for child in node.children(&mut node.walk()) {
-                    self.extract_command_strings_from_node(child, source, command_strings);
+                    self.extract_command_strings_from_node(
+                        child,
+                        source,
+                        command_strings,
+                        depth + 1,
+                    );
                 }
             }
         }
@@ -430,7 +588,19 @@ impl ShellParser {
 
     /// ASTノードを再帰的に走査してコマンドを抽出する
     #[cfg(feature = "ast-parser")]
-    fn extract_commands_from_node(&mut self, node: Node, source: &str, commands: &mut Vec<String>) {
+    fn extract_commands_from_node(
+        &mut self,
+        node: Node,
+        source: &str,
+        commands: &mut Vec<String>,
+        depth: usize,
+    ) {
+        // AST 走査の再帰がスタックを溢れさせないよう深さ上限を課す。超過時は
+        // 解析を諦め安全側（危険コマンド候補）に倒して fail-closed を保つ。
+        if depth > MAX_NODE_DEPTH {
+            commands.extend(Self::pathological_block_commands());
+            return;
+        }
         match node.kind() {
             "command" | "simple_command" => {
                 // command_name の子ノードを取得
@@ -500,19 +670,19 @@ impl ShellParser {
                 // 引数内のコマンド置換を拾うために子ノードも再帰的に探索する。
                 // 例: echo $(yarn --version) から yarn を抽出する。
                 for child in node.children(&mut node.walk()) {
-                    self.extract_commands_from_node(child, source, commands);
+                    self.extract_commands_from_node(child, source, commands, depth + 1);
                 }
             }
             "subshell" | "command_substitution" => {
                 // サブシェル/コマンド置換の中身を再帰解析する。
                 for child in node.children(&mut node.walk()) {
-                    self.extract_commands_from_node(child, source, commands);
+                    self.extract_commands_from_node(child, source, commands, depth + 1);
                 }
             }
             _ => {
                 // 子ノードを再帰走査する。
                 for child in node.children(&mut node.walk()) {
-                    self.extract_commands_from_node(child, source, commands);
+                    self.extract_commands_from_node(child, source, commands, depth + 1);
                 }
             }
         }
@@ -953,6 +1123,30 @@ impl ShellParser {
     const TIMEOUT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--signal", "--kill-after"];
     const NICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--adjustment"];
     const IONICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--class", "--classdata"];
+    // 追加ラッパー（実行委譲）の値取得フラグ。誤って boolean を含めても危険コマンドを
+    // 取りこぼす（fail-open ではなく検出漏れ）だけなので、確実に値を取るものに限定する。
+    const STDBUF_FLAGS_WITH_ARGS: &[&str] = &["-i", "-o", "-e"];
+    const TASKSET_FLAGS_WITH_ARGS: &[&str] = &["-c", "-p"];
+    const WATCH_FLAGS_WITH_ARGS: &[&str] = &["-n", "-d"];
+    const NSENTER_FLAGS_WITH_ARGS: &[&str] = &["-t", "-S", "-G"];
+    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g"];
+    const WATCH_LONG_FLAGS_WITH_ARGS: &[&str] = &["--interval"];
+    const NSENTER_LONG_FLAGS_WITH_ARGS: &[&str] = &["--target", "--setuid", "--setgid"];
+    const RUNUSER_LONG_FLAGS_WITH_ARGS: &[&str] = &["--user", "--group"];
+    const CHROOT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--userspec", "--groups"];
+    const SETPRIV_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--reuid",
+        "--regid",
+        "--groups",
+        "--inh-caps",
+        "--ambient-caps",
+        "--bounding-set",
+        "--securebits",
+        "--pdeathsig",
+        "--selinux-label",
+        "--apparmor-profile",
+    ];
+    const UNSHARE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--map-user", "--map-group", "--setgroups"];
 
     /// 指定ラッパーで「値を次トークンから取る」フラグかを判定する。
     fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
@@ -1004,6 +1198,11 @@ impl ShellParser {
             "ionice" => Self::IONICE_FLAGS_WITH_ARGS,
             "doas" => Self::DOAS_FLAGS_WITH_ARGS,
             "exec" => Self::EXEC_FLAGS_WITH_ARGS,
+            "stdbuf" => Self::STDBUF_FLAGS_WITH_ARGS,
+            "taskset" => Self::TASKSET_FLAGS_WITH_ARGS,
+            "watch" => Self::WATCH_FLAGS_WITH_ARGS,
+            "nsenter" => Self::NSENTER_FLAGS_WITH_ARGS,
+            "runuser" => Self::RUNUSER_FLAGS_WITH_ARGS,
             _ => &[],
         }
     }
@@ -1016,6 +1215,12 @@ impl ShellParser {
             "timeout" => Self::TIMEOUT_LONG_FLAGS_WITH_ARGS,
             "nice" => Self::NICE_LONG_FLAGS_WITH_ARGS,
             "ionice" => Self::IONICE_LONG_FLAGS_WITH_ARGS,
+            "watch" => Self::WATCH_LONG_FLAGS_WITH_ARGS,
+            "nsenter" => Self::NSENTER_LONG_FLAGS_WITH_ARGS,
+            "runuser" => Self::RUNUSER_LONG_FLAGS_WITH_ARGS,
+            "chroot" => Self::CHROOT_LONG_FLAGS_WITH_ARGS,
+            "setpriv" => Self::SETPRIV_LONG_FLAGS_WITH_ARGS,
+            "unshare" => Self::UNSHARE_LONG_FLAGS_WITH_ARGS,
             _ => &[],
         }
     }
@@ -1045,7 +1250,9 @@ impl ShellParser {
     fn find_wrapped_command_index(wrapper: &str, args: &[String]) -> Option<usize> {
         let mut i = 0usize;
         let mut timeout_duration_consumed = false;
+        let mut taskset_mask_consumed = false;
         let wrapper_key = command_key(wrapper);
+        let mut leading_positionals = Self::wrapper_leading_positionals(&wrapper_key);
 
         while i < args.len() {
             let arg = &args[i];
@@ -1084,10 +1291,57 @@ impl ShellParser {
                 continue;
             }
 
+            // chroot <dir> cmd / flock <file> cmd: コマンドの前に位置引数（ディレクトリ／
+            // ロックファイル）を取る。読み飛ばさないと dir/file を実行コマンドと誤認する。
+            if leading_positionals > 0 {
+                leading_positionals -= 1;
+                i += 1;
+                continue;
+            }
+
+            // taskset <mask> cmd: -c 不使用時は先頭に CPU マスク（16進/10進/カンマ列）を取る。
+            if wrapper_key == "taskset"
+                && !taskset_mask_consumed
+                && Self::is_taskset_mask_token(arg)
+            {
+                taskset_mask_consumed = true;
+                i += 1;
+                continue;
+            }
+
             return Some(i);
         }
 
         None
+    }
+
+    /// ラッパーがコマンド名の前に取る位置引数の数（オプションを除く）を返す。
+    /// `chroot <dir> cmd` と `flock <file> cmd` は先頭に1つ位置引数を取る。
+    fn wrapper_leading_positionals(wrapper_key: &str) -> usize {
+        match wrapper_key {
+            "chroot" | "flock" => 1,
+            _ => 0,
+        }
+    }
+
+    /// taskset の CPU マスクトークンらしさを判定する（16進 `0x1`・10進 `1`・カンマ列 `0,2`・
+    /// 範囲 `0-3`）。コマンド名が数字始まりになることはまず無いため、先頭の1トークンのみ
+    /// マスクとして読み飛ばす。判定を誤っても危険コマンドの検出漏れになるだけで過剰
+    /// ブロックは生じない。
+    fn is_taskset_mask_token(token: &str) -> bool {
+        let body = token
+            .strip_prefix("0x")
+            .or_else(|| token.strip_prefix("0X"));
+        match body {
+            Some(hex) => !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            None => {
+                !token.is_empty()
+                    && token.bytes().next().is_some_and(|b| b.is_ascii_digit())
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b == b',' || b == b'-')
+            }
+        }
     }
 
     /// シェル形式の環境変数代入（例: KEY=value）かを判定する。
@@ -1902,6 +2156,37 @@ mod tests {
     }
 
     #[test]
+    fn test_command_key_brace_expansion() {
+        // コマンド名位置のブレース展開は最初の選択肢を採用して正規化する。
+        assert_eq!(command_key("{rm,-rf,/tmp/foo}"), "rm");
+        assert_eq!(command_key("{kill,-9,1}"), "kill");
+        assert_eq!(command_key("{dd,if=/dev/zero}"), "dd");
+        assert_eq!(command_key("/bin/{rm,ls}"), "rm");
+        assert_eq!(command_key("{r,}m"), "rm"); // `{r,}m` → 最初の選択肢 `r` + `m`
+        assert_eq!(command_key("{r{m,d},ls}"), "rm"); // ネスト
+        // ブレース展開でない `{` はそのまま（${VAR} やカンマ無し群）。
+        assert_eq!(command_key("${VAR}"), "${var}");
+        assert_eq!(command_key("git"), "git");
+    }
+
+    #[test]
+    fn test_expand_braces_first_choice() {
+        assert_eq!(expand_braces_first_choice("{rm,ls}"), "rm");
+        assert_eq!(expand_braces_first_choice("pre{a,b}post"), "preapost");
+        assert_eq!(expand_braces_first_choice("/bin/{rm,ls}"), "/bin/rm");
+        assert_eq!(expand_braces_first_choice("{r{m,d},ls}"), "rm");
+        // bash は最初の「非空」選択肢を起動コマンドにする（`{,rm}` → `rm`）。
+        assert_eq!(expand_braces_first_choice("{,rm}"), "rm");
+        assert_eq!(expand_braces_first_choice("{,,rm}"), "rm");
+        assert_eq!(expand_braces_first_choice("{ls,rm}"), "ls");
+        assert_eq!(expand_braces_first_choice("{,}"), "");
+        // カンマの無い群・パラメータ展開は変更しない。
+        assert_eq!(expand_braces_first_choice("${HOME}"), "${HOME}");
+        assert_eq!(expand_braces_first_choice("{ cmd; }"), "{ cmd; }");
+        assert_eq!(expand_braces_first_choice("plain"), "plain");
+    }
+
+    #[test]
     fn test_is_shell_command_recognizes_cmd_exe() {
         // cmd.exe を cmd と認識する
         assert!(is_shell_command("cmd.exe"));
@@ -1937,6 +2222,102 @@ mod tests {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("cmd.exe /c del C:\\tmp\\file.txt");
         assert!(commands.iter().any(|c| command_key(c) == "del"));
+    }
+
+    #[test]
+    fn test_extract_commands_brace_expansion_bypass() {
+        // ブレース展開 `{rm,...}` 経由でも rm が抽出される（#1 バイパス対策）。
+        let mut parser = ShellParser::new();
+        for input in [
+            "{rm,-rf,/tmp/x}",
+            "/bin/{rm,ls} -rf /tmp/x",
+            "{r,}m -rf /tmp/x",
+            "{r{m,d},ls} -rf /tmp/x",
+            "echo hi; {rm,-rf,/tmp/x}",
+            "{,rm} -rf /tmp/x",
+            "{,}rm -rf /tmp/x",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                commands.iter().any(|c| command_key(c) == "rm"),
+                "rm should be detected in: {input} -> {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_brace_first_choice_not_overblocked() {
+        // `{ls,rm}` は bash で先頭 `ls` が起動コマンドになり rm は引数。過剰ブロックしない。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("{ls,rm} -rf /tmp/x");
+        assert!(!commands.iter().any(|c| command_key(c) == "rm"));
+    }
+
+    #[test]
+    fn test_pathological_deep_brace_nesting_fails_closed() {
+        // 深いブレースグループのネストは病的入力として安全側（rm/kill/dd 候補）に倒す（#2）。
+        // 括弧を使わないため、`{`/`}` を計数しない実装ではスタックオーバーフロー→fail-open
+        // し得たケース。
+        let payload = format!("{}rm -rf /{}", "{ ".repeat(2000), " ;}".repeat(2000));
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands(&payload);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+            "deep nesting must fail closed"
+        );
+    }
+
+    #[test]
+    fn test_extract_commands_execution_wrapper_bypasses() {
+        // 実行委譲ラッパー / シェル委譲経由でも内側の rm が抽出される（#3 バイパス対策）。
+        let mut parser = ShellParser::new();
+        for input in [
+            "setsid rm -rf /tmp/x",
+            "flock /tmp/lock rm -rf /tmp/x",
+            "flock -e /tmp/lock rm -rf /tmp/x",
+            "flock /tmp/lock -c \"rm -rf /tmp/x\"",
+            "stdbuf -oL rm -rf /tmp/x",
+            "taskset 1 rm -rf /tmp/x",
+            "taskset 0x3 rm -rf /tmp/x",
+            "taskset -c 0 rm -rf /tmp/x",
+            "su -c \"rm -rf /tmp/x\"",
+            "su root -c \"rm -rf /tmp/x\"",
+            "runuser -u user rm -rf /tmp/x",
+            "runuser -c \"rm -rf /tmp/x\"",
+            "watch -n 1 rm -rf /tmp/x",
+            "busybox rm -rf /tmp/x",
+            "chroot /jail rm -rf /tmp/x",
+            "nsenter -t 123 -m rm -rf /tmp/x",
+            "unshare rm -rf /tmp/x",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                commands.iter().any(|c| command_key(c) == "rm"),
+                "rm should be detected in: {input} -> {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_wrapper_positional_not_overblocked() {
+        // 正常なラッパー使用（ディレクトリ／ファイル／マスクが先頭）は過剰ブロックしない。
+        let mut parser = ShellParser::new();
+        for input in [
+            "flock /tmp/lock echo done",
+            "chroot /jail ls",
+            "taskset -c 0 ls",
+            "setsid mycmd --flag",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                !commands
+                    .iter()
+                    .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+                "must not over-block: {input} -> {commands:?}"
+            );
+        }
     }
 
     #[test]

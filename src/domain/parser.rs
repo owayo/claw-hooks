@@ -15,6 +15,15 @@ use std::cell::Cell;
 /// 達することはまずない。
 const MAX_RECURSION_DEPTH: usize = 64;
 
+/// AST ノードの走査深さ上限。tree-sitter のパース自体は反復処理でスタックを
+/// 溢れさせないが、AST を再帰下降で走査する `extract_commands_from_node` /
+/// `extract_command_strings_from_node` は木の深さに比例してスタックを消費する。
+/// 深いコマンドグループ `{ ...;}` 等は `is_pathological_command` をすり抜けて
+/// 深い AST を生み得るため、走査再帰でスタックオーバーフロー（SIGABRT＝fail-open）
+/// を起こし得る。正当なコマンドがこの深さに達することはまず無いため、超過時は
+/// 解析を諦め安全側（危険コマンド候補）に倒して fail-closed を保つ。
+const MAX_NODE_DEPTH: usize = 500;
+
 thread_local! {
     /// 再帰解析の現在の深さ（スレッドローカル）。同一スレッドの再帰チェーン内で
     /// 共有され、`RecursionGuard` により increment / decrement される。

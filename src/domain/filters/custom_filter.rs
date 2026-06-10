@@ -380,9 +380,9 @@ mod tests {
 
     #[test]
     fn test_custom_filter_with_sudo_wrapper() {
-        // Note: CustomFilter uses extract_command_strings which focuses on direct command matching.
-        // sudo/env wrappers are NOT unwrapped for custom filters (unlike built-in rm/kill filters).
-        // This is a known limitation - custom filters match on command name at start of string.
+        // CustomFilter は extract_command_strings を使う。実行委譲ラッパー（sudo/env/...）の
+        // 内側コマンド文字列も展開されるため、ビルトイン rm/kill フィルタと同様に
+        // ラッパー越しのコマンドにもマッチする（`sudo npm install` 等の素通りを防ぐ）。
         let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
 
         // 直接のnpmコマンドはマッチする
@@ -392,9 +392,12 @@ mod tests {
         // extract_command_stringsがenv接頭辞を処理するため動作する
         assert!(filter.matches("NODE_ENV=prod npm install"));
 
-        // sudo wrapper: Currently does NOT match (known limitation)
-        // CustomFilterの観点ではコマンドは"sudo"であり"npm"ではない
-        assert!(!filter.matches("sudo npm install"));
+        // sudo ラッパー越しでもマッチする（内側コマンドを展開するため）。
+        assert!(filter.matches("sudo npm install"));
+
+        // ただしパターンはコマンド名先頭にアンカーされるため、npm が引数の位置にある
+        // 場合（別コマンドの実行）は誤検知しない。
+        assert!(!filter.matches("sudo apt install npm"));
     }
 
     #[test]

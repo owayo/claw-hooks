@@ -426,6 +426,19 @@ impl ShellParser {
                             }
                         }
 
+                        // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も
+                        // 抽出する。これを行わないと `^npm install` のようなアンカー付きカスタム
+                        // フィルタが `sudo npm install` で素通りする。
+                        if is_command_wrapper(&cmd_name) {
+                            let args = self.get_command_arguments(node, source);
+                            if let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args) {
+                                let inner = args[idx..].join(" ");
+                                if !inner.is_empty() {
+                                    command_strings.extend(self.extract_command_strings(&inner));
+                                }
+                            }
+                        }
+
                         // env -S / --split-string を処理（分割文字列をコマンドとして再評価）
                         if matches_command(&cmd_name, "env") {
                             let args = self.get_command_arguments(node, source);
@@ -546,6 +559,17 @@ impl ShellParser {
         if is_shell_command(&cmd_name) {
             if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
                 command_strings.extend(self.extract_command_strings_fallback(&shell_cmd));
+            }
+        }
+
+        // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も抽出する。
+        // アンカー付きカスタムフィルタが `sudo npm install` で素通りするのを防ぐ。
+        if is_command_wrapper(&cmd_name) {
+            if let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args) {
+                let inner = args[idx..].join(" ");
+                if !inner.is_empty() {
+                    command_strings.extend(self.extract_command_strings_fallback(&inner));
+                }
             }
         }
 
@@ -746,6 +770,19 @@ impl ShellParser {
             let lower = arg.to_ascii_lowercase();
             if matches!(lower.as_str(), "/c" | "/k") && i + 1 < args.len() {
                 return Some(args[i + 1..].join(" "));
+            }
+
+            // su / runuser / flock の long-form コマンド指定（--command / --session-command）。
+            // `--command=script`（結合）と `--command script`（分離）の両形に対応する。
+            // 短縮 -c しか見ないと `su --command "rm -rf /"` を取りこぼしフェイルオープンになる。
+            if let Some(value) = arg
+                .strip_prefix("--command=")
+                .or_else(|| arg.strip_prefix("--session-command="))
+            {
+                return (!value.is_empty()).then(|| value.to_string());
+            }
+            if matches!(arg.as_str(), "--command" | "--session-command") {
+                return args.get(i + 1).cloned();
             }
 
             let has_shell_c = arg == "-c"
@@ -1123,17 +1160,42 @@ impl ShellParser {
     const TIMEOUT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--signal", "--kill-after"];
     const NICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--adjustment"];
     const IONICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--class", "--classdata"];
-    // 追加ラッパー（実行委譲）の値取得フラグ。誤って boolean を含めても危険コマンドを
-    // 取りこぼす（fail-open ではなく検出漏れ）だけなので、確実に値を取るものに限定する。
+    // 追加ラッパー（実行委譲）の値取得フラグ。値取得フラグの過不足は「実コマンドの取りこぼし
+    // （フェイルオープン）」を生むだけで過剰ブロックは生じないため、各ツールの実フラグ仕様に
+    // 合わせて短縮形・長形ともに網羅する。任意引数フラグ（例: watch -d）は `-d <cmd>` 形が
+    // 一般的なので boolean 扱い（値を取らない）にして次トークンのコマンドを取りこぼさない。
     const STDBUF_FLAGS_WITH_ARGS: &[&str] = &["-i", "-o", "-e"];
+    const STDBUF_LONG_FLAGS_WITH_ARGS: &[&str] = &["--input", "--output", "--error"];
     const TASKSET_FLAGS_WITH_ARGS: &[&str] = &["-c", "-p"];
-    const WATCH_FLAGS_WITH_ARGS: &[&str] = &["-n", "-d"];
-    const NSENTER_FLAGS_WITH_ARGS: &[&str] = &["-t", "-S", "-G"];
-    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g"];
+    const TASKSET_LONG_FLAGS_WITH_ARGS: &[&str] = &["--cpu-list", "--pid"];
+    const WATCH_FLAGS_WITH_ARGS: &[&str] = &["-n"];
     const WATCH_LONG_FLAGS_WITH_ARGS: &[&str] = &["--interval"];
-    const NSENTER_LONG_FLAGS_WITH_ARGS: &[&str] = &["--target", "--setuid", "--setgid"];
+    const NSENTER_FLAGS_WITH_ARGS: &[&str] = &["-t", "-S", "-G"];
+    const NSENTER_LONG_FLAGS_WITH_ARGS: &[&str] =
+        &["--target", "--setuid", "--setgid", "--root", "--wd"];
+    const UNSHARE_FLAGS_WITH_ARGS: &[&str] = &["-R", "-S", "-G"];
+    const UNSHARE_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--map-user",
+        "--map-group",
+        "--setgroups",
+        "--root",
+        "--setuid",
+        "--setgid",
+        "--wd",
+    ];
+    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g"];
     const RUNUSER_LONG_FLAGS_WITH_ARGS: &[&str] = &["--user", "--group"];
     const CHROOT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--userspec", "--groups"];
+    const FLOCK_FLAGS_WITH_ARGS: &[&str] = &["-w", "-E"];
+    const FLOCK_LONG_FLAGS_WITH_ARGS: &[&str] = &["--timeout", "--conflict-exit-code"];
+    const TIME_FLAGS_WITH_ARGS: &[&str] = &["-o", "-f"];
+    const TIME_LONG_FLAGS_WITH_ARGS: &[&str] = &["--output", "--format"];
+    // strace / ltrace の値取得フラグ（出力先・式・PID・サイズ等）。`-o` を取りこぼすと
+    // `strace -o file rm` で rm を見落とすため網羅する。両ツールで共用する。
+    const STRACE_FLAGS_WITH_ARGS: &[&str] = &[
+        "-o", "-e", "-p", "-s", "-E", "-P", "-a", "-S", "-u", "-b", "-l", "-X",
+    ];
+    const STRACE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--output", "--expression", "--attach"];
     const SETPRIV_LONG_FLAGS_WITH_ARGS: &[&str] = &[
         "--reuid",
         "--regid",
@@ -1146,7 +1208,6 @@ impl ShellParser {
         "--selinux-label",
         "--apparmor-profile",
     ];
-    const UNSHARE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--map-user", "--map-group", "--setgroups"];
 
     /// 指定ラッパーで「値を次トークンから取る」フラグかを判定する。
     fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
@@ -1203,6 +1264,10 @@ impl ShellParser {
             "watch" => Self::WATCH_FLAGS_WITH_ARGS,
             "nsenter" => Self::NSENTER_FLAGS_WITH_ARGS,
             "runuser" => Self::RUNUSER_FLAGS_WITH_ARGS,
+            "unshare" => Self::UNSHARE_FLAGS_WITH_ARGS,
+            "flock" => Self::FLOCK_FLAGS_WITH_ARGS,
+            "time" => Self::TIME_FLAGS_WITH_ARGS,
+            "strace" | "ltrace" => Self::STRACE_FLAGS_WITH_ARGS,
             _ => &[],
         }
     }
@@ -1221,6 +1286,11 @@ impl ShellParser {
             "chroot" => Self::CHROOT_LONG_FLAGS_WITH_ARGS,
             "setpriv" => Self::SETPRIV_LONG_FLAGS_WITH_ARGS,
             "unshare" => Self::UNSHARE_LONG_FLAGS_WITH_ARGS,
+            "stdbuf" => Self::STDBUF_LONG_FLAGS_WITH_ARGS,
+            "taskset" => Self::TASKSET_LONG_FLAGS_WITH_ARGS,
+            "flock" => Self::FLOCK_LONG_FLAGS_WITH_ARGS,
+            "time" => Self::TIME_LONG_FLAGS_WITH_ARGS,
+            "strace" | "ltrace" => Self::STRACE_LONG_FLAGS_WITH_ARGS,
             _ => &[],
         }
     }
@@ -2291,11 +2361,45 @@ mod tests {
             "chroot /jail rm -rf /tmp/x",
             "nsenter -t 123 -m rm -rf /tmp/x",
             "unshare rm -rf /tmp/x",
+            // 値取得フラグ（long/short）の後ろに実コマンドが続くケース（codex 指摘の
+            // フェイルオープン回帰対策）。フラグ値を実コマンドと誤認しないこと。
+            "watch -d rm -rf /tmp/x",
+            "stdbuf --output L rm -rf /tmp/x",
+            "unshare -R /jail rm -rf /tmp/x",
+            "unshare --root /jail rm -rf /tmp/x",
+            "nsenter --wd /tmp rm -rf /tmp/x",
+            "flock -w 1 /tmp/lock rm -rf /tmp/x",
+            "time -o /tmp/t rm -rf /tmp/x",
+            "strace -o /tmp/trace rm -rf /tmp/x",
+            // su / runuser / flock の long-form コマンド指定。
+            "su --command \"rm -rf /tmp/x\" root",
+            "su --command=\"rm -rf /tmp/x\" root",
+            "runuser --session-command \"rm -rf /tmp/x\" user",
+            "flock --command \"rm -rf /tmp/x\" /tmp/lock",
         ] {
             let commands = parser.extract_commands(input);
             assert!(
                 commands.iter().any(|c| command_key(c) == "rm"),
                 "rm should be detected in: {input} -> {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_command_strings_expands_wrappers() {
+        // カスタムフィルタ用の文字列抽出経路でもラッパーの内側コマンドを展開する
+        // （`^npm install` のようなアンカー付きパターンが `sudo npm install` で
+        // 素通りしないこと）。
+        let mut parser = ShellParser::new();
+        for (input, needle) in [
+            ("sudo npm install", "npm install"),
+            ("setsid npm run build", "npm run build"),
+            ("flock /tmp/lock npm test", "npm test"),
+        ] {
+            let strings = parser.extract_command_strings(input);
+            assert!(
+                strings.iter().any(|s| s.contains(needle)),
+                "{needle:?} should be extracted from {input:?} -> {strings:?}"
             );
         }
     }

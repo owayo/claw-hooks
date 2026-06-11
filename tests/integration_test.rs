@@ -564,11 +564,12 @@ fn test_cursor_format_stop_completed() {
     let input = r#"{"hook_event_name":"stop","status":"completed","loop_count":2}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    // Stop イベントは監視用途のため許可される
+    // Stop イベントは監視用途のため許可される。Stop+Allow は空オブジェクトを返す（permission は出さない）
     assert_eq!(exit_code, 0, "stop event should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor stop allow should return empty JSON: {}",
         stdout
     );
 }
@@ -581,9 +582,10 @@ fn test_cursor_format_stop_aborted() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "stop event should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor stop allow should return empty JSON: {}",
         stdout
     );
 }
@@ -596,9 +598,10 @@ fn test_cursor_format_stop_error() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "stop event should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor stop allow should return empty JSON: {}",
         stdout
     );
 }

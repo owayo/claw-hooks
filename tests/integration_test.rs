@@ -1046,9 +1046,10 @@ fn test_empty_input_is_fail_closed() {
         "Output should indicate fail-closed: {}",
         stderr
     );
+    // Claude は exit 2 のとき stderr 本文をプレーンテキストのエラーとして扱うため、JSON ではなく本文を出す
     assert!(
-        stderr.contains(r#""decision":"block""#),
-        "Output should indicate block: {}",
+        !stderr.contains(r#""decision":"block""#),
+        "Claude fail-closed should be plain text, not JSON: {}",
         stderr
     );
 }

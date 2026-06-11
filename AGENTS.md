@@ -116,7 +116,7 @@ cargo run -- version     # Show version
 - PostToolUse Block: `{"decision":"block","reason":"..."}`
 - Stop output: Allow = `{}`, Block = `{"decision":"block","reason":"..."}`
 - 通常の許可/ブロック判定は stdout JSON + exit code 0 で返す（Claude は exit 0 のときだけ stdout JSON を解析する）
-- Fail-closed errors: exit code 2 + stderr に `{"decision":"block","reason":"..."}` を出す
+- Fail-closed errors: exit code 2 + stderr にメッセージ本文をプレーンテキストで出力（Claude は exit 2 のとき stdout/JSON を解析せず stderr 本文をエラーメッセージとして扱うため、`{"decision":...}` のような JSON ではなく本文のみを出す。exit 2 自体がブロックを意味するためフェイルクローズドは維持される）
 - 未対応イベント（`StopFailure`, `PermissionRequest`, `PreCompact` 等）は allow でパススルー（Cursor / Codex / Gemini と同じ挙動）
 
 ### Cursor

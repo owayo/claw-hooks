@@ -124,13 +124,12 @@ impl FormatAdapter {
         let error_message = format!("🚫 Hook error (fail-closed): {}", message);
         match self.format {
             Format::Claude => {
-                // Claude: decision + reason の JSON でブロック（exit 2 + stderr、Claude は JSON を解析する）
-                // セキュリティ: パースエラー時はブロック（フェイルクローズド設計）
-                serde_json::json!({
-                    "decision": "block",
-                    "reason": error_message
-                })
-                .to_string()
+                // Claude: exit 2 では stdout の JSON は無視され、stderr 本文がエラーメッセージとして
+                // Claude に渡される（公式仕様: "Claude Code ignores JSON when you exit 2"）。
+                // そのため fail-closed では JSON ではなくプレーンテキスト本文のみを返す。
+                // format_uses_stderr_for_errors()=true + error_exit_code()=2 により stderr + exit 2 で
+                // ブロックが成立し、フェイルクローズド設計は維持される。
+                error_message
             }
             Format::Windsurf => {
                 // Windsurf: stderr はプレーンテキストのエラーメッセージとして扱われる（JSON 解析なし）。
@@ -612,17 +611,21 @@ impl FormatAdapter {
     }
 
     fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop Blockイベントは"followup_message"を使用してエージェントに修正を指示する
+        // Stop の出力スキーマは followup_message のみ（公式に permission フィールドは存在しない）。
+        // Block は修正を指示する followup_message を返し、Allow は空オブジェクトを返す。
         if event == HookEvent::Stop {
-            if let Decision::Block { message } = decision {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
-                let output = CursorStopOutput {
-                    followup_message: truncated,
-                };
-                return serde_json::to_string(&output)
-                    .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e));
-            }
+            return match decision {
+                Decision::Block { message } => {
+                    let normalized = normalize_lint_output(message);
+                    let truncated = truncate_output(&normalized, self.output_max_length);
+                    let output = CursorStopOutput {
+                        followup_message: truncated,
+                    };
+                    serde_json::to_string(&output)
+                        .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e))
+                }
+                Decision::Allow { .. } => Ok("{}".to_string()),
+            };
         }
 
         let output = match &self.truncate_decision(decision) {
@@ -1703,13 +1706,15 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_output_stop_allow_unchanged() {
+    fn test_cursor_output_stop_allow_returns_empty_json() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        // Stop の Allow は標準の allow 形式を使う
-        assert!(output.contains(r#""permission":"allow""#));
+        // Stop の出力スキーマは followup_message のみ。Allow は空オブジェクトを返す（permission は出さない）
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed, serde_json::json!({}));
+        assert!(!output.contains(r#""permission""#));
         assert!(!output.contains(r#""followup_message""#));
     }
 
@@ -2434,8 +2439,10 @@ mod tests {
     fn test_claude_error_format_fail_closed() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter.format_error("Parse error");
-        assert!(output.contains(r#""decision":"block""#));
+        // Claude は exit 2 のとき stderr 本文をプレーンテキストのエラーとして扱うため、JSON ではなく本文を返す
+        assert_eq!(output, "🚫 Hook error (fail-closed): Parse error");
         assert!(output.contains("fail-closed"));
+        assert!(!output.contains(r#""decision":"block""#));
     }
 
     #[test]
@@ -2691,13 +2698,15 @@ mod tests {
     // === format_error のテスト ===
 
     #[test]
-    fn test_format_error_claude_contains_block_and_reason() {
-        // Claude: "block" と "reason" を含む
+    fn test_format_error_claude_is_plain_text() {
+        // Claude: exit 2 では JSON が無視されるため、プレーンテキスト本文のみを返す
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter.format_error("test error");
-        assert!(output.contains("block"));
-        assert!(output.contains("reason"));
+        assert_eq!(output, "🚫 Hook error (fail-closed): test error");
         assert!(output.contains("fail-closed"));
+        // JSON の decision/reason キーは含まない
+        assert!(!output.contains(r#""decision""#));
+        assert!(!output.contains(r#""reason""#));
     }
 
     #[test]
@@ -3418,12 +3427,12 @@ mod tests {
     // === format_error の各フォーマット出力テスト ===
 
     #[test]
-    fn test_format_error_claude_is_valid_json() {
+    fn test_format_error_claude_is_not_json() {
+        // Claude の fail-closed は exit 2 で JSON が無視されるためプレーンテキスト本文（JSON ではない）
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let output = adapter.format_error("test error");
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "block");
-        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_err());
+        assert!(output.contains("test error"));
     }
 
     #[test]
@@ -3928,9 +3937,11 @@ impl FormatAdapter {
             .get("tool_input")
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
         let tool_input = if raw_tool_name == "apply_patch" {
+            // Bash 経路と同様に空文字列の command も fail-closed にする（必須フィールド扱い）。
             let command = raw_tool_input
                 .get("command")
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
             crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
         } else {

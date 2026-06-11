@@ -2879,6 +2879,23 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_input_empty_command_in_apply_patch_tool_is_error() {
+        // apply_patch の command が空文字列の場合は Bash 経路と同様に fail-closed にする
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": { "command": "" }
+        }"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(
+            err.to_string().contains("command"),
+            "空コマンドは command 関連のエラーになるべき: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_codex_apply_patch_move_uses_destination_path() {
         let paths = FormatAdapter::extract_apply_patch_paths(
             "*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n old\n new\n*** Delete File: src/deleted.rs\n*** End Patch\n",

@@ -225,14 +225,17 @@ fn leading_progress_prefix(line: &str) -> Option<&str> {
 }
 
 /// 同一文字が連続する装飾文字をトークン効率のために圧縮する。
-/// 対象: `.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`
+/// 対象: `.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`
 /// ルール:
-/// - `=`, `-`, `─`, `━`, `^`, `·`, `→` は4回以上の連続で1文字に圧縮
+/// - `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_` は4回以上の連続で1文字に圧縮
 /// - `.` は4回以上の連続、または行末の3連続以上で1文字に圧縮
 /// - `-` が2回以上連続して直後に `>` が続く場合は1文字に圧縮（`-->` → `->`、rustc の位置マーカー対策）
+/// - `_` は rustc/ruff/biome のマルチライン span 下線 `| |_____^` の範囲マーカー対策。
+///   snake_case 識別子の区切りは通常 1〜2 連続のため 4 連続以上の閾値では影響しない
 ///
 /// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`,
-///     `············` → `·`, `→→→→` → `→`, `-->` → `->`, `---->` → `->`
+///     `············` → `·`, `→→→→` → `→`, `-->` → `->`, `---->` → `->`,
+///     `| |_______________^` → `| |_^`
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -352,11 +355,13 @@ fn collapse_space_separated_decorative(input: &str) -> String {
 }
 
 /// 装飾文字かどうかを判定する。
-/// `·` (U+00B7) と `→` (U+2192) は biome 等が diff 行で空白・タブを
-/// 視覚化する際に大量に出力するため、4 文字以上連続した場合のみ
-/// 1 文字に圧縮してトークン効率を高める。
+/// `·` (U+00B7) / `→` (U+2192) は biome 等が diff 行で空白・タブを視覚化する際に、
+/// `_` (U+005F) は rustc/ruff/biome のマルチライン span 下線
+/// (`| |_______________^` のような複数行スパンの範囲マーカー) として大量に出力するため、
+/// 4 文字以上連続した場合のみ 1 文字に圧縮してトークン効率を高める。
+/// 注: snake_case 識別子の区切りは通常 1〜2 文字連続のため、4 文字以上の閾値により影響しない。
 fn is_decorative_char(c: char) -> bool {
-    matches!(c, '.' | '=' | '-' | '─' | '━' | '^' | '·' | '→')
+    matches!(c, '.' | '=' | '-' | '─' | '━' | '^' | '·' | '→' | '_')
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -1304,6 +1309,22 @@ mod tests {
         assert_eq!(collapse_repeated_chars("^^^"), "^^^");
         // 行内の長い caret マーカーも圧縮対象
         assert_eq!(collapse_repeated_chars("| ^^^^^^"), "| ^");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_underscore_span_marker() {
+        // rustc/ruff/biome のマルチライン span 下線 `| |_____^` を圧縮（範囲マーカー対策）
+        assert_eq!(collapse_repeated_chars("| |_______^"), "| |_^");
+        assert_eq!(
+            collapse_repeated_chars("| |_______________________________^"),
+            "| |_^"
+        );
+        // snake_case 識別子の区切り（1〜2 連続）は保持する
+        assert_eq!(collapse_repeated_chars("MID_MONTH_DAY"), "MID_MONTH_DAY");
+        assert_eq!(collapse_repeated_chars("__init__"), "__init__");
+        // 3 連続以下は保持、4 連続以上で圧縮
+        assert_eq!(collapse_repeated_chars("a___b"), "a___b");
+        assert_eq!(collapse_repeated_chars("____"), "_");
     }
 
     #[test]

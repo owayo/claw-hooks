@@ -198,7 +198,10 @@ fn collapse_repeated_prefix_lines(lines: Vec<String>) -> Vec<String> {
 fn leading_progress_prefix(line: &str) -> Option<&str> {
     /// cargo / npm 等が連続して大量に出力する進捗ログの行頭語。
     /// 診断系（error/warning/help/note など）は意図的に含めない。
+    /// `Blocking` は cargo がロック待ち中に繰り返し出力する
+    /// `Blocking waiting for file lock on ...` 行（診断価値なし）が対象。
     const PROGRESS_WORDS: &[&str] = &[
+        "Blocking",
         "Building",
         "Checking",
         "Compiling",
@@ -377,18 +380,24 @@ fn is_decorative_char(c: char) -> bool {
 
 /// 行が診断ブロックの枠線・キャレットマーカーのみで構成されているか判定する。
 ///
-/// 対象は ASCII パイプ `|`、box-drawing 縦線 `│` (U+2502)、キャレット `^`、
+/// 対象は ASCII パイプ `|`、キャレット `^`、Box Drawing 文字
+/// (U+2500–U+257F: `│` `─` `╭` `╮` `╰` `╯` `┌` `└` 等の罫線素片全般)、
 /// および空白だけからなる行。ruff / biome / rustc が診断ブロックでソース行の
 /// 上下に出力する純粋な視覚装飾行（例: ruff の `|` / `| ^`、biome の `│`、
-/// rustc の `   |`）が該当する。これらは診断テキスト（コード・メッセージ・
+/// rustc の `   |`）、pnpm 等の通知バナー枠（`╭─╮` / `╰─╯`）、biome の
+/// `─────` 区切り線が該当する。これらは診断テキスト（コード・メッセージ・
 /// `file:line:col`）を一切含まず、キャレットが指す列位置は直前の
 /// `file:line:col` ヘッダに数値で残るため、除去してもエラー情報は失われない。
 ///
 /// 英数字を含む行（`error:` / `warning:` 見出し、`10 │ let x = ...` のソース行、
-/// `| ^ expected u32` のようなラベル付きキャレット行）は対象外。
-/// `| --- |` のような Markdown テーブル区切りも `-` を含むため保持される。
+/// `| ^ expected u32` のようなラベル付きキャレット行、`│ Update available! │`
+/// のようなバナー本文行）は対象外。
+/// `| --- |` のような Markdown テーブル区切りも ASCII `-` を含むため保持される。
 fn is_diagnostic_frame_line(line: &str) -> bool {
-    !line.is_empty() && line.chars().all(|c| matches!(c, '|' | '│' | '^' | ' '))
+    !line.is_empty()
+        && line
+            .chars()
+            .all(|c| matches!(c, '|' | '^' | ' ' | '\u{2500}'..='\u{257F}'))
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。

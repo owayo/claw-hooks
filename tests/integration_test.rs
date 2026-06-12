@@ -1197,9 +1197,16 @@ fn test_codex_missing_tool_input_is_fail_closed() {
         "Output should mention the missing required field: {}",
         stdout
     );
-    assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should indicate block: {}",
+    // PreToolUse のパースエラーは推奨形式 hookSpecificOutput.permissionDecision="deny" で返す
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse",
+        "Output should use PreToolUse hookSpecificOutput: {}",
+        stdout
+    );
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Output should indicate deny: {}",
         stdout
     );
 }
@@ -1404,14 +1411,23 @@ fn test_codex_format_block_rm_command() {
 
     // Codex: 非0終了コードはフック失敗扱いのため exit 0 + JSON で block を伝達
     assert_eq!(exit_code, 0, "Codex block should still exit 0");
-    assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should contain block decision: {}",
+    // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny"
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse",
+        "Output should use PreToolUse hookSpecificOutput: {}",
+        stdout
+    );
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Output should contain deny decision: {}",
         stdout
     );
     assert!(
-        stdout.contains(r#""reason""#),
-        "Output should contain reason field: {}",
+        parsed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "Output should contain non-empty reason: {}",
         stdout
     );
 }
@@ -1444,9 +1460,11 @@ fn test_codex_format_block_kill_command() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
 
     assert_eq!(exit_code, 0, "Codex block should still exit 0");
-    assert!(
-        stdout.contains(r#""decision":"block""#),
-        "Output should contain block decision: {}",
+    // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny"
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Output should contain deny decision: {}",
         stdout
     );
 }

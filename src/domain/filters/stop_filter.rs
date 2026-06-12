@@ -152,7 +152,7 @@ impl StopHookFilter {
         reason.trim().to_string()
     }
 
-    /// ループ防止チェック。環境変数と stop_hook_active フラグを確認する。
+    /// ループ防止チェック。環境変数・stop_hook_active フラグ・loop_count を確認する。
     fn check_loop_prevention(input: &HookInput) -> LoopCheck {
         // クロスプロセス再帰ループ防止
         if std::env::var(STOP_ACTIVE_ENV).is_ok() {
@@ -169,6 +169,16 @@ impl StopHookFilter {
             if stop_input.stop_hook_active {
                 debug!("🛑 stop_hook_active=true, skipping all stop hooks");
                 return LoopCheck::Skip;
+            }
+            // Cursor は stop_hook_active を持たず、代わりに loop_count
+            // （stop hook 由来の自動フォローアップ発火回数、0 始まり）を送る。
+            // 1 以上なら既にフォローアップ済みなので、Claude の stop_hook_active と
+            // 対称的に全 stop hook をスキップして無限ループを防ぐ。
+            if let Some(count) = stop_input.loop_count {
+                if count >= 1 {
+                    debug!("🛑 loop_count={} (>=1), skipping all stop hooks", count);
+                    return LoopCheck::Skip;
+                }
             }
             stop_input.agent_message.clone()
         } else {

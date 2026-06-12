@@ -170,6 +170,9 @@ impl FormatAdapter {
     /// 入力のイベント名を考慮してエラー出力をフォーマットする。
     ///
     /// Codex の PermissionRequest は通常の block 形式ではなく専用の deny schema を要求する。
+    /// PreToolUse も推奨形式（hookSpecificOutput.permissionDecision="deny"）で返す。
+    /// イベント名が判別できない場合は legacy block 形式（全イベントで受理される）に
+    /// フォールバックし、フェイルクローズドを維持する。
     pub fn format_error_for_input(&self, message: &str, input: &str) -> String {
         if self.format == Format::Codex {
             if let Some(raw_event) = Self::raw_hook_event_name(input) {
@@ -185,6 +188,17 @@ impl FormatAdapter {
                                 "behavior": "deny",
                                 "message": error_message
                             }
+                        }
+                    })
+                    .to_string();
+                }
+                if matches!(raw_event.as_str(), "PreToolUse" | "pre_tool_use") {
+                    let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+                    return serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": error_message
                         }
                     })
                     .to_string();
@@ -2941,7 +2955,7 @@ mod tests {
 
     #[test]
     fn test_codex_output_block() {
-        // Codex: Block出力 → "block" と "reason" を含む
+        // Codex: PreToolUse の Block → 推奨形式 hookSpecificOutput.permissionDecision="deny"
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter
             .format_output(
@@ -2952,13 +2966,18 @@ mod tests {
             )
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "block");
+        let hso = &parsed["hookSpecificOutput"];
+        assert_eq!(hso["hookEventName"], "PreToolUse");
+        assert_eq!(hso["permissionDecision"], "deny");
         assert!(
-            parsed["reason"]
+            hso["permissionDecisionReason"]
                 .as_str()
                 .unwrap()
                 .contains("dangerous command")
         );
+        // legacy のトップレベル decision/reason は含めない
+        assert!(parsed.get("decision").is_none());
+        assert!(parsed.get("reason").is_none());
     }
 
     #[test]
@@ -3989,7 +4008,9 @@ impl FormatAdapter {
     fn format_codex_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         // Codex CLI: Allow は exit 0 + 空 JSON（公式ドキュメント推奨）。
         // PermissionRequest の Block は専用の hookSpecificOutput で deny を返す。
-        // その他の Block は legacy 形式 {"decision":"block","reason":"..."} を使用する。
+        // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny" を使用する
+        // （legacy の {"decision":"block"} も受理されるが、公式ドキュメントの主形式に合わせる）。
+        // PostToolUse / Stop の Block は {"decision":"block","reason":"..."} がそれぞれの正式形式。
         let output = match decision {
             Decision::Allow {
                 additional_context: Some(ctx),
@@ -4014,6 +4035,14 @@ impl FormatAdapter {
                                 "behavior": "deny",
                                 "message": truncated
                             }
+                        }
+                    })
+                } else if event == HookEvent::BeforeCommand {
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": truncated
                         }
                     })
                 } else {

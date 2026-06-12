@@ -1407,14 +1407,64 @@ mod tests {
         assert!(is_diagnostic_frame_line("│ ^"));
         assert!(is_diagnostic_frame_line("^"));
         assert!(is_diagnostic_frame_line("| | ^"));
+        // Box Drawing 文字のみのバナー枠・区切り線も frame line
+        assert!(is_diagnostic_frame_line("╭─╮"));
+        assert!(is_diagnostic_frame_line("╰─╯"));
+        assert!(is_diagnostic_frame_line("│ │"));
+        assert!(is_diagnostic_frame_line("┌──┐"));
+        assert!(is_diagnostic_frame_line("└──┘"));
+        assert!(is_diagnostic_frame_line("─"));
+        assert!(is_diagnostic_frame_line("━"));
         // 英数字を含む行は frame line ではない
         assert!(!is_diagnostic_frame_line("| ^ expected u32"));
         assert!(!is_diagnostic_frame_line("10 | let x = 1;"));
         assert!(!is_diagnostic_frame_line("error: foo"));
+        assert!(!is_diagnostic_frame_line("│ Update available! │"));
         // `-` を含む Markdown テーブル区切りは保持対象
         assert!(!is_diagnostic_frame_line("| --- |"));
         // 空文字列は対象外
         assert!(!is_diagnostic_frame_line(""));
+    }
+
+    #[test]
+    fn test_normalize_removes_pnpm_update_banner_frame() {
+        // pnpm の更新通知バナー。枠線行（╭─╮ / │ │ / ╰─╯）は除去され、
+        // 本文行（│ Update available! ... │）は保持される。
+        let input = "Stop hook failed: pnpm exec tsc --noEmit\n╭─────────────────────────────╮\n│                             │\n│ Update available! 11.5.2 → 11.5.3. │\n│ To update, run: corepack use pnpm@11.5.3 │\n│                             │\n╰─────────────────────────────╯\nsrc/app.ts(1,1): error TS2304";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains('╭'),
+            "top frame should be removed: {result}"
+        );
+        assert!(
+            !result.contains('╰'),
+            "bottom frame should be removed: {result}"
+        );
+        assert!(
+            result.contains("Update available!"),
+            "banner body should be kept: {result}"
+        );
+        assert!(
+            result.contains("error TS2304"),
+            "diagnostics should be kept: {result}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_collapses_cargo_blocking_lines() {
+        // cargo がロック待ち中に繰り返す Blocking 行は4行目以降が集約される
+        let input = "Blocking waiting for file lock on package cache\nBlocking waiting for file lock on package cache\nBlocking waiting for file lock on package cache\nBlocking waiting for file lock on package cache\nBlocking waiting for file lock on build directory\nerror: build failed";
+        let result = normalize_lint_output(input);
+        let blocking_count = result.matches("Blocking waiting").count();
+        assert_eq!(
+            blocking_count, 3,
+            "only first 3 Blocking lines kept: {result}"
+        );
+        assert!(
+            result.contains("and 2 more lines starting with \"Blocking\""),
+            "{result}"
+        );
+        assert!(result.contains("error: build failed"), "{result}");
     }
 
     #[test]

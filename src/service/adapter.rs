@@ -2095,6 +2095,74 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_pre_tool_use_error_uses_permission_decision() {
+        // PreToolUse のパースエラーは推奨形式 hookSpecificOutput.permissionDecision="deny" で返す
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        let output = adapter.format_error_for_input("Missing tool_input field", input);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            parsed["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("fail-closed")
+        );
+        assert!(parsed.get("decision").is_none());
+    }
+
+    #[test]
+    fn test_codex_unknown_event_error_uses_legacy_block() {
+        // イベント名が判別できない入力では legacy block 形式にフォールバックする
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter.format_error_for_input("Failed to parse input", "{not json");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["reason"].as_str().unwrap().contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_codex_stop_block_keeps_legacy_format() {
+        // Stop の Block は {"decision":"block","reason":...} が正式形式（継続プロンプト化される）
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint failed".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["reason"].as_str().unwrap().contains("lint failed"));
+        assert!(parsed.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_codex_post_tool_use_block_keeps_legacy_format() {
+        // PostToolUse の Block も {"decision":"block","reason":...} が正式形式
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "format failed".to_string(),
+                },
+                HookEvent::AfterFileEdit,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["decision"], "block");
+        assert!(parsed["reason"].as_str().unwrap().contains("format failed"));
+        assert!(parsed.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
     fn test_codex_exit_code_block_is_zero() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let decision = Decision::Block {

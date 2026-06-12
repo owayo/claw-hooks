@@ -500,6 +500,81 @@ mod tests {
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
+    /// loop_count 指定の Stop 入力を作るテストヘルパー。
+    fn make_stop_input_with_loop_count(loop_count: Option<u32>) -> HookInput {
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput {
+                status: None,
+                loop_count,
+                response: None,
+                stop_hook_active: false,
+                ..Default::default()
+            }),
+            session_id: None,
+        }
+    }
+
+    /// 失敗する report=true フック。実行されれば Block、スキップされれば Allow になるため、
+    /// ループ防止によるスキップと実行を Decision で区別できる。
+    fn make_failing_report_hook() -> Vec<StopHook> {
+        vec![StopHook {
+            commands: vec!["sh -c 'echo loop-test-error >&2; exit 1'".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(true),
+        }]
+    }
+
+    #[test]
+    fn test_loop_count_one_skips_all_hooks() {
+        // Cursor: loop_count >= 1 は既にフォローアップ済みを意味するため、
+        // 失敗するフックでも実行されず Allow になる（無限ループ防止）
+        let filter = StopHookFilter::new(make_failing_report_hook(), false, 10);
+        let decision = filter.execute(&make_stop_input_with_loop_count(Some(1)));
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "loop_count=1 should skip hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_loop_count_large_skips_all_hooks() {
+        let filter = StopHookFilter::new(make_failing_report_hook(), false, 10);
+        let decision = filter.execute(&make_stop_input_with_loop_count(Some(5)));
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "loop_count=5 should skip hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_loop_count_zero_runs_hooks() {
+        // loop_count=0 は初回の Stop なのでフックは実行される（失敗が Block で返る）
+        let filter = StopHookFilter::new(make_failing_report_hook(), false, 10);
+        let decision = filter.execute(&make_stop_input_with_loop_count(Some(0)));
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "loop_count=0 should run hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_loop_count_none_runs_hooks() {
+        // loop_count を送らないエージェント（Claude 等）では従来どおり実行される
+        let filter = StopHookFilter::new(make_failing_report_hook(), false, 10);
+        let decision = filter.execute(&make_stop_input_with_loop_count(None));
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "loop_count=None should run hooks, got: {:?}",
+            decision
+        );
+    }
+
     #[test]
     fn test_condition_none_hook_always_allows_even_on_failure() {
         let hooks = vec![StopHook {

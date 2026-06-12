@@ -40,7 +40,7 @@
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）。Unix ではプロセスグループ全体を SIGKILL で終了するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
-- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` のような同じ単語で始まる行が連続するノイズの多い進捗ログをトークン効率のために圧縮。スペースを含むディレクトリ配下の絶対パスでも共通プレフィックスを除去。`^` は ruff / clippy / rustc の長い範囲マーカー、`_` は rustc/ruff/biome のマルチライン span 下線（`| |_______^` → `| |_^`、snake_case の区切り 1〜2 連続は保持）、`·` と `→` は Biome などの空白可視化マーカーを縮約する用途（diff の `→ → → → → → → Google` → `→ Google` のような単一スペース区切りの連続も対象）。さらに Biome の重複行番号 `129 129 │ text` は `129 │ text`、空の context 行 `129 129 │` は `129 │` に圧縮する（左右の行番号が同じ整数の context line のみが対象で、`10 9 │` のように異なる場合は情報として保持）。加えて `|` / `│` / `^` と空白だけからなる診断の枠線・キャレット行（ruff / biome / rustc の足場）は丸ごと除去する。指し示す列位置は直前の `file:line:col` ヘッダに残るため情報は失われず、英数字を含む行（見出し・ソース行・`| ^ expected u32` のようなラベル付きキャレット）は保持する。
+- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` や `Blocking waiting for file lock on ...` のような同じ単語で始まる行が連続するノイズの多い進捗ログをトークン効率のために圧縮。スペースを含むディレクトリ配下の絶対パスでも共通プレフィックスを除去。`^` は ruff / clippy / rustc の長い範囲マーカー、`_` は rustc/ruff/biome のマルチライン span 下線（`| |_______^` → `| |_^`、snake_case の区切り 1〜2 連続は保持）、`·` と `→` は Biome などの空白可視化マーカーを縮約する用途（diff の `→ → → → → → → Google` → `→ Google` のような単一スペース区切りの連続も対象）。さらに Biome の重複行番号 `129 129 │ text` は `129 │ text`、空の context 行 `129 129 │` は `129 │` に圧縮する（左右の行番号が同じ整数の context line のみが対象で、`10 9 │` のように異なる場合は情報として保持）。加えて `|` / `^` / Box Drawing 文字（`│`、`─`、pnpm 系更新通知のバナー枠 `╭─╮` / `╰─╯`、biome の `─────` 区切り線）と空白だけからなる診断の枠線・キャレット行は丸ごと除去する。指し示す列位置は直前の `file:line:col` ヘッダに残るため情報は失われず、英数字を含む行（見出し・ソース行・`| ^ expected u32` のようなラベル付きキャレット・`│ Update available! │` のようなバナー本文）は保持する。
 - 🛡️ **デバッグログ安全性** - デバッグログにはイベント/ツール/セッションと入力サイズの概要のみを記録し、生のコマンド、ファイル本文、未知イベントのペイロード、エージェントメッセージは保存しません
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLI、Codex CLIに対応
@@ -861,6 +861,8 @@ Claude Code公式フック仕様を使用:
 
 Shell 以外の `preToolUse` を含む未対応の Cursor イベントは `allow` として透過されます。
 
+`stop` では Cursor の `loop_count` フィールド（stop hook が自動フォローアップを発火した回数、0 始まり）をループ防止に使用します。1 以上の場合は全 stop hook をスキップします — Claude Code の `stop_hook_active` と同じ役割で、lint 失敗のフィードバックは Cursor の `loop_limit` までループせず 1 回だけエージェントに返ります。
+
 ### Windsurf (`--format windsurf`)
 
 `agent_action_name`フィールドを使用:
@@ -999,7 +1001,8 @@ Codex の `PostToolUse` は `Bash` コマンド出力と `apply_patch` による
 
 出力形式:
 - 許可: `{}`（空JSON、exit 0）
-- ブロック: `{"decision":"block","reason":"..."}`（レガシー形式、公式に受理される）
+- PreToolUse ブロック: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式）
+- PostToolUse / Stop ブロック: `{"decision":"block","reason":"..."}`（これらのイベントの正式形式。`Stop` では reason が継続プロンプトになる）
 - PermissionRequest ブロック: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 
 Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
@@ -1115,7 +1118,9 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 
 **Codex CLI 許可**: `{}`（空JSON）
 
-**Codex CLI ブロック**: `{"decision":"block","reason":"Use safe-rm instead..."}`
+**Codex CLI PreToolUse ブロック**: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use safe-rm instead..."}}`
+
+**Codex CLI PostToolUse / Stop ブロック**: `{"decision":"block","reason":"..."}`
 
 **Codex CLI PermissionRequest ブロック**: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Use safe-rm instead..."}}}`
 

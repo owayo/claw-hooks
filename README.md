@@ -40,7 +40,7 @@
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent where the hook runtime supports stop-time feedback (Windsurf runs best-effort)
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s); on Unix the entire process group is killed with SIGKILL so grandchildren of `sh -c '...'` are also stopped
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
-- 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), trailing progress ellipses, and noisy repeated-prefix progress lines (e.g., cargo `Compiling foo v1.0` runs) for token-efficient output. It also strips common absolute path prefixes, including paths under directories with spaces. The `^` rule trims long range markers commonly produced by ruff / clippy / rustc lint output, the `_` rule collapses rustc/ruff/biome multiline span underlines (`| |_______^` → `| |_^`) while preserving snake_case separators (1–2 underscores), while `·` and `→` handle whitespace markers from tools such as Biome — including the space-separated variants seen in diff visualizations (`→ → → → → → → Google` → `→ Google`) and Biome's duplicate diff context line numbers (`129 129 │ text` → `129 │ text`, empty context lines `129 129 │` → `129 │`, with mismatched pairs like `10 9 │` left untouched). Diagnostic frame lines made up solely of `|` / `│` / `^` and whitespace (ruff/biome/rustc caret and separator scaffolding) are dropped entirely, since the column they point at already appears in the preceding `file:line:col` header — lines with any text (headings, source lines, labelled carets like `| ^ expected u32`) are kept.
+- 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), trailing progress ellipses, and noisy repeated-prefix progress lines (e.g., cargo `Compiling foo v1.0` runs, or cargo's repeated `Blocking waiting for file lock on ...` lines) for token-efficient output. It also strips common absolute path prefixes, including paths under directories with spaces. The `^` rule trims long range markers commonly produced by ruff / clippy / rustc lint output, the `_` rule collapses rustc/ruff/biome multiline span underlines (`| |_______^` → `| |_^`) while preserving snake_case separators (1–2 underscores), while `·` and `→` handle whitespace markers from tools such as Biome — including the space-separated variants seen in diff visualizations (`→ → → → → → → Google` → `→ Google`) and Biome's duplicate diff context line numbers (`129 129 │ text` → `129 │ text`, empty context lines `129 129 │` → `129 │`, with mismatched pairs like `10 9 │` left untouched). Diagnostic frame lines made up solely of `|` / `^` / Box Drawing characters (`│`, `─`, banner frames like `╭─╮` / `╰─╯` from pnpm-style update notices, biome `─────` separators) and whitespace are dropped entirely, since the column they point at already appears in the preceding `file:line:col` header — lines with any text (headings, source lines, labelled carets like `| ^ expected u32`, banner bodies like `│ Update available! │`) are kept.
 - 🛡️ **Debug Log Safety** - Debug logs store event/tool/session and input-size summaries only; raw commands, file contents, unknown event payloads, and agent messages are not persisted
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI
@@ -861,6 +861,8 @@ Uses the `hook_event_name` field for event detection:
 
 Unsupported Cursor events, including non-shell `preToolUse` tools, are passed through as allow.
 
+For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
+
 ### Windsurf (`--format windsurf`)
 
 Uses `agent_action_name` field:
@@ -999,7 +1001,8 @@ Codex `PostToolUse` supports `Bash` command output and file edits through `apply
 
 Output format:
 - Allow: `{}` (empty JSON, exit 0)
-- Block: `{"decision":"block","reason":"..."}` (legacy format, officially accepted)
+- PreToolUse Block: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}` (the primary format in the official docs)
+- PostToolUse / Stop Block: `{"decision":"block","reason":"..."}` (the official format for these events; for `Stop`, the reason becomes the continuation prompt)
 - PermissionRequest Block: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
 
 Hooks should exit with status `0` for both allow and block decisions. A non-zero exit code is treated by Codex CLI as a hook failure, not as a block.
@@ -1115,7 +1118,9 @@ The `additionalContext` field passes lint warnings/errors to the agent where the
 
 **Codex CLI Allow**: `{}` (empty JSON)
 
-**Codex CLI Block**: `{"decision":"block","reason":"Use safe-rm instead..."}`
+**Codex CLI PreToolUse Block**: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use safe-rm instead..."}}`
+
+**Codex CLI PostToolUse / Stop Block**: `{"decision":"block","reason":"..."}`
 
 **Codex CLI PermissionRequest Block**: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Use safe-rm instead..."}}}`
 

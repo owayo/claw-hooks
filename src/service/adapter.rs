@@ -423,8 +423,8 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_type = "beforeShellExecution",
-                    command = %parsed.command,
-                    cwd = ?parsed.cwd,
+                    command_bytes = parsed.command.len(),
+                    has_cwd = parsed.cwd.is_some(),
                     mapped_event = ?HookEvent::BeforeCommand,
                     mapped_tool = "Bash",
                     "{} parsed input", self.log_prefix()
@@ -476,7 +476,7 @@ impl FormatAdapter {
                     agent = self.format.label(),
                     hook_type = "preToolUse",
                     raw_tool_name = %tool_name,
-                    command = %command,
+                    command_bytes = command.len(),
                     mapped_event = ?HookEvent::BeforeCommand,
                     mapped_tool = "Bash",
                     "{} parsed input", self.log_prefix()
@@ -499,7 +499,7 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_type = event_name,
-                    file_path = %parsed.file_path,
+                    file_path_bytes = parsed.file_path.len(),
                     mapped_event = ?HookEvent::AfterFileEdit,
                     mapped_tool = "Write",
                     "{} parsed input", self.log_prefix()
@@ -737,7 +737,11 @@ impl FormatAdapter {
             agent_action_name = %windsurf_input.agent_action_name,
             mapped_event = ?event,
             mapped_tool = %tool_name,
-            cwd = ?windsurf_input.tool_info.as_ref().and_then(|ti| ti.cwd.as_ref()),
+            has_cwd = windsurf_input
+                .tool_info
+                .as_ref()
+                .and_then(|ti| ti.cwd.as_ref())
+                .is_some(),
             "{} parsed input", self.log_prefix()
         );
 

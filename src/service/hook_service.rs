@@ -123,7 +123,11 @@ impl HookService {
         } else {
             "✅"
         };
-        info!("Output {}: {}", emoji, output);
+        // 永続ログには結果の種別とサイズのみ記録する。出力本文には lint/format の
+        // 診断（ソース行を含み得る）や reason が入るため、機密非永続化（Debug Log
+        // Safety）の方針に従って本文は残さない。全文が必要なときは `--trace`
+        // （stderr へ出力、ディスク非永続）を使う。
+        info!("Output {} ({} bytes)", emoji, output.len());
 
         // Windsurf は pre_run_command のブロック時のみ stderr を使う。
         // post_cascade_response は事後フックのため、Stop の失敗も stdout 側の許可応答に丸める。

@@ -33,8 +33,17 @@ jobs:
       - name: Run tests
         run: cargo test --all-features --verbose
 
+      # フォールバック(非 AST)パーサー経路も検証する。ast-parser を無効化した
+      # ビルドは独立した文字列パーサーを使うため、AST 経路のテストでは
+      # 検出漏れ(fail-open)を取りこぼし得る。両構成を CI で必ず通す。
+      - name: Run tests (no default features / fallback parser)
+        run: cargo test --no-default-features --verbose
+
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run clippy (no default features)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
 
       - name: Check formatting
         run: cargo fmt -- --check

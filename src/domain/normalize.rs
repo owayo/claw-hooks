@@ -95,6 +95,10 @@ pub fn strip_ansi_codes(input: &str) -> String {
 ///   - `·` (U+00B7) は biome 等が空白を視覚化するため diff 行に多用する
 ///   - `→` (U+2192) は biome 等がタブを視覚化するため diff 行に多用する
 /// - 連続する空行を1行に圧縮
+/// - 診断ブロックの枠線・キャレットのみの行（`|` / `│` / `^` と空白だけ）を除去
+///   - ruff の `|` / `| ^`、biome の `│`、rustc の `   |` 等が該当
+///   - 列位置は直前の `file:line:col` ヘッダに残るためエラー情報は失われない
+///   - 英数字を含む行（見出し・ソース行・ラベル付きキャレット）は保持する
 /// - 進捗系の単語（`Compiling` 等）で始まる行が4行以上連続する場合、4行目以降を集約
 ///   （診断行 `error:` / `warning:` 等は固有情報があるため対象外）
 pub fn normalize_lint_output(output: &str) -> String {
@@ -118,7 +122,14 @@ pub fn normalize_lint_output(output: &str) -> String {
         let collapsed = collapse_whitespace(trimmed);
         let collapsed = collapse_duplicate_diff_context_line_number(&collapsed);
         let collapsed = collapse_repeated_chars(&collapsed);
-        lines.push(collapse_space_separated_decorative(&collapsed));
+        let collapsed = collapse_space_separated_decorative(&collapsed);
+        // 診断の枠線・キャレットのみで構成された行（診断テキストを含まない）は
+        // トークン節約のため丸ごと除去する。指し示す列位置は直前の
+        // `file:line:col` ヘッダに数値で残るため、エラー情報は失われない。
+        if is_diagnostic_frame_line(&collapsed) {
+            continue;
+        }
+        lines.push(collapsed);
     }
 
     // 末尾の空行を除去
@@ -362,6 +373,22 @@ fn collapse_space_separated_decorative(input: &str) -> String {
 /// 注: snake_case 識別子の区切りは通常 1〜2 文字連続のため、4 文字以上の閾値により影響しない。
 fn is_decorative_char(c: char) -> bool {
     matches!(c, '.' | '=' | '-' | '─' | '━' | '^' | '·' | '→' | '_')
+}
+
+/// 行が診断ブロックの枠線・キャレットマーカーのみで構成されているか判定する。
+///
+/// 対象は ASCII パイプ `|`、box-drawing 縦線 `│` (U+2502)、キャレット `^`、
+/// および空白だけからなる行。ruff / biome / rustc が診断ブロックでソース行の
+/// 上下に出力する純粋な視覚装飾行（例: ruff の `|` / `| ^`、biome の `│`、
+/// rustc の `   |`）が該当する。これらは診断テキスト（コード・メッセージ・
+/// `file:line:col`）を一切含まず、キャレットが指す列位置は直前の
+/// `file:line:col` ヘッダに数値で残るため、除去してもエラー情報は失われない。
+///
+/// 英数字を含む行（`error:` / `warning:` 見出し、`10 │ let x = ...` のソース行、
+/// `| ^ expected u32` のようなラベル付きキャレット行）は対象外。
+/// `| --- |` のような Markdown テーブル区切りも `-` を含むため保持される。
+fn is_diagnostic_frame_line(line: &str) -> bool {
+    !line.is_empty() && line.chars().all(|c| matches!(c, '|' | '│' | '^' | ' '))
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -1358,6 +1385,71 @@ mod tests {
             result,
             "biome.jsonc:2:13 deserialize ━\n\ni The configuration schema version does not match the CLI version 2.4.13"
         );
+    }
+
+    // === 診断枠線（frame line）除去テスト ===
+
+    #[test]
+    fn test_is_diagnostic_frame_line_basic() {
+        // 枠線・キャレットのみの行は frame line
+        assert!(is_diagnostic_frame_line("|"));
+        assert!(is_diagnostic_frame_line("│"));
+        assert!(is_diagnostic_frame_line("| ^"));
+        assert!(is_diagnostic_frame_line("│ ^"));
+        assert!(is_diagnostic_frame_line("^"));
+        assert!(is_diagnostic_frame_line("| | ^"));
+        // 英数字を含む行は frame line ではない
+        assert!(!is_diagnostic_frame_line("| ^ expected u32"));
+        assert!(!is_diagnostic_frame_line("10 | let x = 1;"));
+        assert!(!is_diagnostic_frame_line("error: foo"));
+        // `-` を含む Markdown テーブル区切りは保持対象
+        assert!(!is_diagnostic_frame_line("| --- |"));
+        // 空文字列は対象外
+        assert!(!is_diagnostic_frame_line(""));
+    }
+
+    #[test]
+    fn test_normalize_removes_ruff_caret_frame_lines() {
+        // ruff スタイルの診断ブロック。`|` 区切り行と `| ^` キャレット行は除去され、
+        // 見出し・位置ヘッダ・コード行は保持される。
+        let input = "F401 unused import\n--> src/foo.py:1:8\n|\n1 | import os\n| ^^^^^^^^^\n|";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "F401 unused import\n-> src/foo.py:1:8\n1 | import os"
+        );
+    }
+
+    #[test]
+    fn test_normalize_removes_biome_pipe_frame_lines() {
+        // biome の `│` 単独行・キャレット行を除去する。
+        let input = "src/main.ts:1:7 lint/correctness/noUnusedVariables\n│\n1 │ const x = 1;\n│ ^";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "src/main.ts:1:7 lint/correctness/noUnusedVariables\n1 │ const x = 1;"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_caret_line_with_label() {
+        // ラベル付きキャレット行（rustc）はテキストを含むため保持する。
+        let input = "error[E0308]: mismatched types\n--> src/main.rs:10:18\n|\n10 | let x: u32 = \"hi\";\n| ^^^^ expected u32, found &str";
+        let result = normalize_lint_output(input);
+        // `|` 単独行は除去、ラベル付きキャレット行は保持
+        assert!(!result.contains("\n|\n"));
+        assert!(result.contains("expected u32, found &str"));
+        assert!(result.contains("10 | let x: u32 = \"hi\";"));
+    }
+
+    #[test]
+    fn test_normalize_preserves_pipe_in_content_lines() {
+        // パイプを含むが英数字もある行（テーブル・コード）は保持する。
+        let input = "| Col A | Col B |\n| --- | --- |\nlet r = a | b;";
+        let result = normalize_lint_output(input);
+        assert!(result.contains("| Col A | Col B |"));
+        assert!(result.contains("| --- | --- |"));
+        assert!(result.contains("let r = a | b;"));
     }
 
     // === パスコンテキスト置換テスト ===

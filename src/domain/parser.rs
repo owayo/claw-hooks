@@ -1101,21 +1101,31 @@ impl ShellParser {
     /// 入れ子ラッパーも再帰的に処理する（例: sudo bash -c 'rm'）
     #[cfg(feature = "ast-parser")]
     fn process_wrapper_args(&mut self, wrapper: &str, args: &[String], commands: &mut Vec<String>) {
-        if let Some(command_index) = Self::find_wrapped_command_index(wrapper, args) {
-            let command_name = &args[command_index];
+        // ラッパーが連鎖する場合（`sudo sudo ... rm`）でも、再帰ではなく反復で辿る。
+        // 再帰にすると連鎖の深さに比例してスタックを消費し、長さ上限（65536）未満でも
+        // `sudo` を数千個並べるだけでスタックオーバーフロー（SIGABRT＝fail-open）し得る。
+        // 連鎖は線形なので反復で等価に処理でき、スタックは一定に保たれる。
+        // 異常に深い連鎖（MAX_RECURSION_DEPTH 超過）は解析を諦め、安全側
+        // （危険コマンド候補）に倒して fail-closed を保つ。
+        let mut wrapper_name = wrapper.to_string();
+        let mut rest: &[String] = args;
+        for _ in 0..MAX_RECURSION_DEPTH {
+            let Some(command_index) = Self::find_wrapped_command_index(&wrapper_name, rest) else {
+                return;
+            };
+            let command_name = rest[command_index].clone();
 
-            if !commands.contains(command_name) {
+            if !commands.contains(&command_name) {
                 commands.push(command_name.clone());
             }
 
             // このコマンド以降の残り引数
-            let remaining_args: Vec<String> = args[command_index + 1..].to_vec();
+            let remaining = &rest[command_index + 1..];
 
             // shell -c の場合は内側のコマンドを抽出
-            if is_shell_command(command_name) {
-                if let Some(shell_cmd) = Self::extract_shell_c_from_args(&remaining_args) {
-                    let nested = self.extract_commands(&shell_cmd);
-                    for nested_cmd in nested {
+            if is_shell_command(&command_name) {
+                if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
+                    for nested_cmd in self.extract_commands(&shell_cmd) {
                         if !commands.contains(&nested_cmd) {
                             commands.push(nested_cmd);
                         }
@@ -1123,11 +1133,15 @@ impl ShellParser {
                 }
             }
 
-            // 次のコマンドもラッパーなら再帰的に処理
-            if is_command_wrapper(command_name) {
-                self.process_wrapper_args(command_name, &remaining_args, commands);
+            // 次のコマンドがラッパーでなければ終了。ラッパーなら反復で辿る。
+            if !is_command_wrapper(&command_name) {
+                return;
             }
+            wrapper_name = command_name;
+            rest = remaining;
         }
+        // 異常に深いラッパー連鎖は解析を諦め fail-closed に倒す。
+        commands.extend(Self::pathological_block_commands());
     }
 
     /// ラッパーごとに「値を取る」ことが確定している短縮フラグ
@@ -1433,7 +1447,13 @@ impl ShellParser {
     }
 
     /// トークン列から実際に実行されるコマンドを取り出す。
-    /// 先頭の環境変数代入は読み飛ばす。
+    /// 先頭の環境変数代入とブレースグループ開き `{` を読み飛ばす。
+    ///
+    /// `{ rm -rf /; }` のようなコマンドグループでは `{` が独立したトークンとして
+    /// 現れるが、これはコマンド名ではなくグループ区切りである。読み飛ばさないと
+    /// `{` をコマンド名と誤認し、後続の実コマンド（`rm`）を取りこぼして fail-open
+    /// になる（AST パーサーは検出するが、フォールバックでも取りこぼさない）。
+    /// グループ閉じ `}` 単独のトークンも同様にコマンドではないため None を返す。
     fn parse_effective_command(tokens: &[String]) -> Option<(String, Vec<String>)> {
         if tokens.is_empty() {
             return None;
@@ -1441,9 +1461,13 @@ impl ShellParser {
 
         let start = tokens
             .iter()
-            .position(|token| !Self::is_env_assignment_token(token))?;
+            .position(|token| !Self::is_env_assignment_token(token) && token != "{")?;
 
-        Some((tokens[start].clone(), tokens[start + 1..].to_vec()))
+        let cmd = &tokens[start];
+        if cmd == "}" {
+            return None;
+        }
+        Some((cmd.clone(), tokens[start + 1..].to_vec()))
     }
 
     /// セグメント全体が最上位の `( ... )` で包まれていれば中身を返す。
@@ -1504,7 +1528,13 @@ impl ShellParser {
         }
     }
 
-    /// コマンド置換（`$(...)`, `` `...` ``）から内部断片を抽出する。
+    /// コマンド置換（`$(...)`, `` `...` ``）およびプロセス置換（`<(...)`, `>(...)`）
+    /// から内部断片を抽出する。
+    ///
+    /// プロセス置換 `diff <(rm -rf /) <(ls)` や `tee >(rm -rf /)` は内側のコマンドを
+    /// 実際に実行するため、フォールバック経路でも取りこぼすと fail-open になる。
+    /// `<(` / `>(` は `$(` と同じく括弧の対応を数えて中身を取り出す。なお直後が `(`
+    /// のときのみ対象とするため、リダイレクト `> file` / `< file` とは区別される。
     fn extract_nested_command_fragments(segment: &str) -> Vec<String> {
         let chars: Vec<char> = segment.chars().collect();
         let len = chars.len();
@@ -1539,8 +1569,14 @@ impl ShellParser {
                 continue;
             }
 
-            // `$(...)` 形式
-            if !in_single && ch == '$' && i + 1 < len && chars[i + 1] == '(' {
+            // `$(...)` コマンド置換、`<(...)` / `>(...)` プロセス置換
+            // （いずれも `(` の対応を数えて中身を取り出す。直後が `(` のときのみ
+            // 対象とするため、リダイレクト `< file` / `> file` とは区別される）
+            if !in_single
+                && (ch == '$' || ch == '<' || ch == '>')
+                && i + 1 < len
+                && chars[i + 1] == '('
+            {
                 let start = i + 2;
                 let mut j = start;
                 let mut depth = 1usize;
@@ -1695,6 +1731,14 @@ impl ShellParser {
             }
         }
 
+        // env -S / --split-string は文字列をコマンドとして再評価するため内側も解析する。
+        // （AST 経路と同様。fallback で取りこぼすと env -S 経由で検出回避され fail-open になる）
+        if matches_command(&cmd, "env") {
+            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
+                commands.extend(self.extract_commands_fallback(&env_cmd));
+            }
+        }
+
         // xargs を処理
         if matches_command(&cmd, "xargs") {
             if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
@@ -1733,24 +1777,34 @@ impl ShellParser {
         args: &[String],
         commands: &mut Vec<String>,
     ) {
-        let Some(command_index) = Self::find_wrapped_command_index(wrapper, args) else {
-            return;
-        };
+        // process_wrapper_args と同様、ラッパー連鎖は再帰ではなく反復で辿り、
+        // 深いラッパー連鎖（`sudo sudo ... rm`）でのスタックオーバーフロー
+        // （fail-open）を防ぐ。MAX_RECURSION_DEPTH 超過時は安全側に倒す。
+        let mut wrapper_name = wrapper.to_string();
+        let mut rest: &[String] = args;
+        for _ in 0..MAX_RECURSION_DEPTH {
+            let Some(command_index) = Self::find_wrapped_command_index(&wrapper_name, rest) else {
+                return;
+            };
 
-        let command_name = &args[command_index];
-        Self::push_unique_command(commands, command_name);
+            let command_name = rest[command_index].clone();
+            Self::push_unique_command(commands, &command_name);
 
-        let remaining = &args[command_index + 1..];
+            let remaining = &rest[command_index + 1..];
 
-        if is_shell_command(command_name) {
-            if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
-                commands.extend(self.extract_commands_fallback(&shell_cmd));
+            if is_shell_command(&command_name) {
+                if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
+                    commands.extend(self.extract_commands_fallback(&shell_cmd));
+                }
             }
-        }
 
-        if is_command_wrapper(command_name) {
-            self.expand_wrapper_commands_fallback(command_name, remaining, commands);
+            if !is_command_wrapper(&command_name) {
+                return;
+            }
+            wrapper_name = command_name;
+            rest = remaining;
         }
+        commands.extend(Self::pathological_block_commands());
     }
 
     /// 同じコマンド名を重複して追加しない。
@@ -3996,5 +4050,99 @@ mod tests {
                 .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
             "長大入力は block コマンドを返すべき"
         );
+    }
+
+    // === fail-closed / 深いネスト・ラッパー連鎖・ブレースグループ・プロセス置換の回帰テスト ===
+    // （一時的な REPRO 調査テストを確実な回帰テストへ置き換えたもの。これらの
+    //  セキュリティ的振る舞いは AST 経路とフォールバック経路の双方で成立する。）
+
+    fn rm_blocked(cmd: &str) -> bool {
+        let mut p = ShellParser::new();
+        p.extract_commands(cmd)
+            .iter()
+            .any(|c| command_key(c) == "rm")
+    }
+
+    /// 長さ上限（65536）未満かつ括弧/ブレース無しで深い構造を作る && / パイプ / ;
+    /// の連鎖でも、rm を検出（深さ上限内）または fail-closed（深さ上限超過）で
+    /// 必ずブロック側に倒れること。AST 走査の深さ上限をすり抜ける fail-open を防ぐ。
+    #[test]
+    fn test_deep_logical_chains_block_under_len_limit() {
+        for sep in ["&& ", "| ", "; "] {
+            // 上限内（直接検出）と上限超過（fail-closed）の両経路を網羅する。
+            for n in [400usize, 700] {
+                let cmd = format!("true {sep}").repeat(n) + "rm -rf /tmp/x";
+                assert!(cmd.len() < 65_536, "sep={sep:?} n={n} len={}", cmd.len());
+                assert!(
+                    rm_blocked(&cmd),
+                    "sep={sep:?} n={n}: 深い連鎖で rm を取りこぼした (fail-open)"
+                );
+            }
+        }
+        // 大規模でもクラッシュせずブロック側に倒れること。
+        let huge = "true && ".repeat(5000) + "rm -rf /tmp/x";
+        assert!(huge.len() < 65_536);
+        assert!(rm_blocked(&huge), "大規模な連鎖で rm を取りこぼした");
+    }
+
+    /// ブレースコマンドグループ `{ ...; }` 内の危険コマンドを検出すること。
+    /// （以前フォールバック経路では先頭 `{` をコマンド名と誤認し rm を取りこぼしていた）
+    #[test]
+    fn test_brace_command_group_detects_inner_command() {
+        for cmd in [
+            "{ rm -rf /tmp/x; }",
+            "{ rm -rf /tmp/x ; }",
+            "true; { rm -rf /a; }",
+            "{ echo hi; rm -rf /a; }",
+        ] {
+            assert!(
+                rm_blocked(cmd),
+                "{cmd}: ブレースグループ内の rm を取りこぼした"
+            );
+        }
+    }
+
+    /// 深いラッパー連鎖（`sudo sudo ... rm`）でスタックオーバーフロー（fail-open）せず、
+    /// fail-closed でブロックすること。
+    /// （以前 process_wrapper_args / expand_wrapper_commands_fallback が深さ無制限の
+    ///  再帰だったため、長さ上限未満でもクラッシュ＝fail-open し得た）
+    #[test]
+    fn test_deep_wrapper_chain_fails_closed_without_overflow() {
+        let cmd = "sudo ".repeat(5000) + "rm -rf /tmp/x";
+        assert!(cmd.len() < 65_536, "len={}", cmd.len());
+        assert!(
+            rm_blocked(&cmd),
+            "深いラッパー連鎖は fail-closed でブロックすべき"
+        );
+    }
+
+    /// プロセス置換 `<(...)` / `>(...)` 内の危険コマンドを検出すること。
+    /// プロセス置換は内側のコマンドを実際に実行するため。
+    /// （以前フォールバック経路は `$()`/バッククォートのみ見ており取りこぼしていた）
+    #[test]
+    fn test_process_substitution_detects_inner_command() {
+        for cmd in [
+            "diff <(rm -rf /tmp/x) <(ls)",
+            "tee >(rm -rf /tmp/x)",
+            "cat <(rm -rf /a)",
+        ] {
+            assert!(rm_blocked(cmd), "{cmd}: プロセス置換内の rm を取りこぼした");
+        }
+    }
+
+    /// リダイレクト `< file` / `> file` はプロセス置換 `<(` / `>(` と区別され、
+    /// 過剰検出しないこと（直後が `(` のときだけプロセス置換として扱う）。
+    #[test]
+    fn test_redirection_not_misdetected_as_process_substitution() {
+        for cmd in ["cat < file.txt", "echo done > out.txt", "echo a >> log"] {
+            let mut p = ShellParser::new();
+            let cmds = p.extract_commands(cmd);
+            assert!(
+                !cmds
+                    .iter()
+                    .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+                "{cmd}: リダイレクトを危険コマンドと誤検出した: {cmds:?}"
+            );
+        }
     }
 }

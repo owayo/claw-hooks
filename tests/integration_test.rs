@@ -9,27 +9,20 @@ fn run_hook(json_input: &str) -> (String, String, i32) {
 }
 
 /// JSON入力で指定フォーマットの claw-hooks を実行する。
+///
+/// テストをユーザのグローバル設定（`~/.config/claw-hooks/config.toml`）から
+/// 隔離するため、空の設定ファイルを `--config` で渡す。これにより Stop フック等が
+/// テスト実行マシンの設定に依存して実際に実行される（cargo/git 等の副作用や
+/// 非決定的な出力）のを防ぎ、組み込みの既定動作のみを検証する。
+/// 設定値に依存するテストは `run_hook_with_config_and_format` を使うこと。
 fn run_hook_with_format(json_input: &str, format: &str) -> (String, String, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
-        .arg("run")
-        .arg("--format")
-        .arg(format)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn claw-hooks");
+    let empty_config = tempfile::Builder::new()
+        .prefix("claw-hooks-test-empty")
+        .suffix(".toml")
+        .tempfile()
+        .expect("Failed to create temp config");
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(json_input.as_bytes()).unwrap();
-    }
-
-    let output = child.wait_with_output().expect("Failed to read output");
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    (stdout, stderr, exit_code)
+    run_hook_with_config_and_format(json_input, format, empty_config.path())
 }
 
 #[test]
@@ -1434,8 +1427,19 @@ fn test_codex_format_block_rm_command() {
 
 #[test]
 fn test_codex_format_permission_request_blocks_rm_command() {
+    // rm ブロックメッセージは設定でカスタマイズできる。ユーザのグローバル設定に
+    // 依存しないよう、メッセージを明示した設定ファイルを渡して検証する。
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "rm_block = true\nrm_block_message = \"🚫 Use safe-rm instead of rm\"\n",
+    )
+    .expect("Failed to write config");
+
     let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /","description":"cleanup"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let (stdout, _stderr, exit_code) =
+        run_hook_with_config_and_format(input, "codex", &config_path);
 
     assert_eq!(exit_code, 0, "Codex PermissionRequest block should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();

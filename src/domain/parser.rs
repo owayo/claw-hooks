@@ -545,6 +545,12 @@ impl ShellParser {
 
         let tokens = parse_shell_tokens(trimmed);
         let Some((cmd_name, args)) = Self::parse_effective_command(&tokens) else {
+            // ヘッダだけで本体コマンドを持たないセグメント（`for f in $(rm …)` の
+            // ように parse_effective_command が None を返すケース）でも、ヘッダ内の
+            // コマンド置換の中身は取りこぼさず解析する（fail-open 防止）。
+            for nested in Self::extract_nested_command_fragments(trimmed) {
+                command_strings.extend(self.extract_command_strings_fallback(&nested));
+            }
             return command_strings;
         };
 
@@ -1446,28 +1452,90 @@ impl ShellParser {
         chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
     }
 
-    /// トークン列から実際に実行されるコマンドを取り出す。
-    /// 先頭の環境変数代入とブレースグループ開き `{` を読み飛ばす。
+    /// コマンド位置で読み飛ばすべきシェル制御構文の前置キーワードか判定する。
     ///
-    /// `{ rm -rf /; }` のようなコマンドグループでは `{` が独立したトークンとして
-    /// 現れるが、これはコマンド名ではなくグループ区切りである。読み飛ばさないと
-    /// `{` をコマンド名と誤認し、後続の実コマンド（`rm`）を取りこぼして fail-open
-    /// になる（AST パーサーは検出するが、フォールバックでも取りこぼさない）。
-    /// グループ閉じ `}` 単独のトークンも同様にコマンドではないため None を返す。
+    /// フォールバックパーサーは AST を持たないため、`then rm -rf /` や
+    /// `do rm -rf /` のように制御構文キーワードに続く実コマンドを取りこぼすと
+    /// fail-open になる。これらはコマンド名ではないので、セグメント先頭
+    /// （コマンド位置）に現れた場合は読み飛ばして内側の実コマンドへ到達する。
+    /// `echo then` のように引数位置に現れる同じ語は parse_effective_command が
+    /// 先頭位置でしか判定しないため誤って読み飛ばさない。
+    fn is_control_prefix_keyword(token: &str) -> bool {
+        matches!(
+            token,
+            "if" | "then" | "elif" | "else" | "do" | "while" | "until" | "!"
+        )
+    }
+
+    /// 制御構文の閉じ語か判定する。セグメントがこれらの語だけで構成される場合、
+    /// 実行されるコマンドは存在しない（`fi` / `done` / `esac`）。
+    fn is_control_closer_keyword(token: &str) -> bool {
+        matches!(token, "fi" | "done" | "esac")
+    }
+
+    /// `for` / `select` ループのヘッダ `for VAR in LIST` を読み飛ばし、本体の
+    /// 開始位置（`do` の直後）を返す。ループ変数 VAR とリスト LIST はコマンドでは
+    /// ないため、同一セグメント内に `do` が無ければ None を返す。これにより
+    /// `for rm in a` のループ変数 `rm` を誤ってコマンドとして検出しない
+    /// （本体は `;` / 改行で分割された別セグメントの `do …` で捕捉される）。
+    fn loop_body_start(tokens: &[String], index: usize) -> Option<usize> {
+        let do_offset = tokens[index..].iter().position(|t| t == "do")?;
+        Some(index + do_offset + 1)
+    }
+
+    /// `case WORD in` ヘッダを読み飛ばし、最初のパターンの位置（`in` の直後）を
+    /// 返す。WORD はコマンドではないため読み飛ばす。`in` が無ければ None。
+    /// パターン `pat)` 自体は parse_effective_command の `)` 終端スキップで処理する。
+    fn case_header_end(tokens: &[String], index: usize) -> Option<usize> {
+        let in_offset = tokens[index..].iter().position(|t| t == "in")?;
+        Some(index + in_offset + 1)
+    }
+
+    /// トークン列から実際に実行されるコマンドを取り出す。
+    /// 先頭の環境変数代入・ブレースグループ開き `{`・シェル制御構文を読み飛ばす。
+    ///
+    /// `{ rm -rf /; }` のコマンドグループの `{`、`if … then rm …` の `then`、
+    /// `for … do rm …` の `do`、`case W in P) rm …` のヘッダ・パターンなどは
+    /// コマンド名ではない。これらを読み飛ばさないと制御構文キーワードをコマンド
+    /// 名と誤認し、内側の実コマンド（`rm` 等）を取りこぼして fail-open になる
+    /// （AST パーサーは検出するが、フォールバックでも取りこぼさない）。
+    /// グループ閉じ `}` / 制御構文の閉じ語（`fi`/`done`/`esac`）のみのトークンは
+    /// コマンドを含まないため None を返す。
     fn parse_effective_command(tokens: &[String]) -> Option<(String, Vec<String>)> {
-        if tokens.is_empty() {
-            return None;
-        }
+        let mut index = 0usize;
+        loop {
+            // 環境変数代入とブレースグループ開き `{` を読み飛ばす。
+            while index < tokens.len()
+                && (Self::is_env_assignment_token(&tokens[index]) || tokens[index] == "{")
+            {
+                index += 1;
+            }
+            let token = tokens.get(index)?.as_str();
 
-        let start = tokens
-            .iter()
-            .position(|token| !Self::is_env_assignment_token(token) && token != "{")?;
-
-        let cmd = &tokens[start];
-        if cmd == "}" {
-            return None;
+            // グループ閉じ `}` / 制御構文の閉じ語はコマンドを含まない。
+            if token == "}" || Self::is_control_closer_keyword(token) {
+                return None;
+            }
+            // 前置キーワード（then/do/if/...）は読み飛ばして内側コマンドへ。
+            if Self::is_control_prefix_keyword(token) {
+                index += 1;
+                continue;
+            }
+            // case 節パターン `pat)` / POSIX 関数定義 `name()` は `)` で終わる
+            // トークンとして現れる。コマンド名ではないため読み飛ばす。
+            if token.ends_with(')') {
+                index += 1;
+                continue;
+            }
+            match token {
+                // for/select VAR in LIST: 変数・リストはコマンドではない。本体は
+                // `do` の後（同一セグメントに無ければ別セグメントの `do …` で捕捉）。
+                "for" | "select" => index = Self::loop_body_start(tokens, index)?,
+                // case WORD in: WORD はコマンドではないため読み飛ばす。
+                "case" => index = Self::case_header_end(tokens, index)?,
+                _ => return Some((tokens[index].clone(), tokens[index + 1..].to_vec())),
+            }
         }
-        Some((cmd.clone(), tokens[start + 1..].to_vec()))
     }
 
     /// セグメント全体が最上位の `( ... )` で包まれていれば中身を返す。
@@ -1714,6 +1782,12 @@ impl ShellParser {
 
         let tokens = parse_shell_tokens(trimmed);
         let Some((cmd, args)) = Self::parse_effective_command(&tokens) else {
+            // ヘッダだけで本体コマンドを持たないセグメント（`for f in $(rm …)` の
+            // ように parse_effective_command が None を返すケース）でも、ヘッダ内の
+            // コマンド置換の中身は取りこぼさず解析する（fail-open 防止）。
+            for nested in Self::extract_nested_command_fragments(trimmed) {
+                commands.extend(self.extract_commands_fallback(&nested));
+            }
             return commands;
         };
 
@@ -3099,6 +3173,94 @@ mod tests {
     fn test_parse_effective_command_empty() {
         let tokens: Vec<String> = vec![];
         assert!(ShellParser::parse_effective_command(&tokens).is_none());
+    }
+
+    #[test]
+    fn test_parse_effective_command_skips_control_prefixes() {
+        // 制御構文の前置キーワードやヘッダを読み飛ばし、内側の実コマンドへ到達する
+        for (raw, expected) in [
+            (vec!["then", "rm", "-rf", "/tmp"], "rm"),
+            (vec!["do", "kill", "-9", "1"], "kill"),
+            (vec!["elif", "dd", "if=/dev/zero"], "dd"),
+            (vec!["else", "rm", "-rf", "/tmp"], "rm"),
+            (vec!["while", "kill", "-9", "1"], "kill"),
+            (vec!["until", "dd", "if=/dev/zero"], "dd"),
+            (vec!["!", "rm", "-rf", "/tmp"], "rm"),
+            (vec!["then", "VAR=x", "{", "rm", "-rf", "/tmp"], "rm"),
+            (vec!["for", "f", "in", "a", "do", "rm", "-rf", "/tmp"], "rm"),
+            (vec!["case", "x", "in", "x)", "dd", "if=/dev/zero"], "dd"),
+        ] {
+            let tokens = raw.into_iter().map(String::from).collect::<Vec<_>>();
+            let (cmd, _) = ShellParser::parse_effective_command(&tokens).expect("command expected");
+            assert_eq!(cmd, expected, "tokens did not resolve to expected command");
+        }
+    }
+
+    #[test]
+    fn test_parse_effective_command_headers_and_closers_have_no_command() {
+        // ループ変数・case ワード・case パターン・閉じ語はコマンドではない（None）
+        for raw in [
+            vec!["for", "rm", "in", "a"],      // ループ変数 rm はコマンドではない
+            vec!["select", "kill", "in", "a"], // ループ変数 kill はコマンドではない
+            vec!["case", "x", "in", "dd)"],    // パターン dd) はコマンドではない
+            vec!["fi"],
+            vec!["done"],
+            vec!["esac"],
+            vec!["}"],
+        ] {
+            let tokens = raw.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(
+                ShellParser::parse_effective_command(&tokens).is_none(),
+                "header/closer must not be treated as a command"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_control_structures_detect_dangerous_commands() {
+        // フォールバックパーサー（非 ast-parser 経路）が制御構文内の危険コマンドを
+        // 取りこぼさないことの回帰テスト。以前は if/then・for/do・while/do・case・
+        // ヘッダ内コマンド置換でこれらが素通り（fail-open）していた。
+        let parser = ShellParser::new();
+        for (cmd, expected) in [
+            ("if true; then rm -rf /; fi", "rm"),
+            ("for f in a; do rm -rf /; done", "rm"),
+            ("while true; do kill -9 1; done", "kill"),
+            ("case x in x) dd if=/dev/zero of=/dev/sda;; esac", "dd"),
+            ("if true; then for f in a; do rm -rf /; done; fi", "rm"),
+            ("case w in a) echo ok;; b) kill -9 1;; esac", "kill"),
+            ("case w in a|b) echo ok;; c|d) rm -rf /tmp/x;; esac", "rm"),
+            ("! rm -rf /tmp/x", "rm"),
+            ("until rm -rf /tmp/x; do true; done", "rm"),
+            ("for f in $(rm -rf /tmp); do echo; done", "rm"),
+            ("case $(rm -rf /tmp) in x) echo;; esac", "rm"),
+        ] {
+            let detected = parser
+                .extract_commands_fallback(cmd)
+                .iter()
+                .any(|c| command_key(c) == expected);
+            assert!(detected, "fallback must detect `{expected}` in: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_fallback_control_syntax_no_false_positive() {
+        // ループ変数・case パターン・引数位置のキーワードを危険コマンドと誤検知しない
+        let parser = ShellParser::new();
+        for cmd in [
+            "for rm in a; do echo safe; done",
+            "select kill in a; do echo safe; done",
+            "case x in rm) echo safe;; kill) echo safe;; dd) echo safe;; esac",
+            "echo then",
+            "grep do file",
+            "VAR=if echo ok",
+        ] {
+            let dangerous = parser
+                .extract_commands_fallback(cmd)
+                .iter()
+                .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd"));
+            assert!(!dangerous, "fallback must NOT flag safe command: {cmd}");
+        }
     }
 
     // === parse_shell_tokens の追加テスト ===

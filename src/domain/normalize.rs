@@ -148,39 +148,59 @@ pub fn normalize_lint_output(output: &str) -> String {
 ///
 /// 集約対象は進捗系の行頭語（`leading_progress_prefix` のホワイトリスト）に
 /// 限定する。`error:` / `warning:` などの診断行は各行に固有情報があるため、
-/// 同じ単語で始まっても集約しない（4 行目以降の情報欠落を防ぐ）。
+/// 進捗語以外の行でランが分断され、集約されない（4 行目以降の情報欠落を防ぐ）。
+///
+/// 進捗語はいずれも診断価値のないノイズなので、`Compiling` と `Checking` が
+/// 交互に出力される cargo の並行ビルドのように、異なる進捗語が混在していても
+/// 1 つの連続ランとして扱う。同一語に限定すると交互出力ではランが 3 行以下に
+/// 分断され、ほとんどの進捗ノイズが集約されずに残ってしまうため。
 ///
 /// ルール:
-/// - 行頭語が進捗系ホワイトリストに含まれ、かつ同一
-/// - 4行以上連続した場合、最初の3行のみ残し、4行目以降は
-///   `... (and N more lines starting with "<word>")` で要約
+/// - 各行の行頭語が進捗系ホワイトリストに含まれる連続ランを対象にする
+/// - 4行以上連続した場合、最初の3行のみ残し、4行目以降を要約行で置換する
+///   - ラン全体が同一語なら `... (and N more lines starting with "<word>")`
+///   - 複数の進捗語が混在するなら `... (and N more progress lines)`
 fn collapse_repeated_prefix_lines(lines: Vec<String>) -> Vec<String> {
     let mut result: Vec<String> = Vec::with_capacity(lines.len());
     let mut idx = 0;
     while idx < lines.len() {
-        let prefix = leading_progress_prefix(&lines[idx]);
-        if let Some(word) = prefix {
-            let mut run_end = idx + 1;
-            while run_end < lines.len() && leading_progress_prefix(&lines[run_end]) == Some(word) {
-                run_end += 1;
+        let Some(first_word) = leading_progress_prefix(&lines[idx]) else {
+            result.push(lines[idx].clone());
+            idx += 1;
+            continue;
+        };
+
+        // 行頭語が進捗系ホワイトリストに含まれる行が続く限りランを伸ばす。
+        // 進捗語が異なっても（Compiling/Checking など）同一ランに含める。
+        let mut run_end = idx + 1;
+        let mut single_word = true;
+        while run_end < lines.len() {
+            let Some(word) = leading_progress_prefix(&lines[run_end]) else {
+                break;
+            };
+            if word != first_word {
+                single_word = false;
             }
-            let run_len = run_end - idx;
-            if run_len >= 4 {
-                // 最初の3行を残し、4行目以降を集約行で置換
-                for line in &lines[idx..idx + 3] {
-                    result.push(line.clone());
-                }
-                let extra = run_len - 3;
+            run_end += 1;
+        }
+
+        let run_len = run_end - idx;
+        if run_len >= 4 {
+            // 最初の3行を残し、4行目以降を集約行で置換する。
+            result.extend(lines[idx..idx + 3].iter().cloned());
+            let extra = run_len - 3;
+            if single_word {
                 result.push(format!(
                     "... (and {} more lines starting with \"{}\")",
-                    extra, word
+                    extra, first_word
                 ));
-                idx = run_end;
-                continue;
+            } else {
+                result.push(format!("... (and {extra} more progress lines)"));
             }
+        } else {
+            result.extend(lines[idx..run_end].iter().cloned());
         }
-        result.push(lines[idx].clone());
-        idx += 1;
+        idx = run_end;
     }
     result
 }
@@ -380,24 +400,28 @@ fn is_decorative_char(c: char) -> bool {
 
 /// 行が診断ブロックの枠線・キャレットマーカーのみで構成されているか判定する。
 ///
-/// 対象は ASCII パイプ `|`、キャレット `^`、Box Drawing 文字
+/// 対象は ASCII パイプ `|`、キャレット `^`、アンダースコア `_`、Box Drawing 文字
 /// (U+2500–U+257F: `│` `─` `╭` `╮` `╰` `╯` `┌` `└` 等の罫線素片全般)、
 /// および空白だけからなる行。ruff / biome / rustc が診断ブロックでソース行の
 /// 上下に出力する純粋な視覚装飾行（例: ruff の `|` / `| ^`、biome の `│`、
-/// rustc の `   |`）、pnpm 等の通知バナー枠（`╭─╮` / `╰─╯`）、biome の
-/// `─────` 区切り線が該当する。これらは診断テキスト（コード・メッセージ・
-/// `file:line:col`）を一切含まず、キャレットが指す列位置は直前の
-/// `file:line:col` ヘッダに数値で残るため、除去してもエラー情報は失われない。
+/// rustc の `   |`、rustc/clippy のマルチライン span 下線 `| |_____^` が
+/// `collapse_repeated_chars` で `| |_^` に圧縮された後の残骸）、pnpm 等の通知
+/// バナー枠（`╭─╮` / `╰─╯`）、biome の `─────` 区切り線が該当する。これらは
+/// 診断テキスト（コード・メッセージ・`file:line:col`）を一切含まず、キャレットが
+/// 指す列位置は直前の `file:line:col` ヘッダに数値で残るため、除去しても
+/// エラー情報は失われない。
 ///
 /// 英数字を含む行（`error:` / `warning:` 見出し、`10 │ let x = ...` のソース行、
 /// `| ^ expected u32` のようなラベル付きキャレット行、`│ Update available! │`
-/// のようなバナー本文行）は対象外。
-/// `| --- |` のような Markdown テーブル区切りも ASCII `-` を含むため保持される。
+/// のようなバナー本文行、`__init__` のような snake_case 識別子を含む行）は対象外。
+/// アンダースコアは英数字ではないため許容集合に含めても、英数字を含む行は
+/// 引き続き保持される。`| --- |` のような Markdown テーブル区切りも ASCII `-`
+/// を含むため保持される。
 fn is_diagnostic_frame_line(line: &str) -> bool {
     !line.is_empty()
         && line
             .chars()
-            .all(|c| matches!(c, '|' | '^' | ' ' | '\u{2500}'..='\u{257F}'))
+            .all(|c| matches!(c, '|' | '^' | '_' | ' ' | '\u{2500}'..='\u{257F}'))
 }
 
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
@@ -1415,11 +1439,18 @@ mod tests {
         assert!(is_diagnostic_frame_line("└──┘"));
         assert!(is_diagnostic_frame_line("─"));
         assert!(is_diagnostic_frame_line("━"));
+        // rustc/clippy のマルチライン span 下線 `| |_____^` が圧縮された後の
+        // `| |_^` のようなアンダースコア装飾行も frame line
+        assert!(is_diagnostic_frame_line("| |_^"));
+        assert!(is_diagnostic_frame_line("_"));
         // 英数字を含む行は frame line ではない
         assert!(!is_diagnostic_frame_line("| ^ expected u32"));
         assert!(!is_diagnostic_frame_line("10 | let x = 1;"));
         assert!(!is_diagnostic_frame_line("error: foo"));
         assert!(!is_diagnostic_frame_line("│ Update available! │"));
+        // アンダースコアを含んでも英数字があれば frame line ではない（snake_case 等）
+        assert!(!is_diagnostic_frame_line("__init__"));
+        assert!(!is_diagnostic_frame_line("10 | foo_bar();"));
         // `-` を含む Markdown テーブル区切りは保持対象
         assert!(!is_diagnostic_frame_line("| --- |"));
         // 空文字列は対象外
@@ -1668,13 +1699,36 @@ mod tests {
     }
 
     #[test]
-    fn test_collapse_repeated_prefix_lines_different_prefixes() {
-        // 同じ単語で始まらない行が連続しても集約しない
+    fn test_collapse_repeated_prefix_lines_mixed_progress_words_collapsed() {
+        // 異なる進捗語（Compiling/Downloading/Checking 等）が混在しても、
+        // 進捗語の連続ランとして 1 つにまとめて集約する。
+        // cargo の並行ビルドは Compiling と Checking を交互に出力するため、
+        // 同一語に限定すると交互出力がほとんど集約されずに残ってしまう。
         let lines = vec![
             "Compiling foo".to_string(),
             "Downloading bar".to_string(),
-            "Compiling baz".to_string(),
-            "Downloading qux".to_string(),
+            "Checking baz".to_string(),
+            "Compiling qux".to_string(),
+            "Checking quux".to_string(),
+            "error: failed".to_string(),
+        ];
+        let result = collapse_repeated_prefix_lines(lines);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0], "Compiling foo");
+        assert_eq!(result[1], "Downloading bar");
+        assert_eq!(result[2], "Checking baz");
+        // 混在ランは汎用メッセージで要約する
+        assert_eq!(result[3], "... (and 2 more progress lines)");
+        assert_eq!(result[4], "error: failed");
+    }
+
+    #[test]
+    fn test_collapse_repeated_prefix_lines_mixed_three_or_fewer_preserved() {
+        // 混在ランでも 3 行以下なら集約せず保持する
+        let lines = vec![
+            "Compiling foo".to_string(),
+            "Downloading bar".to_string(),
+            "Checking baz".to_string(),
         ];
         let result = collapse_repeated_prefix_lines(lines.clone());
         assert_eq!(result, lines);
@@ -2116,5 +2170,42 @@ mod tests {
         // 4・5 行目の生テキストは集約される
         assert!(!result.contains("Compiling d v1.0"));
         assert!(!result.contains("Compiling e v1.0"));
+    }
+
+    #[test]
+    fn test_normalize_collapses_interleaved_cargo_progress_e2e() {
+        // E2E: cargo の並行ビルドは Compiling と Checking を交互に出力する。
+        // 異なる進捗語が混在していても 1 つのランとして 4 行目以降を集約する。
+        let input = "Compiling libc v0.2\nChecking cfg-if v1.0\nCompiling quote v1.0\nChecking bytes v1.0\nCompiling serde v1.0\nerror: build failed";
+        let result = normalize_lint_output(input);
+        // 最初の3行は維持
+        assert!(result.contains("Compiling libc v0.2"));
+        assert!(result.contains("Checking cfg-if v1.0"));
+        assert!(result.contains("Compiling quote v1.0"));
+        // 混在ランは汎用メッセージで要約
+        assert!(result.contains("and 2 more progress lines"));
+        // 4・5 行目の生テキストは集約される
+        assert!(!result.contains("Checking bytes v1.0"));
+        assert!(!result.contains("Compiling serde v1.0"));
+        // 診断行は保持される
+        assert!(result.contains("error: build failed"));
+    }
+
+    #[test]
+    fn test_normalize_removes_compressed_multiline_span_underline() {
+        // E2E: rustc/clippy のマルチライン span 下線 `| |_______^` は
+        // `| |_^` に圧縮された後、枠線行として除去される。
+        // 見出し・位置ヘッダ・ソース行・ラベル付き行は保持される。
+        let input = "error[E0308]: mismatched types\n--> src/main.rs:10:18\n|\n10 | let x = foo(\n| |_______^\n| | expected u32";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("| |_^"),
+            "span underline should be removed: {result}"
+        );
+        assert!(result.contains("error[E0308]: mismatched types"));
+        assert!(result.contains("-> src/main.rs:10:18"));
+        assert!(result.contains("10 | let x = foo("));
+        // ラベル付きキャレット行（英数字を含む）は保持
+        assert!(result.contains("expected u32"));
     }
 }

@@ -1118,6 +1118,8 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 
 **Codex CLI 許可**: `{}`（空JSON）
 
+**Codex CLI PermissionRequest 許可**: `{}`（判断を返さず、Codex の通常承認フローに委ねる）
+
 **Codex CLI PreToolUse ブロック**: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use safe-rm instead..."}}`
 
 **Codex CLI PostToolUse / Stop ブロック**: `{"decision":"block","reason":"..."}`

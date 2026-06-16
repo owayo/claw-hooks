@@ -1118,6 +1118,8 @@ The `additionalContext` field passes lint warnings/errors to the agent where the
 
 **Codex CLI Allow**: `{}` (empty JSON)
 
+**Codex CLI PermissionRequest Allow**: `{}` (no decision; Codex continues the normal approval flow)
+
 **Codex CLI PreToolUse Block**: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use safe-rm instead..."}}`
 
 **Codex CLI PostToolUse / Stop Block**: `{"decision":"block","reason":"..."}`

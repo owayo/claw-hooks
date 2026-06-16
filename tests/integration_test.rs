@@ -361,7 +361,7 @@ fn test_invalid_json_input() {
 
 #[test]
 fn test_cursor_format_allow_safe_command() {
-    let input = r#"{"command":"git status","cwd":"/path/to/project"}"#;
+    let input = r#"{"hook_event_name":"beforeShellExecution","command":"git status","cwd":"/path/to/project"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
@@ -1422,6 +1422,21 @@ fn test_codex_format_block_rm_command() {
             .is_some_and(|r| !r.is_empty()),
         "Output should contain non-empty reason: {}",
         stdout
+    );
+}
+
+#[test]
+fn test_codex_format_permission_request_allows_safe_command() {
+    let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git status","description":"inspect repository"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex PermissionRequest allow should exit 0");
+    // 安全な PermissionRequest では承認を代行せず、通常の承認フローへ委ねる。
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Safe PermissionRequest should return empty JSON"
     );
 }
 

@@ -625,9 +625,10 @@ impl FormatAdapter {
     }
 
     fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Stop の出力スキーマは followup_message のみ（公式に permission フィールドは存在しない）。
+        // Stop / SubagentStop の出力スキーマは followup_message のみ
+        // （公式に permission フィールドは存在しない）。
         // Block は修正を指示する followup_message を返し、Allow は空オブジェクトを返す。
-        if event == HookEvent::Stop {
+        if event == HookEvent::Stop || event == HookEvent::SubagentStop {
             return match decision {
                 Decision::Block { message } => {
                     let normalized = normalize_lint_output(message);

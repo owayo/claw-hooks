@@ -175,13 +175,16 @@ impl ExtensionHookFilter {
             file_path.to_string()
         };
 
+        // 永続ログには展開済みファイルパスを残さず、プログラムと引数構造の要約のみ記録する。
+        // ファイルパスはユーザーの作業ディレクトリ階層を含み、機密的になり得るため、
+        // 詳細確認は `--trace` （stderr 出力、ディスク非永続）に委ねる。
         debug!(
-            "🪛 Executing extension hook: {} {:?} {} {:?} inline={:?}",
+            "🪛 Executing extension hook: program={} args_before={} args_after={} file_bytes={} inline={}",
             parsed.program,
-            parsed.args_before,
-            safe_path,
-            parsed.args_after,
-            parsed.inline_template
+            parsed.args_before.len(),
+            parsed.args_after.len(),
+            safe_path.len(),
+            parsed.inline_template.is_some()
         );
 
         // ファイルパスを個別の引数としてコマンドを構築
@@ -229,9 +232,11 @@ impl ExtensionHookFilter {
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
         let result = run_with_timeout(child, self.timeout_secs, &actual_command);
         let elapsed = start.elapsed();
+        // 完了ログには展開済みコマンド全文（ファイルパスを含む）を残さず、
+        // プログラム名と所要時間のサマリのみを記録する（機密非永続化方針）。
         info!(
             "⏰️ Extension hook [{}] completed in {:.2}s",
-            actual_command,
+            parsed.program,
             elapsed.as_secs_f64()
         );
         let output = result?;

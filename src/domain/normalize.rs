@@ -458,18 +458,31 @@ fn strip_common_path_prefix(text: &str) -> String {
         return text.to_string();
     }
 
-    // パスコンテキストでのみ置換: プレフィックス直後にパス文字が続く場合のみ
+    // パスコンテキストでのみ置換: プレフィックスの「前後」両方がパス境界条件を
+    // 満たす場合にのみ除去する。後方のみを検査すると、非パス文字列に共通プレフィックスが
+    // 偶然部分文字列として現れた場合（例: `foo/proj/src/...` のような文中の出現）に
+    // 中身を破壊する。`extract_absolute_paths` のパス開始判定と対称な条件を採用する。
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
+    let mut consumed = 0usize;
     while let Some(pos) = remaining.find(prefix) {
         result.push_str(&remaining[..pos]);
+        let abs_pos = consumed + pos;
         let after = &remaining[pos + prefix.len()..];
-        // パスコンテキスト: プレフィックス直後にファイル名文字（英数字、_、.、-）が続く場合のみ除去
-        let is_path_context = after
+        // 直前文字: 行頭/空白/`-`/`>`/`=` のいずれかがパス開始位置として有効
+        let prev = text[..abs_pos].chars().next_back();
+        let is_prev_path_start = match prev {
+            None => true,
+            Some(c) if c.is_ascii_whitespace() => true,
+            Some('-') | Some('>') | Some('=') => true,
+            _ => false,
+        };
+        // 直後文字: ファイル名文字（英数字、_、.、-）が続く場合のみパス継続とみなす
+        let is_next_path_char = after
             .chars()
             .next()
             .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-');
-        if is_path_context {
+        if is_prev_path_start && is_next_path_char {
             // プレフィックスを除去（直後のパス部分はそのまま保持）
             remaining = after;
         } else {
@@ -477,6 +490,7 @@ fn strip_common_path_prefix(text: &str) -> String {
             result.push_str(prefix);
             remaining = after;
         }
+        consumed = abs_pos + prefix.len();
     }
     result.push_str(remaining);
     result
@@ -1562,6 +1576,23 @@ mod tests {
         let result = strip_common_path_prefix(input);
         assert!(result.contains("see /home/user/GitHub/project/ for details"));
         assert!(result.contains("src/main.rs:10"));
+    }
+
+    #[test]
+    fn test_strip_common_path_prefix_embedded_substring_preserved() {
+        // 共通プレフィックスが非パス文字列中の偶発的な部分文字列として現れた場合、
+        // 中身を破壊してはいけない（直前が英数字なのでパス境界ではない）。
+        // 回帰テスト: かつては直前文字を検査せず除去し、「foo/foo/bar/extra」が
+        // 「fooextra」に破壊された。
+        let input = "/foo/bar/main.rs:10\n/foo/bar/lib.rs:20\nfoo/foo/bar/extra";
+        let result = strip_common_path_prefix(input);
+        assert!(
+            result.contains("foo/foo/bar/extra"),
+            "非パス文脈の部分文字列が破壊された: {}",
+            result
+        );
+        assert!(result.contains("main.rs:10"));
+        assert!(result.contains("lib.rs:20"));
     }
 
     // === collapse_repeated_chars 追加の境界条件 ===

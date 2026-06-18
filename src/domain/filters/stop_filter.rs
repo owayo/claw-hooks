@@ -122,15 +122,19 @@ impl StopHookFilter {
         }
     }
 
-    /// ストップフックコマンドの stdout/stderr 出力をログに記録する。
+    /// ストップフックコマンドの stdout/stderr 出力サイズをログに記録する。
+    ///
+    /// lint/typecheck のツール出力にはソース行の断片や file path などの機密が含まれ得るため、
+    /// 永続ログにはサイズ（バイト数）のみを残す。
+    /// 本文の確認は `--trace` フラグ（stderr 出力、ディスク非永続）で行う。
     fn log_output(command: &str, output: &Output) {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stdout.trim().is_empty() {
-            info!("Stop hook [{}] stdout:\n{}", command, stdout.trim());
+        let stdout_len = output.stdout.len();
+        let stderr_len = output.stderr.len();
+        if stdout_len > 0 {
+            info!("Stop hook [{}] stdout: {} bytes", command, stdout_len);
         }
-        if !stderr.trim().is_empty() {
-            info!("Stop hook [{}] stderr:\n{}", command, stderr.trim());
+        if stderr_len > 0 {
+            info!("Stop hook [{}] stderr: {} bytes", command, stderr_len);
         }
     }
 

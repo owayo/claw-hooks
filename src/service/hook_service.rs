@@ -11,6 +11,15 @@ use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
 use crate::service::log_sanitizer::{summarize_hook_input, summarize_parsed_hook_input};
 
+/// stdin から受け取るフック入力の最大バイト数。
+///
+/// クライアント（AI エージェント）からの単発 JSON 入力は通常 1〜数百 KB に収まる。
+/// 上限を設けないと、暴走したエージェントや悪意ある呼び出しによって巨大入力で
+/// claw-hooks プロセスを OOM kill させられる（パーサ側の `MAX_COMMAND_LEN` は
+/// 読み込み後の防御で、ここまで来てから止めてもメモリは既に確保済み）。
+/// 4 MiB は通常の hook ペイロードを十分カバーしつつ、メモリ圧迫を防ぐ目安。
+const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// フックイベント処理サービス。
 pub struct HookService {
     config: Config,
@@ -46,9 +55,30 @@ impl HookService {
         let stdout = io::stdout();
         let mut stdout = stdout.lock();
 
-        // stdin から全入力を読み取り（改行を保持して正確なJSONを維持）
+        // stdin から全入力を読み取り（改行を保持して正確なJSONを維持）。
+        // サイズ制限を設け、悪意ある/暴走エージェントによる OOM 攻撃を防ぐ。
+        // 制限超過時はフェイルクローズ（ブロック）として扱う。
         let mut input = String::new();
-        stdin.lock().read_to_string(&mut input)?;
+        let stdin_locked = stdin.lock();
+        let mut limited = stdin_locked.take(MAX_INPUT_BYTES + 1);
+        limited.read_to_string(&mut input)?;
+        if input.len() as u64 > MAX_INPUT_BYTES {
+            if self.trace {
+                eprintln!(
+                    "🔍 [TRACE] ERROR: Input exceeds limit: {} bytes (max {})",
+                    input.len(),
+                    MAX_INPUT_BYTES
+                );
+            }
+            error!(
+                "Input exceeds limit: {} bytes (max {})",
+                input.len(),
+                MAX_INPUT_BYTES
+            );
+            let output_json = self.adapter.format_error("Input too large");
+            self.write_error_output(&mut stdout, &output_json)?;
+            return Ok(self.adapter.error_exit_code());
+        }
 
         // トレースモード: 生の入力を即座に stderr に出力
         if self.trace {

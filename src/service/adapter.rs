@@ -1985,6 +1985,18 @@ mod tests {
         assert_eq!(output, "{}");
     }
 
+    #[test]
+    fn test_cursor_output_subagent_stop_allow_is_empty_json() {
+        // Cursor の subagentStop 出力スキーマは公式に `{ followup_message?: string }`
+        // のみで、`permission` フィールドは存在しない。Stop と同じ扱いで Allow は `{}` を返す。
+        // 回帰テスト: かつては `{"permission":"allow"}` を返しており公式スキーマと不一致だった。
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::SubagentStop)
+            .unwrap();
+        assert_eq!(output, "{}");
+    }
+
     // === Codex CLI フォーマットのテスト ===
 
     #[test]

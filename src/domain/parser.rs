@@ -59,11 +59,15 @@ impl Drop for RecursionGuard {
     }
 }
 
-/// 実コマンドを実行するラッパーコマンド
+/// 実コマンドを実行するラッパーコマンド。
+///
+/// `pkexec`（Polkit）と `gosu`（コンテナ向けの軽量 setuid 代替）は `sudo` / `doas` と同様に
+/// 後続の引数を昇格権限で実行するため、ここで認識しないと `pkexec rm -rf /` や
+/// `gosu root rm -rf /` のように危険コマンド検出を root 権限ごとバイパスされる。
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
     "command", "exec", "setsid", "stdbuf", "unshare", "nsenter", "setpriv", "chroot", "flock",
-    "taskset", "watch", "busybox", "toybox", "runuser",
+    "taskset", "watch", "busybox", "toybox", "runuser", "pkexec", "gosu",
 ];
 
 /// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。
@@ -516,7 +520,12 @@ impl ShellParser {
         };
         let mut command_strings = Vec::new();
 
-        for segment in Self::split_respecting_quotes(command, ';') {
+        // セミコロンに加え、改行と単独 `&`（バックグラウンド実行）もトップレベル区切りとして扱う。
+        // `;` のみで分割していた従来実装では、`echo ok\nrm -rf /tmp` や
+        // `echo ok & rm -rf /tmp` を 1 セグメントにまとめてしまい、後続コマンドが
+        // アンカー付きカスタム正規表現フィルタ（例 `^rm `）を素通りしていた。
+        // extract_commands_fallback と同じ split_top_level_terminators を使って対称にする。
+        for segment in Self::split_top_level_terminators(command) {
             for part in Self::split_by_logical_ops(segment) {
                 for pipe_part in Self::split_respecting_quotes(part, '|') {
                     if !pipe_part.is_empty() {
@@ -1407,9 +1416,10 @@ impl ShellParser {
 
     /// ラッパーがコマンド名の前に取る位置引数の数（オプションを除く）を返す。
     /// `chroot <dir> cmd` と `flock <file> cmd` は先頭に1つ位置引数を取る。
+    /// `gosu <user[:group]> cmd` も先頭にユーザ指定（`root` や `app:app` 等）を取る。
     fn wrapper_leading_positionals(wrapper_key: &str) -> usize {
         match wrapper_key {
-            "chroot" | "flock" => 1,
+            "chroot" | "flock" | "gosu" => 1,
             _ => 0,
         }
     }
@@ -2727,6 +2737,33 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_pkexec_wraps_rm() {
+        // Polkit の pkexec は sudo と同じく後続コマンドを昇格権限で実行する。
+        // ラッパー認識リストから漏れると `pkexec rm -rf /` が root バイパスになるため、
+        // 必ず内側 rm を抽出する。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("pkexec rm -rf /tmp/foo");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "pkexec ラッパーで rm が検出できていない: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_gosu_wraps_rm() {
+        // gosu はコンテナ向けの sudo 代替で `gosu <user> <cmd>` 形式。
+        // ラッパー認識リストから漏れると `gosu root rm -rf /` が root バイパスになる。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("gosu root rm -rf /tmp/foo");
+        assert!(
+            commands.contains(&"rm".to_string()),
+            "gosu ラッパーで rm が検出できていない: {:?}",
+            commands
+        );
+    }
+
+    #[test]
     fn test_extract_xargs_command() {
         let mut parser = ShellParser::new();
         let commands = parser.extract_commands("find . -name '*.tmp' | xargs rm");
@@ -3933,6 +3970,31 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("npm") && c.contains("install")),
             "npm install を含むコマンド文字列が抽出されるべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_command_strings_splits_on_newline() {
+        // 改行はトップレベル区切りとして扱う。改行で分割されないと、
+        // アンカー付きカスタム正規表現フィルタ（`^rm `）が後続コマンドを取りこぼす。
+        let parser = ShellParser::new();
+        let commands = parser.extract_command_strings_fallback("echo ok\nrm -rf /tmp/foo");
+        assert!(
+            commands.iter().any(|c| c.starts_with("rm")),
+            "改行区切り後の rm がコマンド文字列として独立抽出されるべき: {:?}",
+            commands
+        );
+    }
+
+    #[test]
+    fn test_extract_command_strings_splits_on_background_amp() {
+        // 単独 `&`（バックグラウンド実行）もトップレベル区切り。
+        let parser = ShellParser::new();
+        let commands = parser.extract_command_strings_fallback("echo ok & rm -rf /tmp/foo");
+        assert!(
+            commands.iter().any(|c| c.starts_with("rm")),
+            "& 区切り後の rm がコマンド文字列として独立抽出されるべき: {:?}",
             commands
         );
     }

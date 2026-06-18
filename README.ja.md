@@ -41,7 +41,8 @@
 - ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）。Unix ではプロセスグループ全体を SIGKILL で終了するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
 - 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` や `Blocking waiting for file lock on ...` のような進捗ログ（並行ビルドで `Compiling` と `Checking` が交互に出る混在ランも 1 つの連続ランとしてまとめて圧縮する）をトークン効率のために圧縮。スペースを含むディレクトリ配下の絶対パスでも共通プレフィックスを除去。`^` は ruff / clippy / rustc の長い範囲マーカー、`_` は rustc/ruff/biome のマルチライン span 下線（`| |_______^` → `| |_^`、snake_case の区切り 1〜2 連続は保持）、`·` と `→` は Biome などの空白可視化マーカーを縮約する用途（diff の `→ → → → → → → Google` → `→ Google` のような単一スペース区切りの連続も対象）。さらに Biome の重複行番号 `129 129 │ text` は `129 │ text`、空の context 行 `129 129 │` は `129 │` に圧縮する（左右の行番号が同じ整数の context line のみが対象で、`10 9 │` のように異なる場合は情報として保持）。加えて `|` / `^` / `_` / Box Drawing 文字（`│`、`─`、pnpm 系更新通知のバナー枠 `╭─╮` / `╰─╯`、biome の `─────` 区切り線）と空白だけからなる診断の枠線・キャレット行は丸ごと除去する（`| |_^` に圧縮されたマルチライン span 下線も含む）。指し示す列位置は直前の `file:line:col` ヘッダに残るため情報は失われず、英数字を含む行（見出し・ソース行・`| ^ expected u32` のようなラベル付きキャレット・`│ Update available! │` のようなバナー本文・`__init__` のような snake_case）は保持する。
-- 🛡️ **デバッグログ安全性** - デバッグログにはイベント/ツール/セッションと入力サイズの概要のみを記録し、生のコマンド、ファイル本文、未知イベントのペイロード、エージェントメッセージは保存しません
+- 🛡️ **デバッグログ安全性** - デバッグログにはイベント/ツール/セッションと入力サイズの概要のみを記録し、生のコマンド、ファイル本文、未知イベントのペイロード、エージェントメッセージは保存しません。拡張子フックのログはプログラム名と引数件数の概要のみ（解決済みファイルパスはディスクに残さない）、Stop フックのログは各フックの stdout/stderr のバイト数のみを記録し、出力本文は `--trace`（stderr、ディスク非永続）でしか確認できません
+- 🛑 **入力サイズ上限** - stdin の読み取りは 4 MiB 上限。暴走したエージェントが巨大ペイロードを送りつけても、claw-hooks プロセスを OOM kill させて安全弁を落とすのではなく、フェイルクローズドでブロックします
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Gemini CLI、Codex CLIに対応
 
@@ -195,8 +196,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`/usr/bin/sudo -u root rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、数値引数を取るフラグ（`xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`）、`bash -c -- 'rm ...'`、`env -S'rm ...'` / `env --split-string`、`{ rm -rf /; }` のようなブレースコマンドグループ、`diff <(rm ...) <(ls)` / `tee >(rm ...)` のようなプロセス置換、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）。パス付きラッパーや `.exe`, `.cmd`, `.bat`, `.com` 付きの Windows 実行ファイルも正規化
+- ✅ `sudo rm`、`/usr/bin/sudo -u root rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、数値引数を取るフラグ（`xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`）、`bash -c -- 'rm ...'`、`bash -c'rm ...'` / `bash -lc'rm ...'`（`-c` クラスタに引用符付きスクリプトが空白なしで連結された形式）、`env -S'rm ...'` / `env --split-string`、`{ rm -rf /; }` のようなブレースコマンドグループ、`diff <(rm ...) <(ls)` / `tee >(rm ...)` のようなプロセス置換、`pkexec rm` や `gosu root rm` のような特権昇格ラッパー経由、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
+- ✅ ラッパー・サブシェル対応（sudo、doas、pkexec、gosu、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）。パス付きラッパーや `.exe`, `.cmd`, `.bat`, `.com` 付きの Windows 実行ファイルも正規化
 - ✅ 単一バイナリ、Python/jq依存なし
 
 一度設定するだけ:

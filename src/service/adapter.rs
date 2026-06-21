@@ -781,9 +781,15 @@ impl FormatAdapter {
         // - Block: exit code 2 + stderr のメッセージ本文でブロック理由を提示する（公式仕様）。
         //   JSON ではなくメッセージ本文のみを返すことで、UI/エージェントに生 JSON が
         //   そのまま表示されるのを防ぐ。
-        match self.truncate_decision(decision) {
+        //   他エージェントと同様に ANSI/空白の正規化を行ってからトリムする。
+        //   stderr に ANSI エスケープが混入すると Windsurf UI の表示が壊れるため。
+        match decision {
             Decision::Allow { .. } => Ok("{}".to_string()),
-            Decision::Block { message } => Ok(message),
+            Decision::Block { message } => {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
+                Ok(truncated)
+            }
         }
     }
 }
@@ -1516,6 +1522,24 @@ mod tests {
         // Windsurf はブロックメッセージをプレーンテキスト本文として返す（JSON ではない）
         assert_eq!(output, "Command blocked for safety");
         assert!(!output.contains(r#""decision""#));
+    }
+
+    #[test]
+    fn test_windsurf_output_block_strips_ansi_codes() {
+        // Block メッセージに ANSI エスケープが含まれる場合、normalize_lint_output が
+        // 適用されて ANSI を除去してから stderr に書かれることを保証する。
+        // ANSI が混入したまま stderr に流れると Windsurf UI の表示が壊れる。
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "\x1b[31merror\x1b[0m: rm is blocked".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        assert!(!output.contains('\x1b'), "ANSI escapes should be stripped");
+        assert!(output.contains("error: rm is blocked"));
     }
 
     #[test]

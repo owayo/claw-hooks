@@ -67,7 +67,7 @@ impl Drop for RecursionGuard {
 const COMMAND_WRAPPERS: &[&str] = &[
     "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
     "command", "exec", "setsid", "stdbuf", "unshare", "nsenter", "setpriv", "chroot", "flock",
-    "taskset", "watch", "busybox", "toybox", "runuser", "pkexec", "gosu",
+    "taskset", "watch", "busybox", "toybox", "runuser", "pkexec", "gosu", "su",
 ];
 
 /// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。
@@ -1212,8 +1212,27 @@ impl ShellParser {
         "--setgid",
         "--wd",
     ];
-    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g"];
-    const RUNUSER_LONG_FLAGS_WITH_ARGS: &[&str] = &["--user", "--group"];
+    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g", "-c", "-G", "-s", "-w"];
+    const RUNUSER_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--user",
+        "--group",
+        "--command",
+        "--supp-group",
+        "--shell",
+        "--session-command",
+        "--whitelist-environment",
+    ];
+    // `su` のオプション（GNU coreutils と util-linux 系で共通の主要なもの）。
+    // 値取得フラグを定義しないと、`su -s /bin/bash user rm` で `/bin/bash` を leading
+    // positional として消費し `user` をコマンドと誤認するため、検出漏れになる。
+    const SU_FLAGS_WITH_ARGS: &[&str] = &["-c", "-g", "-G", "-s"];
+    const SU_LONG_FLAGS_WITH_ARGS: &[&str] = &[
+        "--command",
+        "--group",
+        "--supp-group",
+        "--shell",
+        "--session-command",
+    ];
     const CHROOT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--userspec", "--groups"];
     const FLOCK_FLAGS_WITH_ARGS: &[&str] = &["-w", "-E"];
     const FLOCK_LONG_FLAGS_WITH_ARGS: &[&str] = &["--timeout", "--conflict-exit-code"];
@@ -1293,6 +1312,7 @@ impl ShellParser {
             "watch" => Self::WATCH_FLAGS_WITH_ARGS,
             "nsenter" => Self::NSENTER_FLAGS_WITH_ARGS,
             "runuser" => Self::RUNUSER_FLAGS_WITH_ARGS,
+            "su" => Self::SU_FLAGS_WITH_ARGS,
             "unshare" => Self::UNSHARE_FLAGS_WITH_ARGS,
             "flock" => Self::FLOCK_FLAGS_WITH_ARGS,
             "time" => Self::TIME_FLAGS_WITH_ARGS,
@@ -1312,6 +1332,7 @@ impl ShellParser {
             "watch" => Self::WATCH_LONG_FLAGS_WITH_ARGS,
             "nsenter" => Self::NSENTER_LONG_FLAGS_WITH_ARGS,
             "runuser" => Self::RUNUSER_LONG_FLAGS_WITH_ARGS,
+            "su" => Self::SU_LONG_FLAGS_WITH_ARGS,
             "chroot" => Self::CHROOT_LONG_FLAGS_WITH_ARGS,
             "setpriv" => Self::SETPRIV_LONG_FLAGS_WITH_ARGS,
             "unshare" => Self::UNSHARE_LONG_FLAGS_WITH_ARGS,
@@ -1417,9 +1438,13 @@ impl ShellParser {
     /// ラッパーがコマンド名の前に取る位置引数の数（オプションを除く）を返す。
     /// `chroot <dir> cmd` と `flock <file> cmd` は先頭に1つ位置引数を取る。
     /// `gosu <user[:group]> cmd` も先頭にユーザ指定（`root` や `app:app` 等）を取る。
+    /// `su <user> cmd` 形式（Busybox/Alpine で広く使われる）も先頭にユーザ指定を取るため
+    /// 読み飛ばさないと `su root rm -rf /` で `rm` を検出できず、特権昇格込みでバイパスされる。
+    /// `runuser` は `-u USER` フラグでユーザを指定する形式が GNU 標準なので、leading
+    /// positional には含めない（含めると `runuser -u user cmd` の `cmd` を消費してしまう）。
     fn wrapper_leading_positionals(wrapper_key: &str) -> usize {
         match wrapper_key {
-            "chroot" | "flock" | "gosu" => 1,
+            "chroot" | "flock" | "gosu" | "su" => 1,
             _ => 0,
         }
     }
@@ -2492,6 +2517,11 @@ mod tests {
             "taskset -c 0 rm -rf /tmp/x",
             "su -c \"rm -rf /tmp/x\"",
             "su root -c \"rm -rf /tmp/x\"",
+            // Busybox/Alpine 形式の `su <user> cmd` でも内側の rm を検出する
+            // （leading positional 1 でユーザを skip して cmd を抽出）。
+            "su root rm -rf /tmp/x",
+            "su -l root rm -rf /tmp/x",
+            "su -s /bin/sh root rm -rf /tmp/x",
             "runuser -u user rm -rf /tmp/x",
             "runuser -c \"rm -rf /tmp/x\"",
             "watch -n 1 rm -rf /tmp/x",

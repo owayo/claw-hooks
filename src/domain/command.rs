@@ -261,6 +261,11 @@ pub fn spawn_piped_with_env(
 /// `report=false` の Stop フック用。親プロセスは子を待たないため、Hook 応答を
 /// コマンド完了まで遅延させない。出力は破棄されるので、必要なログはコマンド側で
 /// 明示的にファイル等へ書き出すこと。
+///
+/// `Child` を即時ドロップすると Rust の `std::process::Child` は `wait` を呼ばないため
+/// Unix ではゾンビエントリが残り続ける。Stop フックが頻繁に発火する環境では親プロセス
+/// （claw-hooks）の生存中に蓄積するため、専用スレッドで `wait` を回収する。
+/// スレッドは子プロセス終了後に自然に終了し、親が先に終了した場合は OS が回収する。
 pub fn spawn_detached_with_env(
     program: &str,
     args: &[String],
@@ -284,7 +289,14 @@ pub fn spawn_detached_with_env(
     #[cfg(unix)]
     configure_unix_process_group(&mut cmd);
     cmd.spawn()
-        .map(|child| child.id())
+        .map(|mut child| {
+            let pid = child.id();
+            // ゾンビを防ぐためバックグラウンドで wait する。
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            pid
+        })
         .map_err(|e| format!("Failed to execute '{}': {}", program, e))
 }
 
@@ -607,6 +619,34 @@ mod tests {
         let content = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(content, "detached-env-ok");
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_detached_with_env_reaps_zombie() {
+        // detach 起動でも `Child` を wait しないとゾンビが残る。バックグラウンドスレッドが
+        // `wait` を呼ぶことで、子プロセス終了直後に PID エントリが回収されることを確認する。
+        let pid =
+            spawn_detached_with_env("sh", &["-c".to_string(), "exit 0".to_string()], &[]).unwrap();
+        // 子プロセスが終了し、reaper スレッドが wait を完了するまで待つ。
+        // `kill(pid, 0)` で存在確認するが、ゾンビは存在扱いなので回収後は ESRCH になる。
+        let mut reaped = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(20));
+            // SAFETY: ここでは pid に対してシグナル 0 を送って存在確認するだけで、
+            // プロセス自体には影響しない。
+            let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            if rc == -1 {
+                let errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or_default();
+                if errno == libc::ESRCH {
+                    reaped = true;
+                    break;
+                }
+            }
+        }
+        assert!(reaped, "PID {pid} should be reaped (no zombie)");
     }
 
     // === run_with_timeout_tracked テスト ===

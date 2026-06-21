@@ -196,8 +196,8 @@ rm_block_message = "🚫 Use safe-rm instead"
 **なぜ高精度か:**
 - ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
 - ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`/usr/bin/sudo -u root rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、数値引数を取るフラグ（`xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`）、`bash -c -- 'rm ...'`、`bash -c'rm ...'` / `bash -lc'rm ...'`（`-c` クラスタに引用符付きスクリプトが空白なしで連結された形式）、`env -S'rm ...'` / `env --split-string`、`{ rm -rf /; }` のようなブレースコマンドグループ、`diff <(rm ...) <(ls)` / `tee >(rm ...)` のようなプロセス置換、`pkexec rm` や `gosu root rm` のような特権昇格ラッパー経由、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、doas、pkexec、gosu、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）。パス付きラッパーや `.exe`, `.cmd`, `.bat`, `.com` 付きの Windows 実行ファイルも正規化
+- ✅ `sudo rm`、`/usr/bin/sudo -u root rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、数値引数を取るフラグ（`xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`）、`bash -c -- 'rm ...'`、`bash -c'rm ...'` / `bash -lc'rm ...'`（`-c` クラスタに引用符付きスクリプトが空白なしで連結された形式）、`env -S'rm ...'` / `env --split-string`、`{ rm -rf /; }` のようなブレースコマンドグループ、`diff <(rm ...) <(ls)` / `tee >(rm ...)` のようなプロセス置換、`pkexec rm`、`gosu root rm`、Busybox/Alpine 形式の `su root rm` のような特権昇格ラッパー経由、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
+- ✅ ラッパー・サブシェル対応（sudo、doas、pkexec、gosu、su、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）。パス付きラッパーや `.exe`, `.cmd`, `.bat`, `.com` 付きの Windows 実行ファイルも正規化
 - ✅ 単一バイナリ、Python/jq依存なし
 
 一度設定するだけ:

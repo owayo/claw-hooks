@@ -179,7 +179,7 @@ impl ExtensionHookFilter {
         // ファイルパスはユーザーの作業ディレクトリ階層を含み、機密的になり得るため、
         // 詳細確認は `--trace` （stderr 出力、ディスク非永続）に委ねる。
         debug!(
-            "🪛 Executing extension hook: program={} args_before={} args_after={} file_bytes={} inline={}",
+            "🪛 Executing extension hook: program={} args_before={} args_after={} path_bytes={} inline={}",
             parsed.program,
             parsed.args_before.len(),
             parsed.args_after.len(),
@@ -213,24 +213,22 @@ impl ExtensionHookFilter {
         // 孫プロセス (例: `sh -c 'sleep'` の `sleep`) も含めて確実に停止できるようにする。
         configure_process_group(&mut cmd);
 
-        // ログ用に展開済みのコマンド文字列を構築
-        let actual_command = {
-            let mut parts = vec![parsed.program.clone()];
-            parts.extend(parsed.args_before.iter().cloned());
-            if let Some(ref template) = parsed.inline_template {
-                parts.push(template.replace("{file}", &safe_path));
-            } else {
-                parts.push(safe_path.clone());
-            }
-            parts.extend(parsed.args_after.iter().cloned());
-            parts.join(" ")
-        };
+        // 永続ログ・タイムアウト理由・エージェント返却用ラベルには
+        // 展開済みファイルパスを含めない。
+        let sanitized_command = format!(
+            "{} args_before={} args_after={} inline={} path_bytes={}",
+            parsed.program,
+            parsed.args_before.len(),
+            parsed.args_after.len(),
+            parsed.inline_template.is_some(),
+            safe_path.len()
+        );
 
         let start = std::time::Instant::now();
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
-        let result = run_with_timeout(child, self.timeout_secs, &actual_command);
+        let result = run_with_timeout(child, self.timeout_secs, &sanitized_command);
         let elapsed = start.elapsed();
         // 完了ログには展開済みコマンド全文（ファイルパスを含む）を残さず、
         // プログラム名と所要時間のサマリのみを記録する（機密非永続化方針）。
@@ -257,27 +255,25 @@ impl ExtensionHookFilter {
                 .status
                 .code()
                 .map_or("signal".to_string(), |c| c.to_string());
-            let detail = [stderr.trim(), stdout.trim()]
-                .iter()
-                .filter(|s| !s.is_empty())
-                .copied()
-                .collect::<Vec<_>>()
-                .join("\n");
-            if detail.is_empty() {
+            let has_output = !stderr.trim().is_empty() || !stdout.trim().is_empty();
+            if !has_output {
                 warn!(
-                    "⚠️ Extension hook command failed (exit code {}): {}",
-                    exit_code, actual_command
+                    "⚠️ Extension hook command failed (exit code {}): {} stdout=0 bytes stderr=0 bytes",
+                    exit_code, sanitized_command
                 );
             } else {
                 warn!(
-                    "⚠️ Extension hook command failed (exit code {}): {}\n{}",
-                    exit_code, actual_command, detail
+                    "⚠️ Extension hook command failed (exit code {}): {} stdout={} bytes stderr={} bytes",
+                    exit_code,
+                    sanitized_command,
+                    output.stdout.len(),
+                    output.stderr.len()
                 );
             }
         }
 
         Ok(CommandResult {
-            command: actual_command,
+            command: sanitized_command,
             success: output.status.success(),
             output: combined_output,
         })
@@ -808,8 +804,52 @@ mod tests {
                     "コンテキストにタイムアウトが示されるべき: {}",
                     ctx
                 );
+                assert!(
+                    !ctx.contains("/tmp/test.txt"),
+                    "タイムアウト理由のコマンドラベルにファイルパスを含めるべきではない: {}",
+                    ctx
+                );
             }
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_extension_hook_failure_context_sanitizes_command_label() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'printf failed >&2; exit 1 #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/secret-path.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        let decision = filter.execute(&input);
+        match decision {
+            Decision::Allow { additional_context } => {
+                let ctx = additional_context.expect("失敗時はエラーコンテキストが付くべき");
+                assert!(ctx.contains("failed"), "stderr は保持されるべき: {}", ctx);
+                assert!(
+                    ctx.contains("path_bytes="),
+                    "コマンドラベルはファイルパスではなくサイズ要約にすべき: {}",
+                    ctx
+                );
+                assert!(
+                    !ctx.contains("/tmp/secret-path.txt"),
+                    "コマンドラベルにファイルパスを含めるべきではない: {}",
+                    ctx
+                );
+            }
+            _ => panic!("Expected Allow decision"),
         }
     }
 

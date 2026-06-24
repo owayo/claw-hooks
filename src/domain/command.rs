@@ -61,6 +61,11 @@ pub struct TimedOutput {
     pub timed_out: bool,
 }
 
+enum ReaderJoin {
+    Finished(Vec<u8>),
+    TimedOut,
+}
+
 #[cfg(unix)]
 fn timeout_exit_status() -> ExitStatus {
     // Unixのwaitステータスは上位バイトに終了コードをエンコードする。
@@ -84,21 +89,30 @@ pub fn is_timeout_output(output: &Output) -> bool {
 /// 子プロセスが正常終了していても、バックグラウンドの孫プロセスが stdout/stderr
 /// のパイプを継承して保持し続けると `read_to_end` が EOF を受け取れず `join` が
 /// 無期限にブロックし、設定したタイムアウトが無効化される。これを防ぐため、
-/// deadline 超過時は join を諦め、取得済み（空の可能性あり）バッファを返す。
-///
-/// 子は既に回収済みで PID が再利用される恐れがあるため、ここで killpg はしない。
-/// 残った孫プロセスはプロセス終了時に OS がクリーンアップする。
+/// deadline 超過時は未完了として返し、呼び出し元でプロセスグループ kill へ進める。
 fn join_reader_before_deadline(
     handle: std::thread::JoinHandle<Vec<u8>>,
     deadline: Instant,
-) -> Vec<u8> {
+) -> ReaderJoin {
     while !handle.is_finished() {
         if Instant::now() >= deadline {
-            return Vec::new();
+            return ReaderJoin::TimedOut;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    handle.join().unwrap_or_default()
+    ReaderJoin::Finished(handle.join().unwrap_or_default())
+}
+
+fn timeout_output(timeout_secs: u64, command_desc: &str) -> Output {
+    let msg = format!(
+        "{} {}s: {}]\n",
+        TIMEOUT_STDERR_PREFIX, timeout_secs, command_desc
+    );
+    Output {
+        status: timeout_exit_status(),
+        stdout: Vec::new(),
+        stderr: msg.into_bytes(),
+    }
 }
 
 /// タイムアウト付きでコマンドを実行し、タイムアウトメタデータを返す。
@@ -183,16 +197,8 @@ pub fn run_with_timeout_tracked(
         // リーダースレッドをjoinしない：子サブプロセス（例：sh → sleep）が
         // パイプハンドルを保持し続ける可能性があり、join()が無期限にブロックされるため。
         // スレッドはプロセス終了時にクリーンアップされる。
-        let msg = format!(
-            "{} {}s: {}]\n",
-            TIMEOUT_STDERR_PREFIX, timeout_secs, command_desc
-        );
         return Ok(TimedOutput {
-            output: Output {
-                status,
-                stdout: Vec::new(),
-                stderr: msg.into_bytes(),
-            },
+            output: timeout_output(timeout_secs, command_desc),
             timed_out: true,
         });
     }
@@ -202,6 +208,33 @@ pub fn run_with_timeout_tracked(
     // join が無期限ブロックしタイムアウトが無効化されるため、deadline までで諦める。
     let stdout = join_reader_before_deadline(stdout_thread, deadline);
     let stderr = join_reader_before_deadline(stderr_thread, deadline);
+
+    if matches!(&stdout, ReaderJoin::TimedOut) || matches!(&stderr, ReaderJoin::TimedOut) {
+        warn!(
+            "⏰ Command output pipe timed out after {}s: {}",
+            timeout_secs, command_desc
+        );
+        // 直接の子プロセスが正常終了していても、バックグラウンドの孫プロセスが
+        // stdout/stderr を保持している限り Hook は完了していない。Unix では同じ
+        // プロセスグループを停止して、`sh -c 'sleep ... &'` のような timeout 回避を防ぐ。
+        #[cfg(unix)]
+        kill_process_group(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(TimedOutput {
+            output: timeout_output(timeout_secs, command_desc),
+            timed_out: true,
+        });
+    }
+
+    let stdout = match stdout {
+        ReaderJoin::Finished(output) => output,
+        ReaderJoin::TimedOut => unreachable!("timeout branch returned above"),
+    };
+    let stderr = match stderr {
+        ReaderJoin::Finished(output) => output,
+        ReaderJoin::TimedOut => unreachable!("timeout branch returned above"),
+    };
 
     Ok(TimedOutput {
         output: Output {
@@ -733,6 +766,37 @@ mod tests {
         assert!(
             !marker.exists(),
             "孫プロセスのスリープがタイムアウトで停止しなかった: {} が残存",
+            marker_path
+        );
+    }
+
+    /// 直接の子プロセスが正常終了しても、バックグラウンドの孫プロセスが
+    /// stdout/stderr のパイプを保持している場合は timeout として扱い、
+    /// プロセスグループ全体を停止する。
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_kills_background_grandchild_after_parent_exit() {
+        let marker = std::env::temp_dir().join(format!(
+            "claw-hooks-background-grandchild-marker-{}",
+            std::process::id()
+        ));
+        let marker_path = marker.to_str().unwrap();
+        let _ = std::fs::remove_file(&marker);
+
+        // シェル自体はすぐ終了するが、バックグラウンドの sleep は stdout/stderr を
+        // 継承しているため、プロセスグループを止めないと Hook の timeout を回避できる。
+        let cmd = format!("sleep 30 && touch {} &", marker_path);
+        let child = spawn_piped("sh", &["-c".to_string(), cmd.clone()]).unwrap();
+        let result = run_with_timeout_tracked(child, 1, &cmd).unwrap();
+
+        assert!(result.timed_out);
+        assert_eq!(result.output.status.code(), Some(TIMEOUT_EXIT_CODE));
+        assert!(is_timeout_output(&result.output));
+
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !marker.exists(),
+            "バックグラウンド孫プロセスがタイムアウト後も動作した: {} が作成された",
             marker_path
         );
     }

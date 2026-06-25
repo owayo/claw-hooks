@@ -84,6 +84,9 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// lint/typecheck出力をAI向けに正規化する。
 /// トークン効率を最適化しつつ、エラー情報は維持する:
 /// - ANSIエスケープコード（色、スタイル）を除去
+/// - キャリッジリターン（`\r`）で同一行を上書きする進捗表示を、端末で実際に
+///   見える「最後の状態」だけに圧縮（Godot のヘッドレス import やダウンロード系
+///   ツールが進捗バーを `\r` で繰り返し上書きするケースを集約）
 /// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
 /// - 各行の先頭・末尾の空白を除去
 /// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
@@ -109,6 +112,9 @@ pub fn normalize_lint_output(output: &str) -> String {
     let mut prev_blank = false;
 
     for line in stripped.lines() {
+        // キャリッジリターンで上書きされた進捗表示は、端末で最後に見える状態
+        // （最後の `\r` 以降の非空セグメント）だけを残す。途中経過と制御文字を捨てる。
+        let line = collapse_carriage_return(line);
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
@@ -424,6 +430,30 @@ fn is_diagnostic_frame_line(line: &str) -> bool {
             .all(|c| matches!(c, '|' | '^' | '_' | ' ' | '\u{2500}'..='\u{257F}'))
 }
 
+/// キャリッジリターン（`\r`）で上書きされた進捗表示を、端末で実際に表示される
+/// 「最後の状態」だけに圧縮する。
+///
+/// Godot のヘッドレス import やダウンロード系ツールなどは、進捗バーを `\r` で
+/// 同一行に何度も上書きする。これをパイプで捕捉すると、`str::lines()` は `\n` と
+/// `\r\n` でしか行を分割しないため、単独の `\r` で区切られた途中経過がすべて
+/// 1 行に残り、制御文字 `\r` ごとトークンを浪費する。
+///
+/// 端末は `\r` を「カーソルを行頭へ戻す」と解釈し、以降の出力で前の内容を
+/// 上書きするため、人間に見えるのは最後のセグメントだけ。そこで `\r` で分割した
+/// うち「末尾に最も近い非空セグメント」を採用し、途中経過を捨てる。行末が `\r`
+/// （行をクリアした状態）の場合は直前の非空セグメントを残す。
+///
+/// 注: `\r\n`（Windows 改行）は呼び出し元の `str::lines()` が処理済みのため、
+/// ここに渡る `\r` は常に単独の上書き用。lint テキスト本文に `\r` は現れない。
+fn collapse_carriage_return(line: &str) -> &str {
+    if !line.contains('\r') {
+        return line;
+    }
+    line.rsplit('\r')
+        .find(|segment| !segment.trim().is_empty())
+        .unwrap_or("")
+}
+
 /// 連続する空白（スペースとタブ）を1つのスペースに圧縮する。
 fn collapse_whitespace(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -622,6 +652,78 @@ mod tests {
     #[test]
     fn test_normalize_empty_input() {
         assert_eq!(normalize_lint_output(""), "");
+    }
+
+    #[test]
+    fn test_collapse_carriage_return_keeps_last_segment() {
+        // 進捗バーが \r で上書きされたケースは最後の状態だけを残す。
+        assert_eq!(collapse_carriage_return("1%\r2%\r3%"), "3%");
+        // 行末が \r（行クリア）なら直前の非空セグメントを残す。
+        assert_eq!(
+            collapse_carriage_return("Downloading 100%\r"),
+            "Downloading 100%"
+        );
+        // \r を含まない行はそのまま返す（追加アロケーションなし）。
+        assert_eq!(collapse_carriage_return("plain line"), "plain line");
+        // \r のみ・空白のみは空文字列に圧縮される。
+        assert_eq!(collapse_carriage_return("\r"), "");
+        assert_eq!(collapse_carriage_return("done\r   "), "done");
+    }
+
+    #[test]
+    fn test_normalize_collapses_carriage_return_progress() {
+        // \r で同一行を上書きする進捗表示は最後の状態のみ残り、制御文字も消える。
+        let input = "Importing: a.png\rImporting: b.png\rImporting: c.png\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "Importing: c.png");
+        assert!(!result.contains('\r'));
+    }
+
+    #[test]
+    fn test_normalize_carriage_return_then_dot_collapse() {
+        // \r 圧縮後に進捗ドットの圧縮も適用される。
+        let input = "task\r......................  63 / 212 ( 29%)\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, ". 63 / 212 ( 29%)");
+    }
+
+    #[test]
+    fn test_normalize_migration_progress_example() {
+        // マイグレーション系ツールの装飾枠・末尾ドット・進捗ドットを圧縮する。
+        let input = "Using attach strategy to execute scripts...\n\
+                     ==== Starting migration for: 3.8.0.rc001 ====\n\
+                     ...............................................................  63 / 212 ( 29%)";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result,
+            "Using attach strategy to execute scripts.\n\
+             = Starting migration for: 3.8.0.rc001 =\n\
+             . 63 / 212 ( 29%)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_carriage_return_preserves_following_error_line() {
+        // \r で進捗を上書きした後、別行に続くエラーは保持されること（情報欠落防止）。
+        let input = "Building...\rBuilt\nerror: type mismatch";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "Built\nerror: type mismatch");
+    }
+
+    #[test]
+    fn test_normalize_carriage_return_mixed_with_crlf() {
+        // CRLF（Windows 改行）は行として分割され、行内の単独 \r は上書きとして圧縮される。
+        let input = "step1\r\n1%\r2%\r100%\r\nstep3";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "step1\n100%\nstep3");
+    }
+
+    #[test]
+    fn test_normalize_carriage_return_without_trailing_newline() {
+        // 末尾に改行が無い単独 \r 行でも最後の状態だけ残る。
+        let input = "loading 1%\rloading 99%";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "loading 99%");
     }
 
     #[test]

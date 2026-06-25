@@ -17,9 +17,11 @@ const KILL_COMMANDS: &[&str] = &[
 /// 値を取る xargs オプションを読み飛ばし、実際に実行されるコマンドだけを検査する。
 fn contains_xargs_kill(command: &str) -> bool {
     for segment in command.split('|') {
-        let trimmed = segment.trim();
-        if trimmed.starts_with("xargs") {
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let parts: Vec<&str> = segment.split_whitespace().collect();
+        // セグメント先頭トークンが厳密に `xargs` のときだけ検査する。
+        // `starts_with("xargs")` だと `xargs-wrapper` / `xargsfoo` のような
+        // 別コマンドを前方一致で xargs と誤判定し、過剰ブロックになる。
+        if parts.first() == Some(&"xargs") {
             if let Some(cmd) = find_xargs_command(&parts[1..]) {
                 if KILL_COMMANDS.contains(&cmd) {
                     return true;
@@ -131,6 +133,19 @@ mod tests {
         // チェーンコマンド
         assert!(contains_kill_command("cd /tmp && kill 1234"));
         assert!(contains_kill_command("echo test; pkill node"));
+    }
+
+    #[test]
+    fn test_xargs_kill_does_not_false_positive_on_similar_command() {
+        // `xargs-wrapper` / `xargsfoo` は `xargs` で始まる別コマンドであり、
+        // xargs 経由の kill ではないため過剰ブロックしないこと（前方一致の誤検知防止）。
+        assert!(!contains_xargs_kill("ps | xargs-wrapper kill"));
+        assert!(!contains_xargs_kill("ps | xargsfoo kill"));
+        // 本物の xargs kill は引き続き検出する（回帰防止）。
+        assert!(contains_xargs_kill("ps aux | xargs kill"));
+        assert!(contains_xargs_kill("pgrep node | xargs kill -9"));
+        // 値取りフラグを挟んでも検出する。
+        assert!(contains_xargs_kill("ps | xargs -r kill"));
     }
 
     #[test]

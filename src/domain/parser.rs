@@ -1378,7 +1378,19 @@ impl ShellParser {
             let arg = &args[i];
 
             if arg == "--" {
-                return (i + 1 < args.len()).then_some(i + 1);
+                // `--` はオプション解釈の打ち切りを意味するが、ラッパーが取る
+                // leading positional（`su`/`gosu` のユーザ指定など）は `--` の
+                // 後ろにも残る。これを消費してから実コマンド位置を返さないと、
+                // ユーザ名を実行コマンドと誤認して後続の rm/kill/dd を見落とす
+                // （例: `su -- root rm -rf /` で root をコマンド扱いしてしまう）。
+                // chroot/flock は位置引数が `--` より前に来るため、ここに到達する
+                // 時点で leading_positionals は通常 0 になっている。
+                i += 1;
+                while leading_positionals > 0 && i < args.len() {
+                    leading_positionals -= 1;
+                    i += 1;
+                }
+                return (i < args.len()).then_some(i);
             }
 
             if wrapper_key == "env" && Self::is_env_assignment_token(arg) {
@@ -3571,6 +3583,51 @@ mod tests {
         assert_eq!(
             ShellParser::find_wrapped_command_index("sudo", &args),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_su_double_dash_user() {
+        // su -- root rm → `--` の後に残るユーザ位置引数(root)を消費し rm を指す。
+        // `--` 直後を無条件にコマンド扱いすると root を誤検出し rm を見落とす。
+        let args: Vec<String> = vec!["--", "root", "rm", "-rf", "/"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("su", &args),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_gosu_double_dash_user() {
+        // gosu -- root rm → gosu もユーザ位置引数を取るため同様に root を消費する。
+        let args: Vec<String> = vec!["--", "root", "rm", "-rf", "/"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            ShellParser::find_wrapped_command_index("gosu", &args),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapped_command_index_su_double_dash_no_command() {
+        // su -- root（コマンドなし）→ ユーザのみで実行コマンドは無いので None。
+        let args: Vec<String> = vec!["--", "root"].into_iter().map(String::from).collect();
+        assert_eq!(ShellParser::find_wrapped_command_index("su", &args), None);
+    }
+
+    #[test]
+    fn test_extract_commands_su_double_dash_detects_rm() {
+        // エンドツーエンド: `su -- root rm -rf /` から rm が抽出されること。
+        let mut parser = ShellParser::new();
+        let commands = parser.extract_commands("su -- root rm -rf /tmp/x");
+        assert!(
+            commands.iter().any(|c| c == "rm"),
+            "rm should be detected behind `su --`: {commands:?}"
         );
     }
 

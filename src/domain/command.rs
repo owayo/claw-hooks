@@ -18,6 +18,15 @@ pub(crate) const TIMEOUT_EXIT_CODE: i32 = 124;
 /// タイムアウト時にstderrに付加されるプレフィックス。
 const TIMEOUT_STDERR_PREFIX: &str = "[Command timed out after";
 
+/// 子プロセスが正常終了した後、リーダースレッドがパイプに残ったデータを
+/// 読み切るために与える猶予秒数。
+/// プロセス終了後の残データはパイプバッファ分（数十KB）に限られ通常は即座に
+/// 読み終わるが、deadline を流用すると deadline 際どい正常終了で出力が失われ
+/// 誤タイムアウトになる。一方、バックグラウンドの孫プロセスがパイプを保持し
+/// 続けるケースでは EOF が来ないため、この猶予で打ち切ってプロセスグループを
+/// kill する（孫プロセスによる timeout 回避の防止を維持する）。
+const OUTPUT_DRAIN_GRACE_SECS: u64 = 5;
+
 /// Unix で子プロセスを新しいプロセスグループに配置する。
 /// `Command::process_group(0)` 相当の挙動を `pre_exec` 経由で安定 API のみで実現する。
 /// （`process_group` は Rust 1.64 以降で安定化済みだが、明示的な意図を残すため pre_exec を使う）
@@ -204,10 +213,18 @@ pub fn run_with_timeout_tracked(
     }
 
     // リーダースレッドから出力を収集する（正常終了後は通常すぐ完了する）。
-    // ただし子が早期終了し、バックグラウンドの孫プロセスがパイプを保持し続けると
-    // join が無期限ブロックしタイムアウトが無効化されるため、deadline までで諦める。
-    let stdout = join_reader_before_deadline(stdout_thread, deadline);
-    let stderr = join_reader_before_deadline(stderr_thread, deadline);
+    // 子は正常終了済みなので、残るのはパイプに残ったデータの読み切りだけ。
+    // ここで元の deadline を流用すると、deadline 際どく正常終了したコマンドで
+    // `Instant::now() >= deadline` が即真になり、まだ読み終えていない出力を
+    // 捨てて誤って「タイムアウト」と判定してしまう（report=true の Stop フックで
+    // 正常成功なのに誤った Block を返す）。そのため終了確定時点からの短い猶予
+    // deadline を用いる。バックグラウンドの孫プロセスがパイプを保持し続けると
+    // join は無期限ブロックするため、この猶予で諦めてプロセスグループを kill する。
+    let drain_deadline = Instant::now()
+        .checked_add(Duration::from_secs(OUTPUT_DRAIN_GRACE_SECS))
+        .unwrap_or(deadline);
+    let stdout = join_reader_before_deadline(stdout_thread, drain_deadline);
+    let stderr = join_reader_before_deadline(stderr_thread, drain_deadline);
 
     if matches!(&stdout, ReaderJoin::TimedOut) || matches!(&stderr, ReaderJoin::TimedOut) {
         warn!(

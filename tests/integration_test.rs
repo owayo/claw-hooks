@@ -691,6 +691,56 @@ fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (Str
     run_hook_with_config_and_format(json_input, "claude", config_path)
 }
 
+/// 生のバイト列（不正な UTF-8 を含み得る）を stdin に渡して実行し、
+/// `(stdout, exit_code)` を返す。
+fn run_hook_raw_bytes(input: &[u8], format: &str, config_path: &std::path::Path) -> (Vec<u8>, i32) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("run")
+        .arg("--format")
+        .arg(format)
+        .arg("--config")
+        .arg(config_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn claw-hooks");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).unwrap();
+    }
+
+    let output = child.wait_with_output().expect("Failed to read output");
+    (output.stdout, output.status.code().unwrap_or(-1))
+}
+
+#[test]
+fn test_invalid_utf8_input_is_fail_closed_codex() {
+    // 不正な UTF-8 バイトが混入しても、フェイルクローズ（ブロック）になること。
+    // 以前は read_to_string が `?` で即時エラー終了（exit 1・stdout 空）に倒れ、
+    // Codex/Gemini では「フック失敗＝判定無視」と解釈され rm が素通りしていた。
+    let empty_config = tempfile::Builder::new()
+        .prefix("claw-hooks-test-utf8")
+        .suffix(".toml")
+        .tempfile()
+        .expect("Failed to create temp config");
+    let mut input = br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#.to_vec();
+    input.push(0xff); // 不正な UTF-8 バイト
+
+    let (stdout, exit_code) = run_hook_raw_bytes(&input, "codex", empty_config.path());
+    let stdout = String::from_utf8_lossy(&stdout);
+
+    // Codex のフェイルクローズは exit 0 + stdout に block/deny を含む JSON。
+    assert_eq!(
+        exit_code, 0,
+        "Codex fail-closed should exit 0, stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("block") || stdout.contains("deny"),
+        "Invalid UTF-8 must fail closed (block/deny), got: {stdout}"
+    );
+}
+
 /// カスタムフィルター用のテスト設定ファイルを作成する。
 /// 戻り値は `(config_path, _temp_dir)`。RAII による後始末のため `_temp_dir` を保持する。
 fn create_custom_filter_config() -> (std::path::PathBuf, tempfile::TempDir) {

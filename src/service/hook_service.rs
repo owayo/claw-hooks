@@ -58,27 +58,37 @@ impl HookService {
         // stdin から全入力を読み取り（改行を保持して正確なJSONを維持）。
         // サイズ制限を設け、悪意ある/暴走エージェントによる OOM 攻撃を防ぐ。
         // 制限超過時はフェイルクローズ（ブロック）として扱う。
-        let mut input = String::new();
+        // バイト列として読み取り、サイズ制限は生のバイト長で判定する。
+        // `read_to_string` は不正な UTF-8 で `?` により即時エラー終了
+        // （exit 1・stdout 空）に倒れるが、これは Codex/Gemini では
+        // 「フック失敗＝判定無視」と解釈されフェイルオープンになる
+        // （危険コマンドのブロックが効かなくなる）。そのため一旦バイトで読み、
+        // 損失あり変換でフェイルクローズ経路（パース失敗→ブロック、または
+        // 不正バイトを置換文字に変換した上での危険コマンド検出）に確実に載せる。
         let stdin_locked = stdin.lock();
+        let mut raw = Vec::new();
         let mut limited = stdin_locked.take(MAX_INPUT_BYTES + 1);
-        limited.read_to_string(&mut input)?;
-        if input.len() as u64 > MAX_INPUT_BYTES {
+        limited.read_to_end(&mut raw)?;
+        if raw.len() as u64 > MAX_INPUT_BYTES {
             if self.trace {
                 eprintln!(
                     "🔍 [TRACE] ERROR: Input exceeds limit: {} bytes (max {})",
-                    input.len(),
+                    raw.len(),
                     MAX_INPUT_BYTES
                 );
             }
             error!(
                 "Input exceeds limit: {} bytes (max {})",
-                input.len(),
+                raw.len(),
                 MAX_INPUT_BYTES
             );
             let output_json = self.adapter.format_error("Input too large");
             self.write_error_output(&mut stdout, &output_json)?;
             return Ok(self.adapter.error_exit_code());
         }
+        // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
+        // （置換文字 U+FFFD に変換され、後続のパース/検出はフェイルクローズで動作する）。
+        let input = String::from_utf8_lossy(&raw).into_owned();
 
         // トレースモード: 生の入力を即座に stderr に出力
         if self.trace {

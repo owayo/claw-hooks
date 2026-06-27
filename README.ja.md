@@ -35,7 +35,7 @@
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI は `PostToolUse` に元の `toolCall` を持たないため Stop hooks のみ
+- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI も `PostToolUse` は発火するが、ペイロードに元の `toolCall` が含まれず編集ファイルを特定できないため、ファイル単位の拡張子フックは Stop hooks のプロジェクト全体 lint で代替
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf はベストエフォート）
 - ⏱️ **フックタイムアウト** - フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
@@ -106,7 +106,7 @@ sys.exit(0)
 ### 拡張子フックのルール
 
 - 各コマンドテンプレートには `{file}` プレースホルダーを 1 つだけ含めます。
-- 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`。Antigravity にはファイル単位の post-edit イベントが無いので Stop hooks でプロジェクト全体 lint/typecheck を回します。
+- 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`。Antigravity の `PostToolUse` も発火するが、ペイロードに元の `toolCall` が含まれず編集ファイルパスを復元できないため、プロジェクト全体の lint/typecheck を Stop hooks で回します。
 - Codex の `PostToolUse` + `Bash` はパススルー。`apply_patch` は変更ファイルパスを抽出して拡張子フックに渡します（削除のみの patch はスキップ）。
 - パスに `../`、リダイレクトメタ文字（`<`、`>`）、タブ、改行、NUL バイトを含むものは拒否。必須フィールドを欠くペイロードはフェイルクローズドで拒否。
 
@@ -796,7 +796,7 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 | `PostToolUse` / `PreInvocation` / `PostInvocation` | n/a | パススルー allow（claw-hooks のスコープ外） |
 | `Stop` | n/a | Stop |
 
-> **拡張子フック**: Antigravity の `PostToolUse` には元の `toolCall` が含まれないため、`--format agy` ではファイル単位の拡張子フックは無効です。プロジェクト全体の lint/typecheck を Stop hooks で回し、失敗を `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。未対応イベントはすべて allow でパススルーされます。
+> **拡張子フック**: Antigravity の `PostToolUse` は発火しますが、ペイロードは `stepIdx` と `error` のみ（`toolCall` 無し）で、公式仕様の出力は `{}` 固定のため、ファイル単位の post-edit フックを再構築できません。`--format agy` では `PostToolUse` をパススルー扱いとし、プロジェクト全体の lint/typecheck は Stop hooks で回して `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。未対応イベントはすべて allow でパススルーされます。
 
 ### Codex CLI (`--format codex`)
 

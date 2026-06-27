@@ -4126,8 +4126,10 @@ impl FormatAdapter {
 //   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
 //
 // claw-hooks のスコープ的制約:
-//   - PostToolUse には toolCall が無いため、拡張子フック（保存後の auto-format）は成立しない。
-//     代替: Stop hooks で lint/typecheck を回し、failure を Stop の "continue" で再投入する。
+//   - PostToolUse は仕様上発火するが、ペイロードは stepIdx と error のみで toolCall を持たない。
+//     出力も {} 固定。よって「どのファイルが編集されたか」を復元できず、ファイル単位の
+//     拡張子フック（保存後の auto-format）は成立しない。代替: Stop hooks で lint/typecheck を
+//     回し、failure を Stop の "continue" で再投入する。
 //   - PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で、
 //     コマンドブロック・拡張子フックの責務外なのでパススルー（{}）で素通しする。
 impl FormatAdapter {
@@ -4157,9 +4159,10 @@ impl FormatAdapter {
         match raw_event.as_str() {
             "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
             "Stop" => Ok(Self::parse_agy_stop(&raw, session_id)),
-            // PostToolUse は toolCall を持たないため、claw-hooks の拡張子フックは成立しない。
-            // PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で
-            // claw-hooks のスコープ外なので、いずれもパススルーで Allow を返す。
+            // PostToolUse は発火するが、ペイロードに toolCall が含まれない（stepIdx と error のみ）
+            // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
+            // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
+            // いずれもパススルーで Allow を返す。
             "PostToolUse" | "PreInvocation" | "PostInvocation" => {
                 debug!(
                     agent = self.format.label(),

@@ -35,7 +35,7 @@
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes; lint output flows back to Claude Code / Codex CLI via `additionalContext`. Antigravity CLI is Stop-hooks only because its `PostToolUse` does not carry the original `toolCall`
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes; lint output flows back to Claude Code / Codex CLI via `additionalContext`. Antigravity CLI does fire `PostToolUse`, but the payload omits the original `toolCall` — there's no way to recover which file was edited — so per-file extension hooks fall back to Stop hooks for project-wide lint
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf is best-effort)
 - ⏱️ **Hook Timeout** - Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
@@ -106,7 +106,7 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 ### Extension hook rules
 
 - Each `{file}` template must contain exactly one `{file}` placeholder.
-- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`. Antigravity has no per-file post-edit event — use Stop hooks for project-wide lint/typecheck.
+- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`. Antigravity's `PostToolUse` fires too, but its payload omits the original `toolCall` so the edited file path can't be recovered — use Stop hooks for project-wide lint/typecheck instead.
 - Codex `PostToolUse` + `Bash` passes through; `apply_patch` is parsed for changed file paths (delete-only patches are skipped).
 - Paths with `../`, shell redirection (`<`, `>`), tabs, newlines, or NUL bytes are rejected. Agent payloads missing required fields fail closed.
 
@@ -796,7 +796,7 @@ camelCase schema. A representative PreToolUse payload:
 | `PostToolUse` / `PreInvocation` / `PostInvocation` | n/a | pass-through allow (out of claw-hooks scope) |
 | `Stop` | n/a | Stop |
 
-> **Extension hooks**: Antigravity's `PostToolUse` does not carry the original `toolCall`, so file-level extension hooks are disabled for `--format agy`. Run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Future Antigravity events pass through as allow.
+> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload only has `stepIdx` and `error` (no `toolCall`), and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Future Antigravity events pass through as allow.
 
 ### Codex CLI (`--format codex`)
 

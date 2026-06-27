@@ -9,7 +9,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, GitHub 
 - **Language**: Rust (MSRV 1.85)
 - **Version**: 26.6.100
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
-- **Supported Agents**: Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI
+- **Supported Agents**: Claude Code, Cursor, Windsurf, Antigravity CLI (Gemini CLI の後継), Gemini CLI (legacy), Codex CLI
 
 ## Key Features
 
@@ -35,7 +35,7 @@ src/
 │   ├── service.rs       # Config loader & generator
 │   └── validation.rs    # Validation (regex, extensions, stop hooks)
 ├── service/             # Service layer
-│   ├── adapter.rs       # Agent format conversion (Claude/Cursor/Windsurf/Gemini/Codex)
+│   ├── adapter.rs       # Agent format conversion (Claude/Cursor/Windsurf/Antigravity/Gemini/Codex)
 │   └── hook_service.rs  # Hook processing orchestration
 ├── domain/              # Domain layer
 │   ├── types.rs         # Domain types (HookEvent, ToolInput, Decision)
@@ -136,7 +136,24 @@ cargo run -- version     # Show version
 - 未対応の `agent_action_name` は allow でパススルーする（全イベント対応が目的ではないため）
 - フェイルクローズ（パースエラー/空入力）: exit code 2 + stderr にメッセージ本文をプレーンテキストで出力
 
-### Gemini CLI
+### Antigravity CLI
+- Gemini CLI の後継エージェント。新規セットアップでは `--format agy` を使用する。設定は `hooks.json` (`.agents/hooks.json` または `~/.gemini/config/hooks.json`)
+- Supports these hook events: `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`, `Stop`
+- 入力スキーマは camelCase（`toolCall`, `stepIdx`, `conversationId`, `workspacePaths`, `transcriptPath`, `artifactDirectoryPath`, `terminationReason`, `fullyIdle` 等）
+- Use `--format agy` when testing
+- PreToolUse Allow: `{"decision":"allow"}`
+- PreToolUse Block: `{"decision":"deny","reason":"..."}`（仕様上は `allow` / `deny` / `ask` / `force_ask` を取れるが、claw-hooks は二択で運用）
+- PostToolUse output: `{}` 固定（公式仕様。事後フックでありブロック・追加コンテキスト伝達不可）
+- PreInvocation / PostInvocation: claw-hooks のスコープ外（モデル呼び出し前後のオーケストレーション）なので allow でパススルー（`{}`）
+- Stop output: Allow = `{}`, Block = `{"decision":"continue","reason":"..."}`（`continue` はエージェントを再投入し reason を system message として注入する）
+- 判定はすべて stdout JSON + exit code 0 で返す。フェイルクローズドのパースエラーも exit 0 + `{"decision":"deny","reason":"..."}`（Codex / Gemini と同じ）
+- PostToolUse には `toolCall` が含まれないため、拡張子フック（保存後の auto-format / lint）は Antigravity では成立しない。代替として Stop hooks で lint/typecheck を回し、Block を `"decision":"continue"` で再投入する運用に倒している
+- run_command（args.CommandLine）以外のツール（`write_to_file` / `replace_file_content` / `multi_replace_file_content` / `view_file` / `list_dir` / `find_by_name` / `grep_search` / `invoke_subagent` / ...）は claw-hooks のコマンドブロックの対象外として PreToolUse でパススルー（`{"decision":"allow"}`）
+- 未対応イベント（`SomeNewEvent` 等）は allow でパススルー（他エージェントと同じ）
+- Official docs: https://antigravity.google/docs/customizations/hooks
+
+### Gemini CLI（legacy / Antigravity CLI へ移行済み）
+- Gemini CLI は Antigravity CLI に移行されたため、新規利用は `--format agy` を推奨。`--format gemini` は既存ユーザの後方互換性のためのみ維持される
 - Supports BeforeTool, AfterTool, BeforeAgent, AfterAgent events
 - AfterTool の追加コンテキストは `hookSpecificOutput.additionalContext` で返す
 - 未対応イベントは allow でパススルーする（全イベント対応が目的ではないため）

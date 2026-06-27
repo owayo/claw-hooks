@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  Simple TOML hooks for Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI - Command blocking, auto-formatting, stop-time automation
+  Simple TOML hooks for Claude Code, Cursor, Windsurf, Antigravity CLI, Gemini CLI, Codex CLI - Command blocking, auto-formatting, stop-time automation
 </p>
 
 <p align="center">
@@ -35,16 +35,16 @@
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - Uses [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) for accurate command analysis with wrapper/subshell detection, basename/extension/case normalization (`/bin/rm`, `RM.EXE`), and shell quote-removal handling (sudo, `sudo -n`, `sudo --user`, `sudo VAR=value rm`, `timeout --signal`, `command rm`, bash -c, `eval`, `find -exec`, pipes, `r\m`, `r''m`, `$'r\x6d'`). The string fallback parser (non-`ast-parser` builds) also sees through shell control structures (`if … then rm …`, `for/select … do rm …`, `while/until … do rm …`, `case W in P) rm …`, `! rm …`) and command substitutions in loop/case headers, so dangerous commands wrapped in control flow are not missed — while loop variables and `case` patterns named like a blocked command (e.g. `for rm in …`) are not misdetected
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to supported AI agents (Claude Code, Gemini CLI, Codex CLI)
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes, with lint output passed to supported AI agents (Claude Code, Gemini CLI, Codex CLI). Antigravity CLI does not include the original `toolCall` in its `PostToolUse` event, so extension hooks are not available there — use Stop hooks with project-wide lint instead.
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck, feeding errors back to the AI agent where the hook runtime supports stop-time feedback (Windsurf runs best-effort)
 - ⏱️ **Hook Timeout** - Configurable timeout for hook commands (default: 60s); on Unix the entire process group is killed with SIGKILL so grandchildren of `sh -c '...'` are also stopped, including background grandchildren that keep stdout/stderr pipes open after the direct child exits
 - 📏 **Output Truncation** - Configurable output length limit (default: 1000 characters) to prevent AI agent context window overflow, with multi-byte character-safe truncation
 - 🗜️ **Output Compression** - Collapses repeated decorative characters (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), trailing progress ellipses, and noisy repeated-prefix progress lines (e.g., cargo `Compiling foo v1.0` runs, or cargo's repeated `Blocking waiting for file lock on ...` lines; interleaved `Compiling`/`Checking` lines from concurrent builds are collapsed together as a single run) for token-efficient output. Progress bars that overwrite a line in place via carriage returns (`\r`) — such as Godot headless import or download/migration counters — are reduced to the final state a terminal would display, instead of retaining every intermediate frame plus the raw `\r` bytes. It also strips common absolute path prefixes, including paths under directories with spaces. The `^` rule trims long range markers commonly produced by ruff / clippy / rustc lint output, the `_` rule collapses rustc/ruff/biome multiline span underlines (`| |_______^` → `| |_^`) while preserving snake_case separators (1–2 underscores), while `·` and `→` handle whitespace markers from tools such as Biome — including the space-separated variants seen in diff visualizations (`→ → → → → → → Google` → `→ Google`) and Biome's duplicate diff context line numbers (`129 129 │ text` → `129 │ text`, empty context lines `129 129 │` → `129 │`, with mismatched pairs like `10 9 │` left untouched). Diagnostic frame lines made up solely of `|` / `^` / `_` / Box Drawing characters (`│`, `─`, banner frames like `╭─╮` / `╰─╯` from pnpm-style update notices, biome `─────` separators) and whitespace are dropped entirely (including multiline span underlines collapsed to `| |_^`), since the column they point at already appears in the preceding `file:line:col` header — lines with any text (headings, source lines, labelled carets like `| ^ expected u32`, banner bodies like `│ Update available! │`, snake_case like `__init__`) are kept.
 - 🛡️ **Debug Log Safety** - Debug logs store event/tool/session and input-size summaries only; raw commands, file contents, unknown event payloads, and agent messages are not persisted. Extension-hook logs, failure messages, and timeout labels record program names with arg-count summaries plus file-path byte lengths (the resolved file path stays off disk), and stop-hook logs record only the byte size of each hook's stdout/stderr — full output bodies are available only via `--trace` (stderr, non-persistent)
-- 🛑 **Bounded Input** - stdin reads are capped at 4 MiB and oversized payloads fail closed, preventing OOM from a runaway agent that would otherwise crash the safeguard process. Input is read as raw bytes and decoded with lossy UTF-8 conversion, so a stray invalid byte cannot abort the hook with an empty output (which Codex/Gemini would treat as a skipped decision = fail-open); malformed input still fails closed
+- 🛑 **Bounded Input** - stdin reads are capped at 4 MiB and oversized payloads fail closed, preventing OOM from a runaway agent that would otherwise crash the safeguard process. Input is read as raw bytes and decoded with lossy UTF-8 conversion, so a stray invalid byte cannot abort the hook with an empty output (which Antigravity/Codex/Gemini would treat as a skipped decision = fail-open); malformed input still fails closed
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
-- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI
+- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Antigravity CLI (the Gemini CLI successor), Gemini CLI (legacy), and Codex CLI
 
 ## Why claw-hooks?
 
@@ -186,7 +186,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 
 Rules:
 - Each extension hook command template must contain exactly one `{file}` placeholder.
-- Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`, Codex `PostToolUse` with `apply_patch`).
+- Extension hooks run only on post-save/post-edit file-write events (`PostToolUse` for Claude `Write` / `Edit`, Cursor `afterFileEdit`, Windsurf `post_write_code`, Gemini `AfterTool` with `write_file`, Codex `PostToolUse` with `apply_patch`). Antigravity CLI's `PostToolUse` payload does not include the original `toolCall`, so file-level extension hooks are not available for Antigravity — wire up Stop hooks (project-wide lint/typecheck) instead.
 - Codex `PostToolUse` with `Bash` remains a pass-through command-output event; `apply_patch` payloads are parsed for changed file paths and can trigger extension hooks. Delete-only patches do not run extension hooks because there is no saved file to format or lint.
 - Paths containing parent-directory traversal segments (e.g., `../`) are rejected.
 - Paths containing shell redirection metacharacters (`<`, `>`) are rejected.
@@ -220,7 +220,7 @@ Configure once:
 | Block dangerous commands | 25+ lines Python per command | 1 line TOML |
 | Custom filters | New script per filter | Add to `[[custom_filters]]` |
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
-| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Gemini CLI, Codex CLI)* |
+| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Gemini CLI, Codex CLI); Antigravity CLI via Stop hooks* |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
 | Stop hooks (lint, notifications, etc.) | Custom scripts per use case | `[[stop_hooks]]` config |
 
@@ -309,7 +309,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `gemini`, `codex` |
+| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `agy` (Antigravity CLI), `gemini` (legacy), `codex` |
 | `--config` | `-c` | Path to configuration file |
 | `--help` | `-h` | Show help |
 
@@ -325,7 +325,10 @@ claw-hooks hook --format cursor
 # Process Windsurf hooks
 claw-hooks hook --format windsurf
 
-# Process Gemini CLI hooks
+# Process Antigravity CLI hooks (Gemini CLI's successor)
+claw-hooks hook --format agy
+
+# Process Gemini CLI hooks (legacy; superseded by Antigravity CLI)
 claw-hooks hook --format gemini
 
 # Process Codex CLI hooks
@@ -410,7 +413,34 @@ Add to `~/.codeium/windsurf/hooks.json` (user) or `.windsurf/hooks.json` (projec
 }
 ```
 
-### Gemini CLI
+### Antigravity CLI
+
+Antigravity CLI is the successor to Gemini CLI. Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (project workspace):
+
+```json
+{
+  "claw-hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy" }]
+      }
+    ],
+    "Stop": [
+      { "type": "command", "command": "claw-hooks hook --format agy" }
+    ]
+  }
+}
+```
+
+Notes:
+- Antigravity's `PostToolUse` event does not include the original `toolCall`, so file-level extension hooks are unavailable. Use Stop hooks to run project-wide lint/typecheck instead — failures are injected back to the agent via `{"decision":"continue","reason":"..."}`.
+- `PreInvocation` / `PostInvocation` are out of claw-hooks' scope and pass through automatically; no hook entry is needed for those events.
+- Official Antigravity hooks docs: <https://antigravity.google/docs/customizations/hooks>
+
+### Gemini CLI (legacy)
+
+> **Note**: Gemini CLI has been superseded by [Antigravity CLI](#antigravity-cli). New setups should use `--format agy`. The `--format gemini` integration is kept for backward compatibility.
 
 Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
 
@@ -876,7 +906,59 @@ Uses `agent_action_name` field:
 
 Unsupported Windsurf actions are passed through as allow.
 
+### Antigravity CLI (`--format agy`)
+
+Antigravity CLI is the successor to Gemini CLI. It uses a camelCase schema and `hook_event_name`:
+
+```jsonc
+// PreToolUse event
+{
+  "hook_event_name": "PreToolUse",
+  "toolCall": {
+    "name": "run_command",
+    "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace", "WaitMsBeforeAsync": 0 }
+  },
+  "stepIdx": 3,
+  "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+  "workspacePaths": ["/workspace/project"],
+  "transcriptPath": "~/.gemini/antigravity-cli/brain/.../transcript.jsonl",
+  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/..."
+}
+
+// Stop event (agent loop ends)
+{
+  "hook_event_name": "Stop",
+  "executionNum": 1,
+  "terminationReason": "model_stop",
+  "error": "",
+  "fullyIdle": true,
+  "conversationId": "..."
+}
+```
+
+| hook_event_name | toolCall.name | Internal Mapping |
+|-----------------|---------------|------------------|
+| `PreToolUse` | `run_command` | PreToolUse + Bash (uses `toolCall.args.CommandLine`) |
+| `PreToolUse` | other tools (`write_to_file`, `replace_file_content`, ...) | Pass-through allow |
+| `PostToolUse` | (no `toolCall` in payload) | Pass-through allow |
+| `PreInvocation` / `PostInvocation` | n/a | Pass-through allow (out of claw-hooks scope) |
+| `Stop` | n/a | Stop |
+
+Output format:
+- PreToolUse Allow: `{"decision":"allow"}`
+- PreToolUse Deny: `{"decision":"deny","reason":"..."}` (the spec also allows `ask` / `force_ask`; claw-hooks emits only `allow` / `deny`)
+- PostToolUse: `{}` (the spec defines no block path for post-tool events)
+- Stop Allow (let the agent stop): `{}`
+- Stop Block (re-enter the loop, inject `reason` as a system message): `{"decision":"continue","reason":"..."}`
+- Fail-closed parse errors: exit code 0 + `{"decision":"deny","reason":"..."}` (same convention as Codex/Gemini — non-zero exit codes are treated as hook failure and ignored)
+
+> **Extension hooks**: Because Antigravity's `PostToolUse` payload does not include the original `toolCall`, post-save file paths cannot be recovered. File-level extension hooks are therefore disabled for `--format agy`; use Stop hooks to run project-wide lint/typecheck and surface failures via `"decision":"continue"`.
+
+Unsupported events (including future Antigravity additions) are passed through as allow so `claw-hooks` only acts on the events it actively handles.
+
 ### Gemini CLI (`--format gemini`)
+
+> **Note**: Gemini CLI has been migrated to [Antigravity CLI](#antigravity-cli-format-agy). New setups should use `--format agy`; `--format gemini` is kept for backward compatibility.
 
 Uses `hook_event_name` and `tool_name` fields:
 
@@ -1016,6 +1098,7 @@ graph LR
         CC1[Claude: PreToolUse + Bash]
         CU1[Cursor: preToolUse Shell / beforeShellExecution]
         WS1[Windsurf: pre_run_command]
+        AG1[Antigravity: PreToolUse + run_command]
         GE1[Gemini: BeforeTool + run_shell_command]
         CX1[Codex: PreToolUse + Bash]
     end
@@ -1023,6 +1106,7 @@ graph LR
     CC1 --> CH1
     CU1 --> CH1
     WS1 --> CH1
+    AG1 --> CH1
     GE1 --> CH1
     CX1 --> CH1
 
@@ -1044,6 +1128,7 @@ graph LR
         CC3[Claude: Stop]
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
+        AG3[Antigravity: Stop]
         GE3[Gemini: AfterAgent]
         CX3[Codex: Stop]
     end
@@ -1051,11 +1136,12 @@ graph LR
     CC3 --> CH3
     CU3 --> CH3
     WS3 --> CH3
+    AG3 --> CH3
     GE3 --> CH3
     CX3 --> CH3
 ```
 
-Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events.
+Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events. Antigravity CLI is intentionally absent from the "After File Save" group because its `PostToolUse` payload does not include the original `toolCall` — use Stop hooks for project-wide lint/typecheck instead.
 
 ## Input/Output Reference
 
@@ -1107,7 +1193,15 @@ Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow becau
 
 **Claude Code PostToolUse Block**: `{"decision":"block","reason":"..."}`
 
-The `additionalContext` field passes lint warnings/errors to the agent where the hook runtime supports it. `claw-hooks` emits it for Claude Code `PostToolUse`, Gemini CLI `AfterTool`, and Codex CLI `PostToolUse`.
+The `additionalContext` field passes lint warnings/errors to the agent where the hook runtime supports it. `claw-hooks` emits it for Claude Code `PostToolUse`, Gemini CLI `AfterTool`, and Codex CLI `PostToolUse`. Antigravity CLI's `PostToolUse` output is `{}` by spec, so lint feedback for `--format agy` is surfaced through Stop hooks via `{"decision":"continue","reason":"..."}` instead.
+
+**Antigravity CLI PreToolUse Allow**: `{"decision":"allow"}`
+
+**Antigravity CLI PreToolUse Block**: `{"decision":"deny","reason":"Use safe-rm instead..."}`
+
+**Antigravity CLI Stop Allow**: `{}`
+
+**Antigravity CLI Stop Block (re-enter the loop)**: `{"decision":"continue","reason":"lint errors found..."}`
 
 **Claude Code Stop Allow**: `{}`
 
@@ -1158,6 +1252,14 @@ Gemini CLI expects exit code `0` for all decisions, including blocks. The `decis
 | non-zero | Hook failure (decision is ignored) |
 
 Codex CLI expects exit code `0` for all decisions, including blocks. A non-zero exit code is treated as a hook infrastructure failure, and any block decision in stdout JSON is ignored.
+
+**Antigravity CLI** (same semantics as Codex/Gemini):
+| Code | Meaning |
+|------|---------|
+| `0` | Success (decision in JSON: `allow` / `deny` for PreToolUse, `continue` for Stop) |
+| non-zero | Hook failure (decision is ignored) |
+
+Antigravity CLI returns all decisions — including fail-closed parse errors — with exit code `0` and a JSON body, since a non-zero exit code is interpreted as a hook infrastructure failure rather than a block.
 
 ## Performance
 

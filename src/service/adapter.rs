@@ -4,6 +4,8 @@
 //! - Claude Code（デフォルト）
 //! - Cursor
 //! - Windsurf (Cascade)
+//! - Antigravity CLI（Gemini CLI の後継）
+//! - Gemini CLI（後方互換性のため維持、新規利用は Antigravity CLI 推奨）
 //! - Codex CLI
 
 use anyhow::{Result, anyhow};
@@ -41,6 +43,7 @@ impl FormatAdapter {
             Format::Claude => self.parse_claude_input(input),
             Format::Cursor => self.parse_cursor_input(input),
             Format::Windsurf => self.parse_windsurf_input(input),
+            Format::Agy => self.parse_agy_input(input),
             Format::Gemini => self.parse_gemini_input(input),
             Format::Codex => self.parse_codex_input(input),
         }
@@ -53,6 +56,7 @@ impl FormatAdapter {
             Format::Claude => self.format_claude_output(decision, event),
             Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
+            Format::Agy => self.format_agy_output(decision, event),
             Format::Gemini => self.format_gemini_output(decision, event),
             Format::Codex => self.format_codex_output(decision, event),
         }
@@ -70,6 +74,13 @@ impl FormatAdapter {
             Format::Claude => {
                 // Claude Code: stdout の JSON は exit 0 のときだけ解析される。
                 // フェイルクローズのパースエラーだけは error_exit_code() で exit 2 を使う。
+                0
+            }
+            Format::Agy => {
+                // Antigravity CLI: 判定は stdout の JSON で伝達される。
+                // PreToolUse は decision: "allow|deny|ask|force_ask"、
+                // Stop は decision: "continue" で再投入する。
+                // 終了コードは Gemini / Codex と同じく常に 0。
                 0
             }
             Format::Gemini => {
@@ -147,6 +158,18 @@ impl FormatAdapter {
                 })
                 .to_string()
             }
+            Format::Agy => {
+                // Antigravity CLI: PreToolUse 仕様の {"decision":"deny","reason":...} を返す。
+                // PostToolUse / Stop でも余分なフィールドは仕様上無害（PostToolUse の output は
+                // {} 固定だが、追加フィールドは無視される）。Stop も Block と同じ JSON で
+                // フェイルクローズドを成立させる。
+                // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）。
+                serde_json::json!({
+                    "decision": "deny",
+                    "reason": error_message
+                })
+                .to_string()
+            }
             Format::Gemini => {
                 // Geminiはdecisionとreasonを使用
                 // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）
@@ -220,11 +243,11 @@ impl FormatAdapter {
     }
 
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
-    /// Codex/Gemini: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
+    /// Codex/Gemini/Agy: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
     /// Claude/Cursor/Windsurf: 終了コード2でブロックを表現する。
     pub fn error_exit_code(&self) -> i32 {
         match self.format {
-            Format::Codex | Format::Gemini => 0,
+            Format::Codex | Format::Gemini | Format::Agy => 0,
             _ => 2,
         }
     }
@@ -3769,6 +3792,379 @@ mod tests {
             "PreToolUse Block では ANSI コードが正規化されないことを確認"
         );
     }
+
+    // === Antigravity CLI フォーマットのテスト ===
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_run_command() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"PreToolUse",
+            "toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test","Cwd":"/workspace","WaitMsBeforeAsync":5000}},
+            "stepIdx":3,
+            "conversationId":"ec33ebf9-0cba-4100-8142-c61503f6c587"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+        assert_eq!(
+            result.session_id,
+            Some("ec33ebf9-0cba-4100-8142-c61503f6c587".to_string())
+        );
+        if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
+            assert_eq!(bash.command, "rm -rf /tmp/test");
+        } else {
+            panic!("Expected Bash tool input");
+        }
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_run_command_missing_command_line_is_error() {
+        // CommandLine 空または欠落 → フェイルクローズド
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input =
+            r#"{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command","args":{}}}"#;
+        let err = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(err.contains("CommandLine"));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_empty_command_line_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":""}}}"#;
+        let err = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(err.contains("CommandLine"));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_write_to_file_is_passthrough() {
+        // Antigravity の write_to_file は claw-hooks のコマンドブロックの対象外。
+        // BeforePrompt（パススルー）にマップされる。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"PreToolUse",
+            "toolCall":{"name":"write_to_file","args":{"TargetFile":"/workspace/foo.rs","Overwrite":false,"CodeContent":"fn main(){}"}}
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "write_to_file");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_replace_file_content_passthrough() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"PreToolUse",
+            "toolCall":{"name":"replace_file_content","args":{"TargetFile":"/workspace/foo.rs"}}
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "replace_file_content");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_missing_tool_call_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"PreToolUse"}"#;
+        let err = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(err.contains("toolCall"));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_tool_use_missing_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","toolCall":{"args":{}}}"#;
+        let err = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(err.contains("toolCall.name"));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_post_tool_use_passthrough() {
+        // PostToolUse には toolCall が無いため、claw-hooks の拡張子フック対象外。
+        // パススルーで Allow を返す。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"PostToolUse",
+            "stepIdx":5,
+            "error":"exit status 1",
+            "conversationId":"abc-123"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "PostToolUse");
+        assert_eq!(result.session_id, Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_pre_invocation_passthrough() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"PreInvocation","invocationNum":3,"initialNumSteps":10}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "PreInvocation");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_post_invocation_passthrough() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input =
+            r#"{"hook_event_name":"PostInvocation","invocationNum":3,"initialNumSteps":10}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "PostInvocation");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_stop() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"Stop",
+            "executionNum":1,
+            "terminationReason":"model_stop",
+            "error":"",
+            "fullyIdle":true,
+            "conversationId":"ec33ebf9-0cba-4100-8142-c61503f6c587"
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        assert_eq!(result.tool_name, "Stop");
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.status, Some("model_stop".to_string()));
+            assert_eq!(stop.agent_message, Some("model_stop".to_string()));
+            assert!(!stop.stop_hook_active);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_agy_input_parsing_stop_with_error_message() {
+        // terminationReason が "error" 系のときは error フィールドのメッセージを優先する。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"Stop",
+            "terminationReason":"error",
+            "error":"oom killed",
+            "fullyIdle":false
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.agent_message, Some("oom killed".to_string()));
+            assert_eq!(stop.status, Some("error".to_string()));
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_agy_input_parsing_unknown_event_passthrough() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"SomeNewEvent","conversationId":"abc-123"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.tool_name, "SomeNewEvent");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_missing_hook_event_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"conversationId":"abc-123"}"#;
+        let err = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(err.contains("hook_event_name"));
+    }
+
+    #[test]
+    fn test_agy_input_parsing_event_alias_accepted() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "event":"PreToolUse",
+            "toolCall":{"name":"run_command","args":{"CommandLine":"ls"}}
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_invalid_json_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        assert!(adapter.parse_input("{").is_err());
+        assert!(adapter.parse_input("not json").is_err());
+    }
+
+    #[test]
+    fn test_agy_output_pre_tool_use_allow() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "allow");
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn test_agy_output_pre_tool_use_deny() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "🚫 rm is blocked. Use safe-rm instead.".to_string(),
+                },
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "deny");
+        assert!(parsed["reason"].as_str().unwrap().contains("rm is blocked"));
+    }
+
+    #[test]
+    fn test_agy_output_post_tool_use_always_empty() {
+        // Antigravity の PostToolUse は output {} 固定。
+        // claw-hooks 側でブロックを検出しても {} を返す（公式仕様に従う）。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let allow = adapter
+            .format_output(&Decision::allow(), HookEvent::AfterFileEdit)
+            .unwrap();
+        assert_eq!(allow, "{}");
+        let block = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint failed".to_string(),
+                },
+                HookEvent::AfterFileEdit,
+            )
+            .unwrap();
+        assert_eq!(block, "{}");
+    }
+
+    #[test]
+    fn test_agy_output_passthrough_event_always_empty() {
+        // BeforePrompt（PreInvocation / PostInvocation / 未対応イベントが内部マップされる先）は
+        // ブロック仕様が無いため常に {} を返す。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let allow = adapter
+            .format_output(&Decision::allow(), HookEvent::BeforePrompt)
+            .unwrap();
+        assert_eq!(allow, "{}");
+        let block = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "blocked".to_string(),
+                },
+                HookEvent::BeforePrompt,
+            )
+            .unwrap();
+        assert_eq!(block, "{}");
+    }
+
+    #[test]
+    fn test_agy_output_stop_allow_is_empty() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::Stop)
+            .unwrap();
+        assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn test_agy_output_stop_block_uses_continue() {
+        // Stop の Block は "continue" でエージェントを再投入し、reason を system message として注入する。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint errors found".to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "continue");
+        assert!(parsed["reason"].as_str().unwrap().contains("lint errors"));
+    }
+
+    #[test]
+    fn test_agy_output_normalizes_ansi_and_whitespace() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "  \x1b[1;31merror\x1b[0m: unused variable\n    expected `u32`"
+                        .to_string(),
+                },
+                HookEvent::Stop,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(!reason.contains('\x1b'));
+        assert!(reason.contains("error: unused variable"));
+        assert!(reason.contains("expected `u32`"));
+        assert!(!reason.starts_with(' '));
+    }
+
+    #[test]
+    fn test_agy_format_error_uses_deny() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter.format_error("Invalid JSON input");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"], "deny");
+        assert!(parsed["reason"].as_str().unwrap().contains("fail-closed"));
+        assert!(
+            parsed["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid JSON input")
+        );
+    }
+
+    #[test]
+    fn test_agy_error_exit_code_is_zero() {
+        // Agy: エラー時も 0（JSON 内で deny を有効にするため、Gemini / Codex と同じ）
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        assert_eq!(adapter.error_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_agy_exit_code_always_zero() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let block = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        assert_eq!(
+            adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
+            0
+        );
+        assert_eq!(adapter.exit_code(&block, HookEvent::BeforeCommand), 0);
+        assert_eq!(adapter.exit_code(&block, HookEvent::Stop), 0);
+        assert_eq!(adapter.exit_code(&block, HookEvent::AfterFileEdit), 0);
+    }
+
+    #[test]
+    fn test_agy_use_stderr_is_false() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let block = Decision::Block {
+            message: "blocked".to_string(),
+        };
+        for event in [
+            HookEvent::BeforeCommand,
+            HookEvent::AfterFileEdit,
+            HookEvent::Stop,
+            HookEvent::BeforePrompt,
+        ] {
+            assert!(!adapter.use_stderr(&block, event));
+            assert!(!adapter.use_stderr(&Decision::allow(), event));
+        }
+    }
+
+    #[test]
+    fn test_agy_format_uses_stderr_for_errors_is_false() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        // Antigravity は JSON を stdout に返すため stderr 書き込みは不要
+        assert!(!adapter.format_uses_stderr_for_errors());
+    }
 }
 
 // === Gemini CLI フォーマット型 ===
@@ -4239,5 +4635,225 @@ impl FormatAdapter {
             paths.push(path.to_string());
             Some(paths.len() - 1)
         }
+    }
+}
+
+// === Antigravity CLI フォーマット ===
+// 公式仕様: docs/hooks/antigravity/antigravity_cli.md
+//
+// 入力（stdin JSON, camelCase）:
+//   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath
+//   - PreToolUse: toolCall { name, args }, stepIdx
+//   - PostToolUse: stepIdx, error (toolCall は含まれない)
+//   - PreInvocation / PostInvocation: invocationNum, initialNumSteps
+//   - Stop: executionNum, terminationReason, error, fullyIdle
+//
+// 出力（stdout JSON）:
+//   - PreToolUse: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
+//   - PostToolUse: {} （事後フックでありブロック不可。エラー伝達も仕様には無い）
+//   - PreInvocation / PostInvocation: { injectSteps?, terminationBehavior? } （claw-hooks スコープ外）
+//   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
+//
+// claw-hooks のスコープ的制約:
+//   - PostToolUse には toolCall が無いため、拡張子フック（保存後の auto-format）は成立しない。
+//     代替: Stop hooks で lint/typecheck を回し、failure を Stop の "continue" で再投入する。
+//   - PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で、
+//     コマンドブロック・拡張子フックの責務外なのでパススルー（{}）で素通しする。
+impl FormatAdapter {
+    fn parse_agy_input(&self, input: &str) -> Result<HookInput> {
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
+
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Antigravity input: {}", e))?;
+
+        // hook_event_name が正規フィールド。event エイリアスも受ける。
+        let raw_event = raw
+            .get("hook_event_name")
+            .or_else(|| raw.get("event"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
+            .to_string();
+
+        // Antigravity は conversationId を会話 ID として渡す。
+        // session_id エイリアスでも受ける（ローカルテストや他エージェントからの転送向け）。
+        let session_id = raw
+            .get("conversationId")
+            .or_else(|| raw.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match raw_event.as_str() {
+            "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
+            "Stop" => Ok(Self::parse_agy_stop(&raw, session_id)),
+            // PostToolUse は toolCall を持たないため、claw-hooks の拡張子フックは成立しない。
+            // PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で
+            // claw-hooks のスコープ外なので、いずれもパススルーで Allow を返す。
+            "PostToolUse" | "PreInvocation" | "PostInvocation" => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = %raw_event,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} event is out of scope for claw-hooks, passing through", self.log_prefix()
+                );
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: raw_event,
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                })
+            }
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported event, passing through", self.log_prefix()
+                );
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                })
+            }
+        }
+    }
+
+    /// Antigravity の PreToolUse をパースして内部 HookInput に変換する。
+    fn parse_agy_pre_tool_use(
+        &self,
+        raw: &serde_json::Value,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
+        let tool_call = raw
+            .get("toolCall")
+            .ok_or_else(|| anyhow!("Missing toolCall field"))?;
+        let raw_tool_name = tool_call
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing toolCall.name field"))?
+            .to_string();
+        let raw_args = tool_call
+            .get("args")
+            .ok_or_else(|| anyhow!("Missing toolCall.args field"))?;
+
+        match raw_tool_name.as_str() {
+            // run_command: Antigravity のシェル実行ツール。args.CommandLine をコマンド本文として扱う。
+            "run_command" => {
+                let command = raw_args
+                    .get("CommandLine")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("Missing toolCall.args.CommandLine field"))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    raw_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforeCommand,
+                    raw_tool_name = %raw_tool_name,
+                    mapped_tool = "Bash",
+                    command_bytes = command.len(),
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforeCommand,
+                    tool_name: "Bash".to_string(),
+                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: command.to_string(),
+                        timeout: None,
+                    }),
+                    session_id,
+                })
+            }
+            // run_command 以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
+            // view_file / list_dir / find_by_name / grep_search / invoke_subagent / ...）は
+            // claw-hooks のコマンドブロックの対象外。Allow パスとして素通しする。
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    raw_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    raw_tool_name = other,
+                    "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw_args.clone()),
+                    session_id,
+                })
+            }
+        }
+    }
+
+    /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
+    fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+        let termination_reason = raw
+            .get("terminationReason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // terminationReason が "error" のとき、Antigravity は別途 error フィールドに詳細メッセージを入れる。
+        // 互換性のため、agent_message は error → terminationReason の順で取り出す。
+        let agent_message = raw
+            .get("error")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| termination_reason.clone());
+
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                status: termination_reason,
+                loop_count: None,
+                response: None,
+                agent_message,
+                stop_hook_active: false,
+            }),
+            session_id,
+        }
+    }
+
+    fn format_agy_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Antigravity の出力スキーマはイベントによって異なる:
+        //   - PreToolUse: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
+        //   - PostToolUse / PreInvocation / PostInvocation: {} 固定（ブロック不可）
+        //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は {}
+        let output = match (event, decision) {
+            // Stop の Block は "continue" + reason でエージェントを再起動させ、reason を
+            // system message としてエージェントに注入する（lint/typecheck の修正指示等）。
+            (HookEvent::Stop, Decision::Block { message }) => {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
+                serde_json::json!({
+                    "decision": "continue",
+                    "reason": truncated
+                })
+            }
+            // Stop の Allow は {} を返す（"decision":"continue" 以外なら停止許可、最も無害な空オブジェクト）。
+            (HookEvent::Stop, Decision::Allow { .. }) => serde_json::json!({}),
+            // PostToolUse / 内部 BeforePrompt（PreInvocation / PostInvocation / 未対応ツール）は
+            // ブロック仕様が無いため、claw-hooks 側で Block を検出しても {} に倒す（公式仕様準拠）。
+            (HookEvent::AfterFileEdit, _) | (HookEvent::BeforePrompt, _) => serde_json::json!({}),
+            // PreToolUse の Block は deny として返す（Antigravity 公式の主形式）。
+            (_, Decision::Block { message }) => {
+                let normalized = normalize_lint_output(message);
+                let truncated = truncate_output(&normalized, self.output_max_length);
+                serde_json::json!({
+                    "decision": "deny",
+                    "reason": truncated
+                })
+            }
+            // PreToolUse の Allow は "allow" を返す（明示的に allow を宣言する）。
+            (_, Decision::Allow { .. }) => serde_json::json!({"decision": "allow"}),
+        };
+        serde_json::to_string(&output)
+            .map_err(|e| anyhow!("Failed to serialize Antigravity output: {}", e))
     }
 }

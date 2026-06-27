@@ -3,12 +3,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Claude Code, Cursor, Windsurf, Gemini CLI, Codex CLI 向けAIコーディングエージェントフックシステム
+/// Claude Code, Cursor, Windsurf, Antigravity CLI, Gemini CLI, Codex CLI 向けAIコーディングエージェントフックシステム
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
     version,
-    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Gemini CLI, and Codex CLI",
+    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Gemini CLI, and Codex CLI",
     long_about = "A CLI tool that filters dangerous commands, suggests safer alternatives, \
                   and executes extension-based hooks for AI coding agents."
 )]
@@ -39,7 +39,9 @@ pub enum Format {
     Cursor,
     /// Windsurf (Cascade) フォーマット
     Windsurf,
-    /// Gemini CLI フォーマット
+    /// Antigravity CLI フォーマット（Gemini CLI の後継）
+    Agy,
+    /// Gemini CLI フォーマット（Antigravity CLI へ移行済み、後方互換性のため維持）
     Gemini,
     /// Codex CLI フォーマット
     Codex,
@@ -52,6 +54,7 @@ impl Format {
             Format::Claude => "✴️",
             Format::Cursor => "🖱️",
             Format::Windsurf => "🏄",
+            Format::Agy => "🪐",
             Format::Gemini => "♊",
             Format::Codex => "📜",
         }
@@ -63,6 +66,7 @@ impl Format {
             Format::Claude => "Claude Code",
             Format::Cursor => "Cursor",
             Format::Windsurf => "Windsurf",
+            Format::Agy => "Antigravity CLI",
             Format::Gemini => "Gemini CLI",
             Format::Codex => "Codex CLI",
         }
@@ -138,6 +142,21 @@ mod tests {
             Commands::Hook { format, .. } => assert_eq!(format, Format::Gemini),
             _ => panic!("Expected Hook command"),
         }
+    }
+
+    #[test]
+    fn test_parse_hook_agy_format() {
+        let cli = Cli::try_parse_from(["claw-hooks", "hook", "-f", "agy"]).unwrap();
+        match cli.command {
+            Commands::Hook { format, .. } => assert_eq!(format, Format::Agy),
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_format_agy_label_and_emoji() {
+        assert_eq!(Format::Agy.label(), "Antigravity CLI");
+        assert_eq!(Format::Agy.emoji(), "🪐");
     }
 
     #[test]

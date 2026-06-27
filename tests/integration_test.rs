@@ -964,119 +964,6 @@ fn test_custom_filter_blocks_yarn_with_env_prefix() {
     );
 }
 
-// === Gemini CLI フォーマットテスト ===
-
-#[test]
-fn test_gemini_format_allow_safe_command() {
-    // Gemini CLI 公式のツール名 run_shell_command を使う
-    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    assert_eq!(exit_code, 0, "Safe command should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"allow""#),
-        "Gemini output should indicate allow: {}",
-        stdout
-    );
-    // Gemini の許可レスポンスには reason フィールドを含めない
-    assert!(
-        !stdout.contains("reason"),
-        "Allow output should not have reason: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_block_rm_command() {
-    // Gemini CLI 公式のツール名 run_shell_command を使う
-    // Gemini CLI は判定を JSON で伝えるため deny でも終了コード 0 を返す
-    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    assert_eq!(exit_code, 0, "Gemini uses exit 0 for all decisions");
-    assert!(
-        stdout.contains(r#""decision":"deny""#),
-        "Gemini output should indicate deny: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("reason"),
-        "Deny output should have reason: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_block_kill_command() {
-    // Gemini CLI 公式のツール名 run_shell_command を使う
-    // Gemini CLI は判定を JSON で伝えるため deny でも終了コード 0 を返す
-    let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"pkill node"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    assert_eq!(exit_code, 0, "Gemini uses exit 0 for all decisions");
-    assert!(
-        stdout.contains(r#""decision":"deny""#),
-        "Gemini output should indicate deny: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_after_tool() {
-    // Gemini CLI 公式のツール名 write_file を使う
-    let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    // PostToolUse 相当イベントは監視用途のため許可される
-    assert_eq!(exit_code, 0, "AfterTool should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"allow""#),
-        "Gemini output should indicate allow: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_after_agent() {
-    let input = r#"{"hook_event_name":"AfterAgent"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    // Stop 相当イベントは監視用途のため許可される
-    assert_eq!(exit_code, 0, "AfterAgent should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"allow""#),
-        "Gemini output should indicate allow: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_with_event_alias() {
-    // Gemini CLI 公式のツール名 run_shell_command を使う
-    let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"echo hello"}}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    assert_eq!(exit_code, 0, "Safe command should be allowed");
-    assert!(
-        stdout.contains(r#""decision":"allow""#),
-        "Gemini output should indicate allow: {}",
-        stdout
-    );
-}
-
-#[test]
-fn test_gemini_format_session_start_passthrough() {
-    let input = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "gemini");
-
-    assert_eq!(exit_code, 0, "未対応の Gemini イベントは透過させるべき");
-    assert!(
-        stdout.contains(r#""decision":"allow""#),
-        "未対応イベントでも allow を返すべき: {}",
-        stdout
-    );
-}
-
 // === フェイルクローズのエラーハンドリングテスト ===
 
 #[test]
@@ -1118,7 +1005,7 @@ fn test_malformed_json_is_fail_closed() {
 #[test]
 fn test_unknown_event_is_passthrough() {
     // 未対応イベントは claw-hooks のスコープ外なのでパススルーで Allow を返す。
-    // Cursor / Codex / Gemini と同じ挙動に揃える。
+    // Cursor / Codex / Antigravity と同じ挙動に揃える。
     let input = r#"{"hook_event_name":"Bogus","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
 
@@ -1168,23 +1055,6 @@ fn test_windsurf_empty_input_is_fail_closed() {
         stderr.contains("fail-closed"),
         "stderr should indicate fail-closed: {}",
         stderr
-    );
-}
-
-#[test]
-fn test_gemini_empty_input_is_fail_closed() {
-    let (stdout, _stderr, exit_code) = run_hook_with_format("", "gemini");
-
-    // Gemini: 非0終了コードはフック失敗扱いで判定が無視されるため、
-    // エラー時も0を返し、deny判定はJSON内で伝達する
-    assert_eq!(
-        exit_code, 0,
-        "Gemini empty input should exit 0 with deny in JSON"
-    );
-    assert!(
-        stdout.contains("fail-closed"),
-        "Output should indicate fail-closed: {}",
-        stdout
     );
 }
 

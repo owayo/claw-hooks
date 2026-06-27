@@ -4,8 +4,7 @@
 //! - Claude Code（デフォルト）
 //! - Cursor
 //! - Windsurf (Cascade)
-//! - Antigravity CLI（Gemini CLI の後継）
-//! - Gemini CLI（後方互換性のため維持、新規利用は Antigravity CLI 推奨）
+//! - Antigravity CLI
 //! - Codex CLI
 
 use anyhow::{Result, anyhow};
@@ -44,7 +43,6 @@ impl FormatAdapter {
             Format::Cursor => self.parse_cursor_input(input),
             Format::Windsurf => self.parse_windsurf_input(input),
             Format::Agy => self.parse_agy_input(input),
-            Format::Gemini => self.parse_gemini_input(input),
             Format::Codex => self.parse_codex_input(input),
         }
     }
@@ -57,7 +55,6 @@ impl FormatAdapter {
             Format::Cursor => self.format_cursor_output(decision, event),
             Format::Windsurf => self.format_windsurf_output(decision, event),
             Format::Agy => self.format_agy_output(decision, event),
-            Format::Gemini => self.format_gemini_output(decision, event),
             Format::Codex => self.format_codex_output(decision, event),
         }
     }
@@ -68,7 +65,7 @@ impl FormatAdapter {
     /// - Windsurf: 0 = 許可/Stop, 2 = ブロック（pre_run_command のみ）
     /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
     /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
-    /// - Gemini CLI: 0 = 成功（判定はJSON内）, 2 = システムエラーのみ
+    /// - Antigravity CLI: 0 = 成功（判定はJSON内、エラーも 0 + deny JSON）
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
             Format::Claude => {
@@ -80,13 +77,7 @@ impl FormatAdapter {
                 // Antigravity CLI: 判定は stdout の JSON で伝達される。
                 // PreToolUse は decision: "allow|deny|ask|force_ask"、
                 // Stop は decision: "continue" で再投入する。
-                // 終了コードは Gemini / Codex と同じく常に 0。
-                0
-            }
-            Format::Gemini => {
-                // Gemini CLI: JSON出力が成功した場合は常に0を返す。
-                // 判定（allow/deny）はJSONレスポンスで伝達される。
-                // 終了コード2はシステムエラー専用（stderrがreasonとして使用される）。
+                // 終了コードは Codex と同じく常に 0。
                 0
             }
             Format::Codex => {
@@ -170,15 +161,6 @@ impl FormatAdapter {
                 })
                 .to_string()
             }
-            Format::Gemini => {
-                // Geminiはdecisionとreasonを使用
-                // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）
-                serde_json::json!({
-                    "decision": "deny",
-                    "reason": error_message
-                })
-                .to_string()
-            }
             Format::Codex => {
                 // Codex CLI は "reason" フィールドでブロック理由を受け取る
                 serde_json::json!({
@@ -243,11 +225,11 @@ impl FormatAdapter {
     }
 
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
-    /// Codex/Gemini/Agy: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
+    /// Codex/Agy: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
     /// Claude/Cursor/Windsurf: 終了コード2でブロックを表現する。
     pub fn error_exit_code(&self) -> i32 {
         match self.format {
-            Format::Codex | Format::Gemini | Format::Agy => 0,
+            Format::Codex | Format::Agy => 0,
             _ => 2,
         }
     }
@@ -302,7 +284,7 @@ impl FormatAdapter {
 
         // Claude Codeのイベント名をHookEventにマッピング。
         // 未対応イベント（StopFailure, PreCompact, PermissionRequest 等）は claw-hooks の
-        // スコープ外なのでパススルーで Allow を返す（Cursor/Codex/Gemini と同じ方針）。
+        // スコープ外なのでパススルーで Allow を返す（Cursor/Codex/Antigravity と同じ方針）。
         let event = match raw_event.as_str() {
             "PreToolUse" => HookEvent::BeforeCommand,
             "PostToolUse" => HookEvent::AfterFileEdit,
@@ -974,6 +956,7 @@ struct WindsurfToolInfo {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -1363,160 +1346,6 @@ mod tests {
         }
     }
 
-    // === Gemini CLI フォーマットのテスト ===
-
-    #[test]
-    fn test_gemini_input_parsing_before_tool() {
-        // Gemini CLI 公式のツール名 run_shell_command を使う
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"rm -rf /tmp/test"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "Bash");
-        if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
-            assert_eq!(bash.command, "rm -rf /tmp/test");
-        } else {
-            panic!("Expected Bash tool input");
-        }
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_run_shell_command() {
-        // run_shell_command は Gemini CLI の公式組み込みツール名
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git status"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "Bash");
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_after_tool() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{"file_path":"/path/to/file.rs"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::AfterFileEdit);
-        assert_eq!(result.tool_name, "Write");
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_replace_tool() {
-        // Gemini CLIは既存ファイルの編集に"replace"ツールを使用する
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"AfterTool","tool_name":"replace","tool_input":{"file_path":"/path/to/file.rs"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::AfterFileEdit);
-        assert_eq!(result.tool_name, "Write"); // replace は Write として扱う
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_after_agent() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"AfterAgent"}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::Stop);
-        assert_eq!(result.tool_name, "Stop");
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_before_agent() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeAgent"}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
-        assert_eq!(result.tool_name, "UserPrompt");
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_with_event_alias() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        // Gemini が "hook_event_name" の代わりに "event" を使う場合がある
-        let input = r#"{"event":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "Bash");
-    }
-
-    #[test]
-    fn test_gemini_input_parsing_unknown_tool() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"custom_tool","tool_input":{}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "custom_tool"); // 不明なツールはそのまま保持
-    }
-
-    #[test]
-    fn test_gemini_bash_empty_object_is_error() {
-        // 空 tool_input が StopInput に誤マッチして fail-open しないこと
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input =
-            r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
-        assert!(err.to_string().contains("command"));
-    }
-
-    #[test]
-    fn test_gemini_write_empty_object_is_error() {
-        // ファイル編集後フックでは file_path が必須
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"AfterTool","tool_name":"write_file","tool_input":{}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
-        assert!(err.to_string().contains("Gemini tool_input"));
-    }
-
-    #[test]
-    fn test_gemini_output_allow() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter
-            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
-            .unwrap();
-        assert!(output.contains(r#""decision":"allow""#));
-        assert!(!output.contains("reason"));
-    }
-
-    #[test]
-    fn test_gemini_output_deny() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter
-            .format_output(
-                &Decision::Block {
-                    message: "🚫 rm command blocked. Use safe-rm instead.".to_string(),
-                },
-                HookEvent::BeforeCommand,
-            )
-            .unwrap();
-        assert!(output.contains(r#""decision":"deny""#));
-        assert!(output.contains("reason"));
-        assert!(output.contains("rm command blocked"));
-    }
-
-    #[test]
-    fn test_gemini_output_after_file_edit_allow_context() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter
-            .format_output(
-                &Decision::allow_with_context("formatted".to_string()),
-                HookEvent::AfterFileEdit,
-            )
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "allow");
-        assert_eq!(
-            parsed["hookSpecificOutput"]["additionalContext"],
-            "formatted"
-        );
-    }
-
-    #[test]
-    fn test_gemini_error_format() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let error_output = adapter.format_error("Invalid JSON input");
-        assert!(error_output.contains(r#""decision":"deny""#));
-        assert!(error_output.contains("reason"));
-        assert!(error_output.contains("fail-closed"));
-    }
-
     // === Windsurf 出力のテスト ===
 
     #[test]
@@ -1590,7 +1419,7 @@ mod tests {
         assert!(!error_output.contains(r#""decision""#));
     }
 
-    // === Claude Code / Gemini CLI の Stop Block 出力 ===
+    // === Claude Code の Stop Block 出力 ===
 
     #[test]
     fn test_claude_output_stop_block_uses_reason_field() {
@@ -1643,32 +1472,6 @@ mod tests {
         let hso = &parsed["hookSpecificOutput"];
         assert_eq!(hso["permissionDecision"], "deny");
         assert_eq!(hso["permissionDecisionReason"], "Command blocked");
-    }
-
-    #[test]
-    fn test_gemini_output_stop_block() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter
-            .format_output(
-                &Decision::Block {
-                    message: "lint errors found".to_string(),
-                },
-                HookEvent::Stop,
-            )
-            .unwrap();
-        assert!(output.contains(r#""decision":"deny""#));
-        assert!(output.contains(r#""reason""#));
-        assert!(output.contains("lint errors found"));
-    }
-
-    #[test]
-    fn test_gemini_output_stop_allow() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter
-            .format_output(&Decision::allow(), HookEvent::Stop)
-            .unwrap();
-        assert!(output.contains(r#""decision":"allow""#));
-        assert!(!output.contains(r#""reason""#));
     }
 
     #[test]
@@ -1732,21 +1535,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let reason = parsed["reason"].as_str().unwrap();
         assert_eq!(reason, message);
-    }
-
-    #[test]
-    fn test_normalize_gemini_strips_ansi_and_whitespace() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let message = "  \x1b[1;31merror\x1b[0m: type mismatch\n    expected `u32`".to_string();
-        let output = adapter
-            .format_output(&Decision::Block { message }, HookEvent::Stop)
-            .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let reason = parsed["reason"].as_str().unwrap();
-        assert!(reason.contains("error: type mismatch"));
-        assert!(reason.contains("expected `u32`"));
-        assert!(!reason.contains("\x1b"));
-        assert!(!reason.starts_with(' '));
     }
 
     // === Cursor / Windsurf の Stop Block 出力 ===
@@ -2551,29 +2339,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_parse_missing_tool_name_for_tool_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool"}"#;
-        assert!(adapter.parse_input(input).is_err());
-    }
-
-    #[test]
-    fn test_gemini_parse_missing_tool_input_for_tool_event_is_error() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command"}"#;
-        assert!(adapter.parse_input(input).is_err());
-    }
-
-    #[test]
-    fn test_gemini_unknown_event_is_passthrough() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"UnknownEvent"}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
-        assert_eq!(result.tool_name, "UnknownEvent");
-    }
-
-    #[test]
     fn test_cursor_error_format_fail_closed() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let output = adapter.format_error("Invalid JSON input");
@@ -2606,14 +2371,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_exit_code_gemini_returns_zero() {
-        // Gemini CLI: 非0終了コードはシステムエラー扱いで判定が無視されるため、
-        // エラー時も0を返しJSON内のdeny判定を有効にする
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
-    }
-
-    #[test]
     fn test_error_exit_code_cursor_returns_two() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         assert_eq!(adapter.error_exit_code(), 2);
@@ -2626,26 +2383,6 @@ mod tests {
     }
 
     // === exit_code のテスト ===
-
-    #[test]
-    fn test_gemini_exit_code_allow_always_zero() {
-        // Gemini CLI: 判定はJSON内で伝達されるため、Allow時も常に0
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        assert_eq!(
-            adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
-            0
-        );
-    }
-
-    #[test]
-    fn test_gemini_exit_code_block_always_zero() {
-        // Gemini CLI: Block時もJSON内で伝達されるため常に0
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let decision = Decision::Block {
-            message: "blocked".to_string(),
-        };
-        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
-    }
 
     #[test]
     fn test_codex_exit_code_allow_always_zero() {
@@ -2720,13 +2457,6 @@ mod tests {
     fn test_error_exit_code_codex_zero() {
         // Codex: エラー時も0（JSON内でblock判定を有効にするため）
         let adapter = FormatAdapter::new(Format::Codex, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
-    }
-
-    #[test]
-    fn test_error_exit_code_gemini_zero() {
-        // Gemini: エラー時も0（JSON内でdeny判定を有効にするため）
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
         assert_eq!(adapter.error_exit_code(), 0);
     }
 
@@ -2813,12 +2543,7 @@ mod tests {
         let block = Decision::Block {
             message: "err".to_string(),
         };
-        for format in [
-            Format::Claude,
-            Format::Cursor,
-            Format::Codex,
-            Format::Gemini,
-        ] {
+        for format in [Format::Claude, Format::Cursor, Format::Codex] {
             let adapter = FormatAdapter::new(format, 0);
             for event in [
                 HookEvent::BeforeCommand,
@@ -2833,7 +2558,7 @@ mod tests {
                 );
                 assert!(
                     !adapter.use_stderr(&Decision::allow(), event),
-                    "{:?} + {:?} + Allow で use_stderr は false であるべき",
+                    "{:?} + {:?} + Allow + use_stderr は false であるべき",
                     format,
                     event
                 );
@@ -2882,7 +2607,6 @@ mod tests {
             Format::Claude,
             Format::Cursor,
             Format::Windsurf,
-            Format::Gemini,
             Format::Codex,
         ] {
             let adapter = FormatAdapter::new(format, 0);
@@ -2913,8 +2637,8 @@ mod tests {
 
     #[test]
     fn test_json_error_formats_use_stdout_for_errors() {
-        // Cursor/Gemini/Codex はエラー判定を stdout JSON で伝達する
-        for format in [Format::Cursor, Format::Gemini, Format::Codex] {
+        // Cursor/Codex/Antigravity はエラー判定を stdout JSON で伝達する
+        for format in [Format::Cursor, Format::Codex, Format::Agy] {
             let adapter = FormatAdapter::new(format, 0);
             assert!(
                 !adapter.format_uses_stderr_for_errors(),
@@ -3330,17 +3054,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_use_stderr_always_false() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        assert!(!adapter.use_stderr(
-            &Decision::Block {
-                message: "err".to_string()
-            },
-            HookEvent::Stop,
-        ));
-    }
-
-    #[test]
     fn test_cursor_use_stderr_always_false() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         assert!(!adapter.use_stderr(
@@ -3467,7 +3180,7 @@ mod tests {
     #[test]
     fn test_claude_input_unknown_event_is_passthrough() {
         // 未対応イベントはパススルーで Allow を返す（fail-open）。
-        // Cursor/Codex/Gemini と同じ挙動に揃えることでフォーマット間の一貫性を保つ。
+        // Cursor/Codex/Antigravity と同じ挙動に揃えることでフォーマット間の一貫性を保つ。
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"UnknownEvent","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
         let parsed = adapter
@@ -3618,15 +3331,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_error_gemini_is_valid_json() {
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let output = adapter.format_error("test error");
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["decision"], "deny");
-        assert!(parsed["reason"].as_str().unwrap().contains("test error"));
-    }
-
-    #[test]
     fn test_format_error_codex_is_valid_json() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let output = adapter.format_error("test error");
@@ -3645,28 +3349,6 @@ mod tests {
         // JSON ではないこと（decision キーを含まず、JSON としてパースできない）を確認
         assert!(!output.contains(r#""decision""#));
         assert!(serde_json::from_str::<serde_json::Value>(&output).is_err());
-    }
-
-    // === Gemini 入力パースのエッジケース ===
-
-    #[test]
-    fn test_gemini_input_session_start_passthrough() {
-        // claw-hooks の対象外イベントでも、Gemini 側のフック実行は止めずに透過させる。
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"SessionStart","source":"startup"}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
-        assert_eq!(result.tool_name, "SessionStart");
-    }
-
-    #[test]
-    fn test_gemini_input_before_tool_with_mcp_context() {
-        // MCP コンテキスト付きのツールイベント
-        let adapter = FormatAdapter::new(Format::Gemini, 0);
-        let input = r#"{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"},"mcp_context":{"server":"test"}}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforeCommand);
-        assert_eq!(result.tool_name, "Bash");
     }
 
     // === Windsurf BeforeCommand Block の出力形式テスト ===
@@ -4122,7 +3804,7 @@ mod tests {
 
     #[test]
     fn test_agy_error_exit_code_is_zero() {
-        // Agy: エラー時も 0（JSON 内で deny を有効にするため、Gemini / Codex と同じ）
+        // Agy: エラー時も 0（JSON 内で deny を有効にするため、Codex と同じ）
         let adapter = FormatAdapter::new(Format::Agy, 0);
         assert_eq!(adapter.error_exit_code(), 0);
     }
@@ -4167,221 +3849,10 @@ mod tests {
     }
 }
 
-// === Gemini CLI フォーマット型 ===
-
-/// Gemini CLI の入力フォーマット。
-/// 参照: https://github.com/google-gemini/gemini-cli#hooks
-/// 基本スキーマには session_id、transcript_path、cwd、hook_event_name、timestamp が含まれる。
-/// ツールイベントでは tool_name、tool_input、mcp_context が追加される。
-#[derive(Debug, Deserialize)]
-struct GeminiInput {
-    /// フックイベント名: BeforeTool, AfterTool, AfterAgent など
-    #[serde(alias = "event")]
-    hook_event_name: String,
-
-    /// ツール名（ツール以外のイベントでは省略可）
-    #[serde(default)]
-    tool_name: Option<String>,
-
-    /// ツール入力（ツール以外のイベントでは省略可）
-    #[serde(default)]
-    tool_input: Option<serde_json::Value>,
-
-    /// セッション識別子
-    #[serde(default)]
-    session_id: Option<String>,
-
-    /// 現在の作業ディレクトリ（基本入力フィールド）
-    #[serde(default)]
-    #[allow(dead_code)]
-    cwd: Option<String>,
-
-    /// セッショントランスクリプト JSON の絶対パス（基本入力フィールド）
-    #[serde(default)]
-    #[allow(dead_code)]
-    transcript_path: Option<String>,
-
-    /// ISO 8601 形式の実行時刻（基本入力フィールド）
-    #[serde(default)]
-    #[allow(dead_code)]
-    timestamp: Option<String>,
-
-    /// MCP ベースツール向けのコンテキスト（任意）
-    #[serde(default)]
-    #[allow(dead_code)]
-    mcp_context: Option<serde_json::Value>,
-
-    /// AfterTool イベントのツール応答
-    #[serde(default)]
-    #[allow(dead_code)]
-    tool_response: Option<serde_json::Value>,
-
-    /// BeforeAgent / AfterAgent イベントのユーザープロンプト
-    #[serde(default)]
-    #[allow(dead_code)]
-    prompt: Option<String>,
-
-    /// AfterAgent イベントのエージェント応答
-    #[serde(default)]
-    #[allow(dead_code)]
-    prompt_response: Option<String>,
-
-    /// AfterAgent イベントでの stop hook 有効フラグ
-    #[serde(default)]
-    #[allow(dead_code)]
-    stop_hook_active: Option<bool>,
-}
-
-/// Gemini CLI の出力フォーマット。
-#[derive(Debug, Serialize)]
-struct GeminiOutput {
-    /// 判定: "allow" または "deny"
-    decision: String,
-
-    /// 拒否理由（decision が "deny" のとき）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
+// === Codex CLI フォーマット ===
+// 公式ドキュメント: https://developers.openai.com/codex/hooks
 
 impl FormatAdapter {
-    // === Gemini CLI フォーマット ===
-
-    fn parse_gemini_input(&self, input: &str) -> Result<HookInput> {
-        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
-
-        let raw: serde_json::Value = serde_json::from_str(input)
-            .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
-        let gemini_input: GeminiInput = serde_json::from_value(raw.clone())
-            .map_err(|e| anyhow!("Failed to parse Gemini input: {}", e))?;
-
-        let raw_event = gemini_input.hook_event_name.clone();
-
-        // Geminiイベントを内部のHookEventにマッピング
-        let event = match raw_event.as_str() {
-            "BeforeTool" => HookEvent::BeforeCommand,
-            "AfterTool" => HookEvent::AfterFileEdit,
-            "AfterAgent" => HookEvent::Stop,
-            "BeforeAgent" => HookEvent::BeforePrompt,
-            other => {
-                debug!(
-                    agent = self.format.label(),
-                    hook_event_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
-                    "{} unsupported event, passing through", self.log_prefix()
-                );
-
-                return Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
-                    tool_name: other.to_string(),
-                    tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id: gemini_input.session_id,
-                });
-            }
-        };
-
-        // ツール以外のイベントを処理
-        if event == HookEvent::Stop || event == HookEvent::BeforePrompt {
-            let tool_name = if event == HookEvent::Stop {
-                "Stop".to_string()
-            } else {
-                "UserPrompt".to_string()
-            };
-
-            debug!(
-                agent = self.format.label(),
-                raw_event = %raw_event,
-                mapped_event = ?event,
-                "{} parsed input (non-tool event)", self.log_prefix()
-            );
-
-            return Ok(HookInput {
-                event,
-                tool_name,
-                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                    status: None,
-                    loop_count: None,
-                    response: None,
-                    agent_message: gemini_input.prompt_response.clone(),
-                    stop_hook_active: gemini_input.stop_hook_active.unwrap_or(false),
-                }),
-                session_id: gemini_input.session_id,
-            });
-        }
-
-        // ツールイベントにはtool_nameとtool_inputが必要
-        let raw_tool_name = gemini_input
-            .tool_name
-            .ok_or_else(|| anyhow!("Missing tool_name field"))?;
-        let raw_tool_input = gemini_input
-            .tool_input
-            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
-
-        // Gemini のツール名を内部のツール名にマッピングする。
-        // 参照: https://ai.google.dev/gemini-api/docs/tools
-        let tool_name = match raw_tool_name.as_str() {
-            // シェル実行
-            "shell" | "run_shell_command" | "execute_command" => "Bash".to_string(),
-            // ファイル書き込み・編集。replace は既存ファイル編集で使われる。
-            "write_file" | "create_file" | "update_file" | "replace" | "edit_file" => {
-                "Write".to_string()
-            }
-            // ファイル読み取り
-            "read_file" | "view_file" | "read_many_files" => "Read".to_string(),
-            // 不明なツールはそのまま保持
-            other => other.to_string(),
-        };
-        let tool_input = Self::parse_tool_input_for_tool("Gemini", &tool_name, &raw_tool_input)?;
-
-        debug!(
-            agent = self.format.label(),
-            raw_event = %raw_event,
-            mapped_event = ?event,
-            raw_tool_name = %raw_tool_name,
-            mapped_tool = %tool_name,
-            "{} parsed input", self.log_prefix()
-        );
-
-        Ok(HookInput {
-            event,
-            tool_name,
-            tool_input,
-            session_id: gemini_input.session_id,
-        })
-    }
-
-    fn format_gemini_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        let output = match decision {
-            Decision::Allow {
-                additional_context: Some(ctx),
-            } if event == HookEvent::AfterFileEdit => {
-                let truncated = truncate_output(ctx, self.output_max_length);
-                serde_json::json!({
-                    "decision": "allow",
-                    "hookSpecificOutput": {
-                        "additionalContext": truncated
-                    }
-                })
-            }
-            Decision::Allow { .. } => serde_json::json!(GeminiOutput {
-                decision: "allow".to_string(),
-                reason: None,
-            }),
-            Decision::Block { message } => {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
-                serde_json::json!(GeminiOutput {
-                    decision: "deny".to_string(),
-                    reason: Some(truncated),
-                })
-            }
-        };
-        serde_json::to_string(&output)
-            .map_err(|e| anyhow!("Failed to serialize Gemini output: {}", e))
-    }
-
-    // === Codex CLI フォーマット ===
-    // 公式ドキュメント: https://developers.openai.com/codex/hooks
-
     fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
         debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
 

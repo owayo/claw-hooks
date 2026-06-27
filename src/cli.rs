@@ -3,12 +3,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Claude Code, Cursor, Windsurf, Antigravity CLI, Gemini CLI, Codex CLI 向けAIコーディングエージェントフックシステム
+/// Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI 向けAIコーディングエージェントフックシステム
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
     version,
-    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Gemini CLI, and Codex CLI",
+    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, and Codex CLI",
     long_about = "A CLI tool that filters dangerous commands, suggests safer alternatives, \
                   and executes extension-based hooks for AI coding agents."
 )]
@@ -39,10 +39,8 @@ pub enum Format {
     Cursor,
     /// Windsurf (Cascade) フォーマット
     Windsurf,
-    /// Antigravity CLI フォーマット（Gemini CLI の後継）
+    /// Antigravity CLI フォーマット
     Agy,
-    /// Gemini CLI フォーマット（Antigravity CLI へ移行済み、後方互換性のため維持）
-    Gemini,
     /// Codex CLI フォーマット
     Codex,
 }
@@ -55,7 +53,6 @@ impl Format {
             Format::Cursor => "🖱️",
             Format::Windsurf => "🏄",
             Format::Agy => "🪐",
-            Format::Gemini => "♊",
             Format::Codex => "📜",
         }
     }
@@ -67,7 +64,6 @@ impl Format {
             Format::Cursor => "Cursor",
             Format::Windsurf => "Windsurf",
             Format::Agy => "Antigravity CLI",
-            Format::Gemini => "Gemini CLI",
             Format::Codex => "Codex CLI",
         }
     }
@@ -131,15 +127,6 @@ mod tests {
         let cli = Cli::try_parse_from(["claw-hooks", "hook", "--format", "windsurf"]).unwrap();
         match cli.command {
             Commands::Hook { format, .. } => assert_eq!(format, Format::Windsurf),
-            _ => panic!("Expected Hook command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_hook_gemini_format() {
-        let cli = Cli::try_parse_from(["claw-hooks", "hook", "-f", "gemini"]).unwrap();
-        match cli.command {
-            Commands::Hook { format, .. } => assert_eq!(format, Format::Gemini),
             _ => panic!("Expected Hook command"),
         }
     }

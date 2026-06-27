@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Antigravity CLI・Gemini CLI・Codex CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
+  シンプルなTOML設定でClaude Code・Cursor・Windsurf・Antigravity CLI・Codex CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
 </p>
 
 <p align="center">
@@ -33,174 +33,37 @@
 - ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash)を使用した正確なコマンド解析（`/bin/rm`、`RM.EXE` のような basename/拡張子/大文字小文字の正規化、sudo、`sudo -n`、`sudo --user`、`sudo VAR=value rm`、`timeout --signal`、`command rm`、bash -c、`eval`、`find -exec`、パイプ内のコマンド、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドを検出）。文字列フォールバックパーサー（非 `ast-parser` ビルド）でもシェル制御構文（`if … then rm …`、`for/select … do rm …`、`while/until … do rm …`、`case W in P) rm …`、`! rm …`）やループ/case ヘッダ内のコマンド置換を解析し、制御構文に包まれた危険コマンドを取りこぼさない（`for rm in …` のループ変数や危険コマンド名と同名の case パターンは誤検知しない）
+- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint出力を対応AIエージェント（Claude Code、Gemini CLI、Codex CLI）に送信。Antigravity CLI は `PostToolUse` ペイロードに `toolCall` が含まれないため拡張子フックは利用不可。代わりに Stop hooks のプロジェクト全体 lint を使ってください
+- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI は `PostToolUse` に元の `toolCall` を持たないため Stop hooks のみ
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
-- 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`, `tsconfig.json`等）を自動検出し、lint/typecheckを実行し、Stop時フィードバックに対応したエージェントではエラーをAIエージェントへ返す（Windsurfはベストエフォート）
-- ⏱️ **フックタイムアウト** - フックコマンドの設定可能なタイムアウト（デフォルト: 60秒）。Unix ではプロセスグループ全体を SIGKILL で終了するため、`sh -c '...'` 経由の孫プロセスや、直接の子が終了した後も stdout/stderr パイプを保持するバックグラウンド孫プロセスも残らず停止
-- 📏 **出力長制限** - 出力最大長の設定（デフォルト: 1000文字）でAIエージェントのコンテキストウィンドウ溢れを防止、マルチバイト文字安全な切り詰め
-- 🗜️ **出力圧縮** - 繰り返し装飾文字（`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`）、進捗表示の末尾の `...` に加え、cargo の `Compiling foo v1.0` や `Blocking waiting for file lock on ...` のような進捗ログ（並行ビルドで `Compiling` と `Checking` が交互に出る混在ランも 1 つの連続ランとしてまとめて圧縮する）をトークン効率のために圧縮。キャリッジリターン（`\r`）で同一行を上書きする進捗バー（Godot のヘッドレス import やダウンロード/マイグレーションのカウンタ等）は、端末で実際に表示される最後の状態だけに圧縮し、途中経過のフレームや生の `\r` バイトを残さない。スペースを含むディレクトリ配下の絶対パスでも共通プレフィックスを除去。`^` は ruff / clippy / rustc の長い範囲マーカー、`_` は rustc/ruff/biome のマルチライン span 下線（`| |_______^` → `| |_^`、snake_case の区切り 1〜2 連続は保持）、`·` と `→` は Biome などの空白可視化マーカーを縮約する用途（diff の `→ → → → → → → Google` → `→ Google` のような単一スペース区切りの連続も対象）。さらに Biome の重複行番号 `129 129 │ text` は `129 │ text`、空の context 行 `129 129 │` は `129 │` に圧縮する（左右の行番号が同じ整数の context line のみが対象で、`10 9 │` のように異なる場合は情報として保持）。加えて `|` / `^` / `_` / Box Drawing 文字（`│`、`─`、pnpm 系更新通知のバナー枠 `╭─╮` / `╰─╯`、biome の `─────` 区切り線）と空白だけからなる診断の枠線・キャレット行は丸ごと除去する（`| |_^` に圧縮されたマルチライン span 下線も含む）。指し示す列位置は直前の `file:line:col` ヘッダに残るため情報は失われず、英数字を含む行（見出し・ソース行・`| ^ expected u32` のようなラベル付きキャレット・`│ Update available! │` のようなバナー本文・`__init__` のような snake_case）は保持する。
-- 🛡️ **デバッグログ安全性** - デバッグログにはイベント/ツール/セッションと入力サイズの概要のみを記録し、生のコマンド、ファイル本文、未知イベントのペイロード、エージェントメッセージは保存しません。拡張子フックのログ・失敗メッセージ・タイムアウトラベルはプログラム名、引数件数、ファイルパスのバイト長のみ（解決済みファイルパスはディスクに残さない）を記録し、Stop フックのログは各フックの stdout/stderr のバイト数のみを記録し、出力本文は `--trace`（stderr、ディスク非永続）でしか確認できません
-- 🛑 **入力サイズ上限** - stdin の読み取りは 4 MiB 上限。暴走したエージェントが巨大ペイロードを送りつけても、claw-hooks プロセスを OOM kill させて安全弁を落とすのではなく、フェイルクローズドでブロックします。入力は生バイトで読み取り損失あり UTF-8 変換でデコードするため、不正なバイトが 1 つ混ざってもフックが空出力で異常終了（Antigravity/Codex/Gemini では「判定スキップ」=フェイルオープン）することはなく、不正な入力はフェイルクローズドでブロックされます
+- 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf はベストエフォート）
+- ⏱️ **フックタイムアウト** - フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
+- 📏 **出力長制限** - エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
+- 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。本来の診断情報には触れない
+- 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッションとバイト数サマリーのみ。生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
+- 🛑 **入力サイズ上限** - stdin は 4 MiB 上限。巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで止める（空 stdout 異常終了は Antigravity/Codex に「判定スキップ＝フェイルオープン」と誤解されるため、その挙動を回避）
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
-- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Antigravity CLI (Gemini CLI の後継)、Gemini CLI (legacy)、Codex CLIに対応
+- 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLIに対応
 
 ## なぜ claw-hooks？
 
-ネイティブフックは単純なタスクでも複雑なPython/Bashスクリプトが必要です。claw-hooksはシンプルなTOML設定に削減します。
-
-### ネイティブフック（複雑）
-
-**Claude Code** - `rm`コマンドをブロックするにはPythonスクリプトが必要:
-
-```python
-#!/usr/bin/env python3
-import json
-import sys
-
-def main():
-    input_data = json.loads(sys.stdin.read())
-    tool_name = input_data.get("tool_name", "")
-    tool_input = input_data.get("tool_input", {})
-
-    if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        dangerous = ["rm ", "rm -", "rmdir"]
-        if any(cmd in command for cmd in dangerous):
-            result = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "🚫 Dangerous command blocked"
-                }
-            }
-            print(json.dumps(result))
-            sys.exit(2)
-
-    sys.exit(0)
-
-if __name__ == "__main__":
-    main()
-```
-
-さらに`settings.json`で設定:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash",
-      "hooks": [{"type": "command", "command": "python3 /path/to/hook.py"}]
-    }]
-  }
-}
-```
-
-**Cursor/Windsurf** - 異なるJSON構造をパースする同様の複雑さ。
-
-**代替案: 正規表現ワンライナー** - 保守が困難で機能も限定的:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash",
-      "hooks": [{
-        "type": "command",
-        "command": "jq -r '.tool_input.command // \"\"' | grep -qE '^rm(dir)?\\b' && { echo '🚫 Dangerous command blocked' >&2; exit 2; }; exit 0"
-      }]
-    }]
-  }
-}
-```
-
-正規表現アプローチの問題点:
-- ❌ `sudo rm`、`cd /tmp && rm`、パイプ内のコマンドを検出できない
-- ❌ 複数のブロックコマンドを追加しにくい
-- ❌ コマンドタイプごとのカスタムメッセージ不可
-- ❌ jq依存が必要
-- ❌ エージェントごとに異なる正規表現が必要
-
-**拡張子フック（フォーマッター/リンター）** - さらに複雑:
-
-```bash
-# 正規表現ワンライナー - 保守不能になる
-jq -r '.tool_input.file_path // ""' | xargs -I{} sh -c 'case "{}" in *.rs) rustfmt "{}" ;; *.py) ruff format "{}" && ruff check --fix "{}" ;; *.ts|*.tsx) biome format --write "{}" && biome lint --write "{}" ;; esac'
-```
-
-またはPythonスクリプト:
-
-```python
-#!/usr/bin/env python3
-import json
-import sys
-import subprocess
-import os
-
-def main():
-    input_data = json.loads(sys.stdin.read())
-    tool_name = input_data.get("tool_name", "")
-    tool_input = input_data.get("tool_input", {})
-
-    if tool_name in ["Write", "Edit", "MultiEdit"]:
-        file_path = tool_input.get("file_path", "")
-        ext = os.path.splitext(file_path)[1]
-
-        commands = {
-            ".rs": ["rustfmt {}"],
-            ".py": ["ruff format {}", "ruff check --fix {}"],
-            ".ts": ["biome format --write {}", "biome lint --write {}"],
-            ".tsx": ["biome format --write {}", "biome lint --write {}"],
-        }
-
-        if ext in commands:
-            for cmd in commands[ext]:
-                subprocess.run(cmd.format(file_path), shell=True)
-
-    print(json.dumps({"decision": "approve"}))
-
-if __name__ == "__main__":
-    main()
-```
-
-### claw-hooks（シンプル）
-
-**危険なコマンドのブロックは2行:**
+エージェント標準のフックは、危険コマンドのチェック 1 つ、フォーマッター 1 つに対しても Python/Bash スクリプトをエージェントごとに用意する必要があります。claw-hooks ならこれが TOML 設定だけで済みます。
 
 ```toml
+# 危険コマンドをブロック
 rm_block = true
 rm_block_message = "🚫 Use safe-rm instead"
-```
 
-**拡張子フックはシンプルなマップ:**
-
-```toml
+# 保存時に自動フォーマット
 [extension_hooks]
-".css" = ["biome format --write {file}", "biome lint --write {file}"]
-".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
-".rs" = ["rustfmt {file}"]
-".ts" = ["biome check {file}"]
+".rs"  = ["rustfmt {file}"]
+".py"  = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
+".ts"  = ["biome check {file}"]
 ".tsx" = ["biome check {file}"]
 ```
 
-ルール:
-- 拡張子フックの各コマンドテンプレートには、`{file}` プレースホルダーを必ず1つだけ含める必要があります。
-- 拡張子フックは保存後・編集後のファイル書き込みイベント（Claude の `PostToolUse` + `Write` / `Edit`、Cursor の `afterFileEdit`、Windsurf の `post_write_code`、Gemini の `AfterTool` + `write_file`、Codex の `PostToolUse` + `apply_patch`）でのみ実行されます。Antigravity CLI の `PostToolUse` ペイロードには元の `toolCall` が含まれないため、ファイル単位の拡張子フックは Antigravity では成立しません。Stop hooks でプロジェクト全体の lint/typecheck を回す運用にしてください。
-- Codex の `PostToolUse` + `Bash` はコマンド出力イベントとしてパススルーし、`apply_patch` は変更ファイルパスを抽出して拡張子フックの対象にします。削除だけの patch はフォーマット/ lint できる保存済みファイルがないため、拡張子フックを実行しません。
-- 親ディレクトリ遡りを含むパス（例: `../`）は安全のため拒否されます。
-- シェルのリダイレクトメタ文字（`<`, `>`）を含むパスは安全のため拒否されます。
-- タブ、改行、NUL バイトを含むパスは拒否されます。
-- 必須のコマンドやファイルパスを欠いた不正なエージェント入力は、fail-closed で拒否されます。
-
-**なぜ高精度か:**
-- ✅ tree-sitter-bashによるAST解析で正確なコマンド検出
-- ✅ クォート対応（コマンドを検出、クォート内の引数は無視）
-- ✅ `sudo rm`、`/usr/bin/sudo -u root rm`、`sudo -n rm`、`sudo --user root rm`、`sudo VAR=value rm`、`timeout --signal TERM 10 rm`、`command rm`、`exec rm`、`bash -lc 'rm ...'`、`cmd /c del`、`cd /tmp && rm`、`echo ok & rm`（単独 `&` バックグラウンド実行）、改行区切りのコマンド、パイプ内、`eval`、`xargs -I`、`xargs sh -c`、`find -exec`、数値引数を取るフラグ（`xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm`）、`bash -c -- 'rm ...'`、`bash -c'rm ...'` / `bash -lc'rm ...'`（`-c` クラスタに引用符付きスクリプトが空白なしで連結された形式）、`env -S'rm ...'` / `env --split-string`、`{ rm -rf /; }` のようなブレースコマンドグループ、`diff <(rm ...) <(ls)` / `tee >(rm ...)` のようなプロセス置換、`pkexec rm`、`gosu root rm`、Busybox/Alpine 形式の `su root rm` のような特権昇格ラッパー経由、`r\m`、`r''m`、`$'r\x6d'` のような quote removal 後の危険コマンドも検出
-- ✅ ラッパー・サブシェル対応（sudo、doas、pkexec、gosu、su、timeout、command、exec、bash -c/-lc、cmd /c、xargs、eval、find -exec）。パス付きラッパーや `.exe`, `.cmd`, `.bat`, `.com` 付きの Windows 実行ファイルも正規化
-- ✅ 単一バイナリ、Python/jq依存なし
-
-一度設定するだけ:
+…各エージェントのフック設定で claw-hooks を一度呼び出すだけ:
 
 ```json
 {
@@ -213,6 +76,40 @@ rm_block_message = "🚫 Use safe-rm instead"
 }
 ```
 
+素朴な `grep -E '^rm '` では `sudo rm`、`cd /tmp && rm`、`bash -lc 'rm …'`、パイプ、`xargs`、ブレースグループ、プロセス置換、特権昇格ラッパー（`pkexec` / `gosu` / `su <user> cmd`）、シェル quote-removal 形式（`r\m`、`$'r\x6d'`）を取りこぼします。claw-hooks は tree-sitter-bash（同等カバレッジの文字列フォールバックパーサーつき）でこれらすべてに対処します。単一バイナリ、Python/jq 依存なし、Claude Code / Cursor / Windsurf / Antigravity / Codex で同じ挙動になります。
+
+<details>
+<summary>同等のネイティブ Python フックの例</summary>
+
+```python
+#!/usr/bin/env python3
+import json, sys
+
+data = json.loads(sys.stdin.read())
+if data.get("tool_name") == "Bash":
+    cmd = data.get("tool_input", {}).get("command", "")
+    if any(s in cmd for s in ("rm ", "rm -", "rmdir")):
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "🚫 Dangerous command blocked",
+            }
+        }))
+        sys.exit(2)
+sys.exit(0)
+```
+
+これをエージェントごと、危険コマンドごと、フォーマッターごとに複製し、quote/ラッパー処理を毎回再実装することになります。
+</details>
+
+### 拡張子フックのルール
+
+- 各コマンドテンプレートには `{file}` プレースホルダーを 1 つだけ含めます。
+- 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`。Antigravity にはファイル単位の post-edit イベントが無いので Stop hooks でプロジェクト全体 lint/typecheck を回します。
+- Codex の `PostToolUse` + `Bash` はパススルー。`apply_patch` は変更ファイルパスを抽出して拡張子フックに渡します（削除のみの patch はスキップ）。
+- パスに `../`、リダイレクトメタ文字（`<`、`>`）、タブ、改行、NUL バイトを含むものは拒否。必須フィールドを欠くペイロードはフェイルクローズドで拒否。
+
 ### 比較
 
 | 機能 | ネイティブフック | claw-hooks |
@@ -220,7 +117,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 | 危険なコマンドをブロック | コマンドごとに25行以上のPython | TOML 1行 |
 | カスタムフィルター | フィルターごとに新しいスクリプト | `[[custom_filters]]`に追加 |
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
-| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Gemini CLI、Codex CLI）、Antigravity CLI は Stop hooks 経由* |
+| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Codex CLI）、Antigravity CLI は Stop hooks 経由* |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
 | Stopフック（lint、通知等） | ユースケースごとにスクリプト作成 | `[[stop_hooks]]`設定 |
 
@@ -309,7 +206,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 | オプション | 短縮形 | 説明 |
 |-----------|--------|------|
-| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `agy` (Antigravity CLI), `gemini` (legacy), `codex` |
+| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex` |
 | `--config` | `-c` | 設定ファイルのパス |
 | `--help` | `-h` | ヘルプを表示 |
 
@@ -325,11 +222,8 @@ claw-hooks hook --format cursor
 # Windsurfフックを処理
 claw-hooks hook --format windsurf
 
-# Antigravity CLIフックを処理（Gemini CLI の後継）
+# Antigravity CLIフックを処理
 claw-hooks hook --format agy
-
-# Gemini CLIフックを処理（legacy。Antigravity CLI へ移行されました）
-claw-hooks hook --format gemini
 
 # Codex CLIフックを処理
 claw-hooks hook --format codex
@@ -415,7 +309,7 @@ claw-hooks hook --config /path/to/config.toml
 
 ### Antigravity CLI
 
-Antigravity CLI は Gemini CLI の後継です。`~/.gemini/config/hooks.json`（ユーザー）または `<project>/.agents/hooks.json`（プロジェクトワークスペース）に追加:
+`~/.gemini/config/hooks.json`（ユーザー）または `<project>/.agents/hooks.json`（プロジェクトワークスペース）に追加:
 
 ```json
 {
@@ -437,37 +331,6 @@ Antigravity CLI は Gemini CLI の後継です。`~/.gemini/config/hooks.json`�
 - Antigravity の `PostToolUse` イベントには元の `toolCall` が含まれません。そのためファイル単位の拡張子フックは利用できません。代わりに Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` でエージェントに再投入してください。
 - `PreInvocation` / `PostInvocation` は claw-hooks のスコープ外（モデル呼び出し前後のオーケストレーション）なので、自動的にパススルーされます。これらのイベントは hook 登録不要です。
 - Antigravity hooks 公式仕様: <https://antigravity.google/docs/customizations/hooks>
-
-### Gemini CLI（legacy）
-
-> **Note**: Gemini CLI は [Antigravity CLI](#antigravity-cli) に移行されました。新規セットアップでは `--format agy` を推奨します。`--format gemini` は既存ユーザの後方互換性のためのみ維持されます。
-
-`~/.gemini/settings.json`（ユーザー）または`.gemini/settings.json`（プロジェクト）に追加:
-
-```json
-{
-  "hooks": {
-    "BeforeTool": [
-      {
-        "matcher": "run_shell_command",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
-      }
-    ],
-    "AfterTool": [
-      {
-        "matcher": "write_file|replace",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
-      }
-    ],
-    "AfterAgent": [
-      {
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format gemini" }]
-      }
-    ]
-  }
-}
-```
 
 ### Codex CLI
 
@@ -799,7 +662,6 @@ claw-hooksはStopフックの子プロセスに以下の環境変数を渡しま
 **`CLAW_HOOKS_AGENT_MESSAGE`** の取得元:
 - **Claude Code**: Stopイベントの `last_assistant_message` フィールド
 - **Windsurf**: `post_cascade_response` イベントの `response` フィールド
-- **Gemini CLI**: `AfterAgent` イベントの `prompt_response` フィールド
 - **Cursor**: 利用不可
 
 これはエージェントのコンテキストを活用できるツールに有用です。例えば、[git-sc](https://github.com/owayo/git-smart-commit)はこの情報を使ってより正確なコミットメッセージを生成します:
@@ -908,187 +770,47 @@ Shell 以外の `preToolUse` を含む未対応の Cursor イベントは `allow
 
 ### Antigravity CLI (`--format agy`)
 
-Antigravity CLI は Gemini CLI の後継です。camelCase スキーマと `hook_event_name` を使用します:
+camelCase スキーマ。代表的な PreToolUse ペイロード:
 
 ```jsonc
-// PreToolUse イベント
 {
   "hook_event_name": "PreToolUse",
   "toolCall": {
     "name": "run_command",
-    "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace", "WaitMsBeforeAsync": 0 }
+    "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace" }
   },
   "stepIdx": 3,
-  "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+  "conversationId": "…",
   "workspacePaths": ["/workspace/project"],
-  "transcriptPath": "~/.gemini/antigravity-cli/brain/.../transcript.jsonl",
-  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/..."
-}
-
-// Stop イベント（エージェントループ終了）
-{
-  "hook_event_name": "Stop",
-  "executionNum": 1,
-  "terminationReason": "model_stop",
-  "error": "",
-  "fullyIdle": true,
-  "conversationId": "..."
+  "transcriptPath": "~/.gemini/antigravity-cli/brain/…/transcript.jsonl",
+  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/…"
 }
 ```
+
+`Stop` は `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` を持ちます。
 
 | hook_event_name | toolCall.name | 内部マッピング |
-|-----------------|---------------|----------------|
-| `PreToolUse` | `run_command` | PreToolUse + Bash（`toolCall.args.CommandLine` を使用） |
-| `PreToolUse` | その他のツール（`write_to_file`、`replace_file_content`、…） | パススルー allow |
-| `PostToolUse` | （ペイロードに `toolCall` 無し） | パススルー allow |
-| `PreInvocation` / `PostInvocation` | n/a | パススルー allow（claw-hooks のスコープ外） |
+|---|---|---|
+| `PreToolUse` | `run_command` | BeforeCommand（`toolCall.args.CommandLine` → Bash） |
+| `PreToolUse` | その他（`write_to_file`、`replace_file_content`、…） | パススルー allow |
+| `PostToolUse` / `PreInvocation` / `PostInvocation` | n/a | パススルー allow（claw-hooks のスコープ外） |
 | `Stop` | n/a | Stop |
 
-出力形式:
-- PreToolUse 許可: `{"decision":"allow"}`
-- PreToolUse 拒否: `{"decision":"deny","reason":"..."}`（仕様では `ask` / `force_ask` も指定可能ですが、claw-hooks は `allow` / `deny` の二択のみ）
-- PostToolUse: `{}`（仕様上、事後フックでありブロック・追加コンテキスト伝達不可）
-- Stop 許可（停止許可）: `{}`
-- Stop ブロック（再投入し reason を system message として注入）: `{"decision":"continue","reason":"..."}`
-- フェイルクローズドのパースエラー: exit code 0 + `{"decision":"deny","reason":"..."}`（Codex / Gemini と同様。非ゼロ終了コードはフック失敗扱いで判定が無視されるため）
-
-> **拡張子フック**: Antigravity の `PostToolUse` ペイロードには元の `toolCall` が含まれないため、保存後ファイルパスを取得できません。`--format agy` では拡張子フックは無効になります。Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `"decision":"continue"` で再投入してください。
-
-未対応イベントは（今後の Antigravity 追加分も含めて）すべて `allow` として透過されるため、`claw-hooks` を必要なイベントだけに安全に接続できます。
-
-### Gemini CLI (`--format gemini`)
-
-> **Note**: Gemini CLI は [Antigravity CLI](#antigravity-cli---format-agy) に移行されました。新規セットアップでは `--format agy` を推奨します。`--format gemini` は後方互換性のためのみ維持されます。
-
-`hook_event_name`と`tool_name`フィールドを使用:
-
-```jsonc
-// BeforeToolイベント（シェルコマンド）
-{
-  "hook_event_name": "BeforeTool",
-  "tool_name": "run_shell_command",
-  "tool_input": { "command": "..." },
-  "session_id": "..."
-}
-
-// AfterToolイベント（ファイル書き込み）
-{
-  "hook_event_name": "AfterTool",
-  "tool_name": "write_file",
-  "tool_input": { "file_path": "..." }
-}
-
-// AfterAgentイベント（エージェントループ終了）
-{
-  "hook_event_name": "AfterAgent"
-}
-```
-
-| hook_event_name | tool_name | 内部マッピング |
-|-----------------|-----------|----------------|
-| `BeforeTool` | `run_shell_command` | PreToolUse + Bash |
-| `AfterTool` | `write_file` | PostToolUse + Write |
-| `AfterAgent` | - | Stop |
-
-未対応の Gemini イベントは `allow` として透過されるため、`claw-hooks` を必要なイベントだけに安全に接続できます。
-
-出力形式は`approve`/`block`の代わりに`allow`/`deny`を使用:
-- 許可: `{"decision":"allow"}`
-- 拒否: `{"decision":"deny","reason":"..."}`
+> **拡張子フック**: Antigravity の `PostToolUse` には元の `toolCall` が含まれないため、`--format agy` ではファイル単位の拡張子フックは無効です。プロジェクト全体の lint/typecheck を Stop hooks で回し、失敗を `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。未対応イベントはすべて allow でパススルーされます。
 
 ### Codex CLI (`--format codex`)
 
-`hook_event_name` フィールドを使用:
-
-```jsonc
-// PreToolUseイベント
-{
-  "hook_event_name": "PreToolUse",
-  "session_id": "...",
-  "cwd": "/path/to/project",
-  "model": "gpt-5.4",
-  "tool_name": "Bash",
-  "tool_use_id": "...",
-  "tool_input": { "command": "rm -rf /tmp/test" }
-}
-```
-
-```jsonc
-// 承認プロンプト前の PermissionRequest イベント
-{
-  "hook_event_name": "PermissionRequest",
-  "session_id": "...",
-  "cwd": "/path/to/project",
-  "model": "gpt-5.4",
-  "tool_name": "Bash",
-  "tool_input": { "command": "rm -rf /tmp/test", "description": "..." }
-}
-```
-
-```jsonc
-// Bash コマンド出力の PostToolUse イベント
-{
-  "hook_event_name": "PostToolUse",
-  "session_id": "...",
-  "cwd": "/path/to/project",
-  "model": "gpt-5.4",
-  "tool_name": "Bash",
-  "tool_use_id": "...",
-  "tool_input": { "command": "cargo test" },
-  "tool_response": "..."
-}
-```
-
-```jsonc
-// apply_patch によるファイル編集の PostToolUse イベント
-{
-  "hook_event_name": "PostToolUse",
-  "session_id": "...",
-  "cwd": "/path/to/project",
-  "model": "gpt-5.4",
-  "tool_name": "apply_patch",
-  "tool_use_id": "...",
-  "tool_input": {
-    "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"
-  },
-  "tool_response": "..."
-}
-```
-
-```jsonc
-// Stopイベント
-{
-  "hook_event_name": "Stop",
-  "session_id": "...",
-  "cwd": "/path/to/project",
-  "model": "gpt-5.4",
-  "permission_mode": "default",
-  "stop_hook_active": false,
-  "last_assistant_message": "...",
-  "transcript_path": "..."
-}
-```
+`hook_event_name` + `tool_name` + `tool_input` の標準スキーマ。`apply_patch` の `tool_input.command` から `*** Add/Update/Move to File:` ヘッダを抽出して拡張子フックを駆動します（削除のみの patch はスキップ）。
 
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
-| `SessionStart` | BeforePrompt（パススルー） |
-| `UserPromptSubmit` | BeforePrompt（パススルー） |
+| `SessionStart` / `UserPromptSubmit` | パススルー allow |
 | `PreToolUse` | BeforeCommand |
-| `PermissionRequest` | PermissionRequest（承認前の Bash コマンドガード） |
-| `PostToolUse` | AfterFileEdit（Bash 出力はパススルー、`apply_patch` は拡張子フック対象） |
+| `PermissionRequest` | 承認プロンプト前のコマンドガード（危険な Bash は deny、安全なら `{}`） |
+| `PostToolUse` | AfterFileEdit（`Bash` パススルー、`apply_patch` → MultiEdit） |
 | `Stop` | Stop |
 
-Codex の `PermissionRequest` は `Bash` 向けのコマンドガードとして扱います。危険なコマンドは専用の権限応答で拒否し、安全なコマンドでは `{}` を返して通常の承認フローを変更しません。
-
-Codex の `PostToolUse` は `Bash` コマンド出力と `apply_patch` によるファイル編集を扱えます。`claw-hooks` は `Bash` をパススルーし、`apply_patch` はパッチ本文の `*** Add File:`, `*** Update File:`, `*** Move to:` から変更ファイルパスを抽出して `MultiEdit` として扱います。削除されたファイルは保存後に整形対象が存在しないため、拡張子フックでは無視します。
-
-出力形式:
-- 許可: `{}`（空JSON、exit 0）
-- PreToolUse ブロック: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式）
-- PostToolUse / Stop ブロック: `{"decision":"block","reason":"..."}`（これらのイベントの正式形式。`Stop` では reason が継続プロンプトになる）
-- PermissionRequest ブロック: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
-
-Codex CLIでは、許可・ブロックのどちらでもフックコマンドは終了コード `0` で終了する必要があります。非0終了コードはブロックではなくフック失敗として扱われます。
+Codex は許可・ブロック・フェイルクローズドすべてを exit code `0` で返します（非ゼロはフックインフラ失敗扱い）。イベントごとの出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。
 
 ### イベントマッピング
 
@@ -1099,7 +821,6 @@ graph LR
         CU1[Cursor: preToolUse Shell / beforeShellExecution]
         WS1[Windsurf: pre_run_command]
         AG1[Antigravity: PreToolUse + run_command]
-        GE1[Gemini: BeforeTool + run_shell_command]
         CX1[Codex: PreToolUse + Bash]
     end
     CH1[🛡️ 検証・代替ツール提案]
@@ -1107,21 +828,18 @@ graph LR
     CU1 --> CH1
     WS1 --> CH1
     AG1 --> CH1
-    GE1 --> CH1
     CX1 --> CH1
 
     subgraph ファイル保存後
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
-        GE2[Gemini: AfterTool + write_file]
         CX2[Codex: PostToolUse + apply_patch]
     end
     CH2[🔧 拡張子ごとのコマンド実行]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
-    GE2 --> CH2
     CX2 --> CH2
 
     subgraph エージェント終了
@@ -1129,7 +847,6 @@ graph LR
         CU3[Cursor: stop]
         WS3[Windsurf: post_cascade_response]
         AG3[Antigravity: Stop]
-        GE3[Gemini: AfterAgent]
         CX3[Codex: Stop]
     end
     CH3[⏹️ Lint / 通知 / クリーンアップ]
@@ -1137,7 +854,6 @@ graph LR
     CU3 --> CH3
     WS3 --> CH3
     AG3 --> CH3
-    GE3 --> CH3
     CX3 --> CH3
 ```
 
@@ -1145,121 +861,31 @@ Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックの�
 
 ## 入出力リファレンス
 
-### 入力 (stdin)
+Stdin はエージェント固有のフック JSON（イベント別のペイロードは [フォーマット検出ロジック](#フォーマット検出ロジック) を参照）。Stdout / stderr は `(format, event)` ごとに以下の JSON を返します。
 
-```json
-{
-  "hook_event_name": "PreToolUse",
-  "tool_name": "Bash",
-  "tool_input": { "command": "rm -rf /tmp/test" },
-  "session_id": "abc123"
-}
-```
+| エージェント | イベント | 許可 | ブロック / フェイルクローズド |
+|---|---|---|---|
+| Claude Code | PreToolUse | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}` | `…permissionDecision:"deny", permissionDecisionReason:"…"`（exit 0）。パースエラー時は **stderr** にプレーンテキスト、exit 2 |
+| Claude Code | PostToolUse | `{}` または `…additionalContext:"…"`（lint フィードバック） | `{"decision":"block","reason":"…"}` |
+| Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
+| Cursor | preToolUse / beforeShellExecution | `{"permission":"allow"}` | `{"permission":"deny","user_message":"…","agent_message":"…"}`、exit 2 |
+| Cursor | stop | `{}` | `{"followup_message":"…"}` |
+| Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** プレーンテキスト（JSON ではない） |
+| Windsurf | post_cascade_response | `{}` | `{}`（非同期事後フックのためブロック不可） |
+| Antigravity | PreToolUse | `{"decision":"allow"}` | `{"decision":"deny","reason":"…"}` |
+| Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}`（仕様上ブロックパス無し） |
+| Antigravity | Stop | `{}` | `{"decision":"continue","reason":"…"}`（エージェントループへ再投入、`reason` が system message として注入される） |
+| Codex CLI | 任意 | `{}` または `…additionalContext:"…"` | PreToolUse: `…permissionDecision:"deny",…`。PermissionRequest: `…decision:{behavior:"deny",message:"…"}`。PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
 
-### 出力 (stdout/stderr)
-
-**Claude Code PreToolUse 許可**:
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "allow"
-  }
-}
-```
-
-**Claude Code PreToolUse ブロック**:
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "deny",
-    "permissionDecisionReason": "Use safe-rm instead..."
-  }
-}
-```
-
-> **注意**: PreToolUseは`hookSpecificOutput.permissionDecision`のみを使用します。トップレベルの`decision`/`reason`フィールドはこのイベントでは非推奨です。
-
-**Claude Code PostToolUse 許可（lint出力付き）**:
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PostToolUse",
-    "additionalContext": "[rustfmt {file}] warning: unused variable..."
-  }
-}
-```
-
-**Claude Code PostToolUse ブロック**: `{"decision":"block","reason":"..."}`
-
-`additionalContext`フィールドはlint警告/エラーを、対応するフックランタイムのエージェントへ送信します。`claw-hooks` は Claude Code の `PostToolUse`、Gemini CLI の `AfterTool`、Codex CLI の `PostToolUse` でこの出力を返します。Antigravity CLI の `PostToolUse` は仕様上 `{}` 固定のため、`--format agy` での lint フィードバックは Stop hooks の `{"decision":"continue","reason":"..."}` 経由になります。
-
-**Antigravity CLI PreToolUse 許可**: `{"decision":"allow"}`
-
-**Antigravity CLI PreToolUse ブロック**: `{"decision":"deny","reason":"Use safe-rm instead..."}`
-
-**Antigravity CLI Stop 許可**: `{}`
-
-**Antigravity CLI Stop ブロック（再投入）**: `{"decision":"continue","reason":"lint errors found..."}`
-
-**Claude Code Stop 許可**: `{}`
-
-**Claude Code Stop ブロック**: `{"decision":"block","reason":"lint errors found..."}`
-
-**Windsurf pre_run_command ブロック**: exit code 2 でブロック時、stderr にメッセージ本文をプレーンテキストで出力（JSON ではない。Windsurf は stderr をテキストとして表示するため。exit code 2 で stderr を読み取る）。
-
-**Windsurf Stop (`post_cascade_response`)**: 常に `{}` を返します。フック自体は実行されますが、失敗はベストエフォート扱いで、非同期の事後フックという仕様上ブロックとしては返されません。
-
-**Codex CLI 許可**: `{}`（空JSON）
-
-**Codex CLI PermissionRequest 許可**: `{}`（判断を返さず、Codex の通常承認フローに委ねる）
-
-**Codex CLI PreToolUse ブロック**: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use safe-rm instead..."}}`
-
-**Codex CLI PostToolUse / Stop ブロック**: `{"decision":"block","reason":"..."}`
-
-**Codex CLI PermissionRequest ブロック**: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Use safe-rm instead..."}}}`
+`additionalContext` は Claude の `PostToolUse` と Codex の `PostToolUse` に lint フィードバックを送るチャネルです。Antigravity には `additionalContext` チャネルが無いため、Stop の `"decision":"continue"` で lint フィードバックを送ります。
 
 ### 終了コード
 
-**Claude Code**:
-| コード | 意味 |
-|--------|------|
-| `0` | 成功。許可/ブロックの決定は stdout の JSON で伝達 |
-| `2` | fail-closed のフックエラー。stderr がフィードバックとして渡される |
-
-Claude Code は exit code `0` のときだけ stdout の JSON を解析します。そのため通常の PreToolUse/PostToolUse/Stop のブロック決定は exit code `0` で返します。パースエラーや空入力は fail-closed のため exit code `2` と stderr を使用します。
-
-**Cursor / Windsurf**:
-| コード | 意味 |
-|--------|------|
-| `0` | 許可 |
-| `2` | ブロック |
-
-**Gemini CLI**（異なるセマンティクス）:
-| コード | 意味 |
-|--------|------|
-| `0` | 成功（JSONで決定: `allow` または `deny`） |
-| `2` | システムエラー（stderrが理由として使用） |
-
-Gemini CLIはブロックを含むすべての決定に対してexit code `0`を期待します。アクションの許可/拒否はJSONレスポンスの`decision`フィールドで決定されます。
-
-**Codex CLI**（異なるセマンティクス）:
-| コード | 意味 |
-|--------|------|
-| `0` | 成功（JSONで決定: `allow` または `block`） |
-| 非0 | フック失敗（決定は無視される） |
-
-Codex CLIはブロックを含むすべての決定に対してexit code `0`を期待します。非0終了コードはフックインフラの障害として扱われ、stdoutのJSON内のブロック決定は無視されます。
-
-**Antigravity CLI**（Codex/Gemini と同じセマンティクス）:
-| コード | 意味 |
-|--------|------|
-| `0` | 成功（JSON で決定: PreToolUse は `allow` / `deny`、Stop は `continue`） |
-| 非0 | フック失敗（決定は無視される） |
-
-Antigravity CLI はフェイルクローズドのパースエラーを含むすべての決定を exit code `0` + JSON body で返します。非0終了コードはブロックではなくフックインフラの障害として扱われるためです。
+| エージェント | 許可 | ブロック | フェイルクローズドのパースエラー |
+|---|---|---|---|
+| Claude Code | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `2` + **stderr** プレーンテキスト |
+| Cursor / Windsurf | `0` | `2`（Windsurf BeforeCommand は stderr に書き込み、Cursor Stop は `followup_message` 付きで `0`） | `2` |
+| Antigravity / Codex CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + deny JSON（非ゼロはフックインフラ失敗扱いで判定が無視される） |
 
 ## パフォーマンス
 

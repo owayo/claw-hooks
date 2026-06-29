@@ -4,7 +4,7 @@ version = "26.6.102"
 edition = "2024"
 rust-version = "1.85"
 authors = ["owayo <yoheiowa@gmail.com>"]
-description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, and Gemini CLI"
+description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, and Codex CLI"
 license = "MIT"
 repository = "https://github.com/owayo/claw-hooks"
 keywords = ["cli", "hooks", "ai", "claude-code", "cursor"]
@@ -17,7 +17,7 @@ serde_json = "1.0.150"
 toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time"] }
-time = { version = "0.3.49", features = ["formatting", "local-offset", "macros"] }
+time = { version = "0.3.51", features = ["formatting", "local-offset", "macros"] }
 tracing-appender = "0.2.5"
 logroller = "0.1.10"
 dirs = "6.0.0"

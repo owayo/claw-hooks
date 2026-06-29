@@ -1500,6 +1500,34 @@ fn test_codex_format_post_tool_use_apply_patch_allows() {
     );
 }
 
+#[test]
+fn test_codex_format_subagent_start_allows() {
+    let input = r#"{"hook_event_name":"SubagentStart","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Explore","permission_mode":"default"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex SubagentStart should exit 0");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex SubagentStart should return empty JSON"
+    );
+}
+
+#[test]
+fn test_codex_format_subagent_stop_allows() {
+    let input = r#"{"hook_event_name":"SubagentStop","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Plan","agent_transcript_path":"/tmp/subagent.jsonl","stop_hook_active":false,"last_assistant_message":"Done"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex SubagentStop should exit 0");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "Codex SubagentStop should return empty JSON"
+    );
+}
+
 // =========================================================================
 // Windsurf フォーマット追加テスト
 // =========================================================================

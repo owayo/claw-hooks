@@ -1855,6 +1855,54 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_input_parsing_subagent_start() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "SubagentStart",
+            "session_id": "abc-123",
+            "turn_id": "turn-1",
+            "agent_id": "agent-1",
+            "agent_type": "Explore",
+            "permission_mode": "default"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStart);
+        assert_eq!(result.tool_name, "SubagentStart");
+        assert_eq!(result.session_id, Some("abc-123".to_string()));
+        if let crate::domain::ToolInput::Subagent(subagent) = &result.tool_input {
+            assert_eq!(subagent.subagent_type, Some("Explore".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
+    fn test_codex_input_parsing_subagent_stop() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "hook_event_name": "SubagentStop",
+            "session_id": "abc-123",
+            "turn_id": "turn-1",
+            "agent_id": "agent-1",
+            "agent_type": "Plan",
+            "agent_transcript_path": "/tmp/subagent.jsonl",
+            "stop_hook_active": false,
+            "last_assistant_message": "Done"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::SubagentStop);
+        assert_eq!(result.tool_name, "SubagentStop");
+        assert_eq!(result.session_id, Some("abc-123".to_string()));
+        if let crate::domain::ToolInput::Subagent(subagent) = &result.tool_input {
+            assert_eq!(subagent.subagent_type, Some("Plan".to_string()));
+        } else {
+            panic!("Expected Subagent tool input");
+        }
+    }
+
+    #[test]
     fn test_codex_output_allow_uses_empty_json() {
         // Codex: Allow は空 JSON を返す（公式ドキュメント推奨）
         let adapter = FormatAdapter::new(Format::Codex, 0);
@@ -3880,6 +3928,8 @@ impl FormatAdapter {
             "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
             "PermissionRequest" | "permission_request" => HookEvent::PermissionRequest,
             "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
+            "SubagentStart" | "subagent_start" => HookEvent::SubagentStart,
+            "SubagentStop" | "subagent_stop" => HookEvent::SubagentStop,
             // claw-hooks の処理対象外イベント: パススルーで Allow を返す
             "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
                 return Ok(HookInput {
@@ -3923,6 +3973,35 @@ impl FormatAdapter {
                     response: None,
                     agent_message,
                     stop_hook_active,
+                }),
+                session_id,
+            });
+        }
+
+        if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
+            let subagent_type = raw
+                .get("agent_type")
+                .or_else(|| raw.get("subagent_type"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("Missing agent_type field"))?
+                .to_string();
+
+            return Ok(HookInput {
+                event,
+                tool_name: raw_event,
+                tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                    subagent_type: Some(subagent_type),
+                    prompt: raw
+                        .get("prompt")
+                        .or_else(|| raw.get("task"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    status: raw.get("status").and_then(|v| v.as_str()).map(String::from),
+                    duration: raw
+                        .get("duration_ms")
+                        .or_else(|| raw.get("duration"))
+                        .and_then(|v| v.as_u64()),
                 }),
                 session_id,
             });

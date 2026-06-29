@@ -386,6 +386,8 @@ claw-hooks hook --config /path/to/config.toml
 }
 ```
 
+Codex hooks はデフォルトで有効です。明示的に機能フラグを設定する場合は、現行の `[features] hooks` キーを使用してください。旧 `codex_hooks` エイリアスは非推奨です。
+
 ## 設定
 
 デフォルトの場所: `~/.config/claw-hooks/config.toml`（全プラットフォーム共通）

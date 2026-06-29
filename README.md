@@ -386,6 +386,8 @@ Add to `~/.codex/hooks.json` (user):
 }
 ```
 
+Codex hooks are enabled by default. If you explicitly configure feature flags, use the current `[features] hooks` key; the older `codex_hooks` alias is deprecated.
+
 ## Configuration
 
 Default location: `~/.config/claw-hooks/config.toml` (all platforms)

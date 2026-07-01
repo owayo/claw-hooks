@@ -104,6 +104,9 @@ pub fn strip_ansi_codes(input: &str) -> String {
 ///   - 英数字を含む行（見出し・ソース行・ラベル付きキャレット）は保持する
 /// - 進捗系の単語（`Compiling` 等）で始まる行が4行以上連続する場合、4行目以降を集約
 ///   （診断行 `error:` / `warning:` 等は固有情報があるため対象外）
+/// - lint ルールセットの非互換設定警告（ruff の `... are incompatible. Ignoring ...`）を除去
+///   - 編集ごとに毎回同じ内容が出るコード非依存のノイズ
+///   - コード診断の `warning:`（`warning: unused variable` 等）は保持する
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -133,6 +136,11 @@ pub fn normalize_lint_output(output: &str) -> String {
         // トークン節約のため丸ごと除去する。指し示す列位置は直前の
         // `file:line:col` ヘッダに数値で残るため、エラー情報は失われない。
         if is_diagnostic_frame_line(&collapsed) {
+            continue;
+        }
+        // lint ルールセットの非互換設定警告（ruff の `... are incompatible. Ignoring ...`）は
+        // 編集ごとに毎回同じ内容が出るコード非依存のノイズなので除去する。
+        if is_lint_ruleset_incompatibility_warning(&collapsed) {
             continue;
         }
         lines.push(collapsed);
@@ -428,6 +436,18 @@ fn is_diagnostic_frame_line(line: &str) -> bool {
         && line
             .chars()
             .all(|c| matches!(c, '|' | '^' | '_' | ' ' | '\u{2500}'..='\u{257F}'))
+}
+
+/// lint ルールセット同士の非互換を知らせる設定警告かどうかを判定する。
+///
+/// ruff は互いに衝突するルール（例: D203 と D211、D212 と D213）を同時に有効化すると
+/// `warning: `X` (D203) and `Y` (D211) are incompatible. Ignoring `X`.` を **毎回**
+/// 出力する。これはルールセット（設定）に関する警告で、編集対象コードの診断ではない。
+/// ファイル編集ごとに同じ 2 行が繰り返されるため、AI へのフィードバックでは純粋な
+/// ノイズになる。ruff 固有の言い回し（`are incompatible. Ignoring`）で始まる warning 行に
+/// 限定して除去し、コード診断（`warning: unused variable` 等）は保持する。
+fn is_lint_ruleset_incompatibility_warning(line: &str) -> bool {
+    line.starts_with("warning:") && line.contains("are incompatible. Ignoring")
 }
 
 /// キャリッジリターン（`\r`）で上書きされた進捗表示を、端末で実際に表示される
@@ -1634,6 +1654,36 @@ mod tests {
         assert_eq!(
             result,
             "src/main.ts:1:7 lint/correctness/noUnusedVariables\n1 │ const x = 1;"
+        );
+    }
+
+    #[test]
+    fn test_normalize_removes_ruff_ruleset_incompatibility_warning() {
+        // ruff が毎回出力する「ルール同士が非互換」設定警告は除去し、
+        // 実際のコード診断は保持する。
+        let input = "warning: `incorrect-blank-line-before-class` (D203) and `no-blank-line-before-class` (D211) are incompatible. Ignoring `incorrect-blank-line-before-class`.\n\
+warning: `multi-line-summary-first-line` (D212) and `multi-line-summary-second-line` (D213) are incompatible. Ignoring `multi-line-summary-second-line`.\n\
+undocumented-public-module: Missing docstring in public module\n\
+--> probe.py:1:1";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("are incompatible"),
+            "ruleset incompatibility warnings should be removed: {result:?}"
+        );
+        assert!(
+            result.contains("undocumented-public-module: Missing docstring in public module"),
+            "code diagnostics must be preserved: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_real_code_warning() {
+        // 「warning:」で始まっても、コード自体の診断（非互換設定警告ではない）は保持する。
+        let input = "warning: unused variable: `x`\n--> src/main.rs:2:9";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("warning: unused variable: `x`"),
+            "real code warnings must be preserved: {result:?}"
         );
     }
 

@@ -272,10 +272,10 @@ claw-hooks hook --config /path/to/config.toml
   "version": 1,
   "hooks": {
     "preToolUse": [
-      { "command": "claw-hooks hook --format cursor" }
+      { "command": "claw-hooks hook --format cursor", "failClosed": true }
     ],
     "beforeShellExecution": [
-      { "command": "claw-hooks hook --format cursor" }
+      { "command": "claw-hooks hook --format cursor", "failClosed": true }
     ],
     "afterFileEdit": [
       { "command": "claw-hooks hook --format cursor" }
@@ -286,6 +286,8 @@ claw-hooks hook --config /path/to/config.toml
   }
 }
 ```
+
+> **コマンドブロック用フックには `failClosed: true` を推奨します。** Cursor は既定でフェイルオープンです。正常なブロック（exit 2 / `permission: deny`）は `failClosed` なしでも機能しますが、claw-hooks 自体がクラッシュ・タイムアウトした場合、`failClosed: true` を設定していないと Cursor はコマンドを通してしまいます。`afterFileEdit`/`stop` では付けません（フォーマッター/lint のクラッシュでエージェントを止めるべきではないため）。
 
 ### Windsurf (Cascade)
 

@@ -1195,6 +1195,48 @@ fn test_block_command_wrapper_rm() {
 }
 
 #[test]
+fn test_block_wrapper_wrapped_reevaluation_rm() {
+    // ラッパー（sudo/timeout）配下に再評価系コマンド（eval/xargs/find -exec）が
+    // 来ても内側の rm を検出してブロックする。以前はラッパー展開が shell -c しか
+    // 再評価せず、これらが素通り（fail-open）していた。
+    for command in [
+        "sudo eval 'rm -rf /tmp/test'",
+        "sudo xargs rm",
+        "sudo find . -exec rm {} +",
+        "timeout 10 eval 'rm -rf /tmp/test'",
+    ] {
+        let input = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
+            command.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let (stdout, _stderr, exit_code) = run_hook(&input);
+
+        assert_eq!(exit_code, 0, "{command} should be processed");
+        assert!(
+            stdout.contains(r#""permissionDecision":"deny""#),
+            "wrapper+re-eval should be blocked for {command:?}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_allow_wrapper_echo_with_dangerous_string_arg() {
+    // ラッパー配下の echo の引数にコマンド区切り文字と危険コマンド名を含む文字列が
+    // あっても、コマンド位置ではないので誤ってブロックしない（false positive 防止）。
+    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo echo '; rm -rf /tmp/test'"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(
+        exit_code, 0,
+        "sudo echo with quoted string should be allowed"
+    );
+    assert!(
+        stdout.contains(r#""permissionDecision":"allow""#),
+        "quoted argument must not be treated as a command: {stdout}"
+    );
+}
+
+#[test]
 fn test_block_bash_c_rm() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"bash -c 'rm -rf /tmp/test'"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

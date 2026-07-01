@@ -272,10 +272,10 @@ Add to `~/.cursor/hooks.json` (user) or `<project>/.cursor/hooks.json` (project)
   "version": 1,
   "hooks": {
     "preToolUse": [
-      { "command": "claw-hooks hook --format cursor" }
+      { "command": "claw-hooks hook --format cursor", "failClosed": true }
     ],
     "beforeShellExecution": [
-      { "command": "claw-hooks hook --format cursor" }
+      { "command": "claw-hooks hook --format cursor", "failClosed": true }
     ],
     "afterFileEdit": [
       { "command": "claw-hooks hook --format cursor" }
@@ -286,6 +286,8 @@ Add to `~/.cursor/hooks.json` (user) or `<project>/.cursor/hooks.json` (project)
   }
 }
 ```
+
+> **`failClosed: true` on the command-blocking hooks is recommended.** Cursor is fail-open by default: a clean block (exit 2 / `permission: deny`) works without it, but if claw-hooks itself crashes or times out, Cursor lets the command through unless `failClosed: true` is set. Leave it off for `afterFileEdit`/`stop` (a formatter/lint crash should not block the agent).
 
 ### Windsurf (Cascade)
 

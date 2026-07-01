@@ -656,55 +656,11 @@ impl ShellParser {
                         self.process_wrapper_args(&cmd_name, &args, commands);
                     }
 
-                    // AST レベルで shell -c "command" を処理
-                    if is_shell_command(&cmd_name) {
-                        if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
-                            let nested = self.extract_commands(&shell_cmd);
-                            for nested_cmd in nested {
-                                if !commands.contains(&nested_cmd) {
-                                    commands.push(nested_cmd);
-                                }
-                            }
-                        }
-                    }
-
-                    // AST レベルで env -S / --split-string を処理
-                    // env は分割文字列をコマンドとして再評価するため、内側も解析する。
-                    if matches_command(&cmd_name, "env") {
-                        if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
-                            for nested_cmd in self.extract_commands(&env_cmd) {
-                                Self::push_unique_command(commands, &nested_cmd);
-                            }
-                        }
-                    }
-
-                    // AST レベルで xargs を処理
-                    if matches_command(&cmd_name, "xargs") {
-                        if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args)
-                        {
-                            for nested_cmd in self.extract_commands(&xargs_cmd) {
-                                Self::push_unique_command(commands, &nested_cmd);
-                            }
-                        }
-                    }
-
-                    // AST レベルで eval を処理
-                    if matches_command(&cmd_name, "eval") {
-                        if let Some(eval_cmd) = Self::join_eval_args(&args) {
-                            for nested_cmd in self.extract_commands(&eval_cmd) {
-                                Self::push_unique_command(commands, &nested_cmd);
-                            }
-                        }
-                    }
-
-                    // AST レベルで find -exec/-execdir を処理
-                    if matches_command(&cmd_name, "find") {
-                        for exec_cmd in Self::extract_find_exec_commands(&args) {
-                            for nested_cmd in self.extract_commands(&exec_cmd) {
-                                Self::push_unique_command(commands, &nested_cmd);
-                            }
-                        }
-                    }
+                    // shell -c / env -S / xargs / eval / find -exec など、後続をコマンドと
+                    // して再評価する形の内側コマンドを抽出する。ラッパー配下
+                    // （process_wrapper_args）と同じヘルパを共有し、両者の実装が乖離して
+                    // 検出漏れ（fail-open）が生じるのを防ぐ。
+                    self.extract_reevaluated_inner_commands(&cmd_name, &args, commands);
                 }
                 // 引数内のコマンド置換を拾うために子ノードも再帰的に探索する。
                 // 例: echo $(yarn --version) から yarn を抽出する。
@@ -722,6 +678,64 @@ impl ShellParser {
                 // 子ノードを再帰走査する。
                 for child in node.children(&mut node.walk()) {
                     self.extract_commands_from_node(child, source, commands, depth + 1);
+                }
+            }
+        }
+    }
+
+    /// 再評価系コマンド（shell -c / env -S / xargs / eval / find -exec）の内側コマンドを
+    /// 抽出する。これらは後続の引数をコマンドとして再評価するため、内側の実コマンドを
+    /// 取りこぼすと危険コマンド検出が漏れる（fail-open）。
+    ///
+    /// トップレベル（extract_commands_from_node）とラッパー配下
+    /// （process_wrapper_args）の双方から呼ぶ。かつては両者が同じロジックを個別に
+    /// 実装しており、ラッパー側にだけ env/xargs/eval/find の再評価処理が欠けていたため、
+    /// `sudo eval "rm -rf /"` などが素通り（fail-open）していた。共通ヘルパに集約して
+    /// 再発を防ぐ。
+    #[cfg(feature = "ast-parser")]
+    fn extract_reevaluated_inner_commands(
+        &mut self,
+        cmd_name: &str,
+        args: &[String],
+        commands: &mut Vec<String>,
+    ) {
+        // shell -c "command"
+        if is_shell_command(cmd_name) {
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(args) {
+                for nested in self.extract_commands(&shell_cmd) {
+                    Self::push_unique_command(commands, &nested);
+                }
+            }
+        }
+        // env -S / --split-string（分割文字列をコマンドとして再評価）
+        if matches_command(cmd_name, "env") {
+            if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
+                for nested in self.extract_commands(&env_cmd) {
+                    Self::push_unique_command(commands, &nested);
+                }
+            }
+        }
+        // xargs（標準入力の各要素に対して実行するコマンド）
+        if matches_command(cmd_name, "xargs") {
+            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(args) {
+                for nested in self.extract_commands(&xargs_cmd) {
+                    Self::push_unique_command(commands, &nested);
+                }
+            }
+        }
+        // eval（引数をシェルとして再評価）
+        if matches_command(cmd_name, "eval") {
+            if let Some(eval_cmd) = Self::join_eval_args(args) {
+                for nested in self.extract_commands(&eval_cmd) {
+                    Self::push_unique_command(commands, &nested);
+                }
+            }
+        }
+        // find -exec/-execdir（後続の引数をコマンドとして実行）
+        if matches_command(cmd_name, "find") {
+            for exec_cmd in Self::extract_find_exec_commands(args) {
+                for nested in self.extract_commands(&exec_cmd) {
+                    Self::push_unique_command(commands, &nested);
                 }
             }
         }
@@ -1137,16 +1151,12 @@ impl ShellParser {
             // このコマンド以降の残り引数
             let remaining = &rest[command_index + 1..];
 
-            // shell -c の場合は内側のコマンドを抽出
-            if is_shell_command(&command_name) {
-                if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
-                    for nested_cmd in self.extract_commands(&shell_cmd) {
-                        if !commands.contains(&nested_cmd) {
-                            commands.push(nested_cmd);
-                        }
-                    }
-                }
-            }
+            // wrap されたコマンドが shell -c / env -S / xargs / eval / find -exec の
+            // ように後続を再評価する形なら、内側の実コマンドも抽出する。
+            // トップレベルと同じヘルパを共有し、`sudo eval "rm -rf /"` /
+            // `sudo xargs rm` / `sudo find . -exec rm {} \;` などの検出漏れ
+            // （fail-open）を防ぐ。
+            self.extract_reevaluated_inner_commands(&command_name, remaining, commands);
 
             // 次のコマンドがラッパーでなければ終了。ラッパーなら反復で辿る。
             if !is_command_wrapper(&command_name) {
@@ -1845,41 +1855,11 @@ impl ShellParser {
             self.expand_wrapper_commands_fallback(&cmd, &args, &mut commands);
         }
 
-        // shell -c "command" を処理
-        if is_shell_command(&cmd) {
-            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
-                commands.extend(self.extract_commands_fallback(&shell_cmd));
-            }
-        }
-
-        // env -S / --split-string は文字列をコマンドとして再評価するため内側も解析する。
-        // （AST 経路と同様。fallback で取りこぼすと env -S 経由で検出回避され fail-open になる）
-        if matches_command(&cmd, "env") {
-            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
-                commands.extend(self.extract_commands_fallback(&env_cmd));
-            }
-        }
-
-        // xargs を処理
-        if matches_command(&cmd, "xargs") {
-            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
-                commands.extend(self.extract_commands_fallback(&xargs_cmd));
-            }
-        }
-
-        // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
-        if matches_command(&cmd, "eval") {
-            if let Some(eval_cmd) = Self::join_eval_args(&args) {
-                commands.extend(self.extract_commands_fallback(&eval_cmd));
-            }
-        }
-
-        // find -exec/-execdir は後続の引数をコマンドとして実行する。
-        if matches_command(&cmd, "find") {
-            for exec_cmd in Self::extract_find_exec_commands(&args) {
-                commands.extend(self.extract_commands_fallback(&exec_cmd));
-            }
-        }
+        // shell -c / env -S / xargs / eval / find -exec など、後続をコマンドとして
+        // 再評価する形の内側コマンドを抽出する。ラッパー展開
+        // （expand_wrapper_commands_fallback）と同じヘルパを共有し、両者の実装が乖離して
+        // 検出漏れ（fail-open）が生じるのを防ぐ。
+        self.extract_reevaluated_inner_commands_fallback(&cmd, &args, &mut commands);
 
         // 引数中のコマンド置換を処理（例: echo $(rm -rf /tmp)）。
         for nested in Self::extract_nested_command_fragments(trimmed) {
@@ -1887,6 +1867,48 @@ impl ShellParser {
         }
 
         commands
+    }
+
+    /// 再評価系コマンド（shell -c / env -S / xargs / eval / find -exec）の内側コマンドを
+    /// 抽出する（フォールバック経路）。AST 経路の extract_reevaluated_inner_commands と
+    /// 対になり、トップレベル（extract_commands_from_segment_fallback）とラッパー展開
+    /// （expand_wrapper_commands_fallback）の双方から呼ぶ。
+    fn extract_reevaluated_inner_commands_fallback(
+        &self,
+        cmd_name: &str,
+        args: &[String],
+        commands: &mut Vec<String>,
+    ) {
+        // shell -c "command"
+        if is_shell_command(cmd_name) {
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(args) {
+                commands.extend(self.extract_commands_fallback(&shell_cmd));
+            }
+        }
+        // env -S / --split-string（分割文字列をコマンドとして再評価）
+        if matches_command(cmd_name, "env") {
+            if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
+                commands.extend(self.extract_commands_fallback(&env_cmd));
+            }
+        }
+        // xargs（標準入力の各要素に対して実行するコマンド）
+        if matches_command(cmd_name, "xargs") {
+            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(args) {
+                commands.extend(self.extract_commands_fallback(&xargs_cmd));
+            }
+        }
+        // eval（引数をシェルとして再評価）
+        if matches_command(cmd_name, "eval") {
+            if let Some(eval_cmd) = Self::join_eval_args(args) {
+                commands.extend(self.extract_commands_fallback(&eval_cmd));
+            }
+        }
+        // find -exec/-execdir（後続の引数をコマンドとして実行）
+        if matches_command(cmd_name, "find") {
+            for exec_cmd in Self::extract_find_exec_commands(args) {
+                commands.extend(self.extract_commands_fallback(&exec_cmd));
+            }
+        }
     }
 
     /// フォールバックパーサーでラッパーコマンドの実行対象を展開する。
@@ -1913,22 +1935,14 @@ impl ShellParser {
 
             let remaining = &rest[command_index + 1..];
 
-            if is_shell_command(&command_name) {
-                if let Some(shell_cmd) = Self::extract_shell_c_from_args(remaining) {
-                    commands.extend(self.extract_commands_fallback(&shell_cmd));
-                }
-            }
+            // wrap されたコマンドが shell -c / env -S / xargs / eval / find -exec の
+            // ように後続を再評価する形なら、内側の実コマンドも抽出する。トップレベルと
+            // 同じヘルパを共有する。tail を join して丸ごと再解析する方式は、
+            // `sudo echo "; rm -rf /"` のようにクォート内の区切り文字を誤って
+            // 再トークン化し誤検出（false positive）するため採用しない。
+            self.extract_reevaluated_inner_commands_fallback(&command_name, remaining, commands);
 
             if !is_command_wrapper(&command_name) {
-                // 終端コマンド（非ラッパー）が eval / xargs / find -exec / env -S の
-                // ように後続をコマンドとして再評価する形の場合、内側の実コマンドを
-                // 取りこぼさないよう末尾ごと再解析する（shell -c は上で処理済み）。
-                if !is_shell_command(&command_name) {
-                    let tail = rest[command_index..].join(" ");
-                    for nested in self.extract_commands_fallback(&tail) {
-                        Self::push_unique_command(commands, &nested);
-                    }
-                }
                 return;
             }
             wrapper_name = command_name;
@@ -2570,6 +2584,69 @@ mod tests {
             assert!(
                 commands.iter().any(|c| command_key(c) == "rm"),
                 "rm should be detected in: {input} -> {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_wrapper_reevaluation_bypasses() {
+        // ラッパー（sudo/timeout/doas 等）配下に再評価系コマンド（eval/xargs/
+        // find -exec/env -S）が来ても内側の危険コマンドを検出する。
+        // これらは以前、ラッパー展開が shell -c しか再評価しなかったため
+        // 素通り（fail-open）していた（#wrapper-reeval 対策）。
+        let mut parser = ShellParser::new();
+        for input in [
+            "sudo eval 'rm -rf /tmp/x'",
+            "sudo xargs rm",
+            r"sudo find . -exec rm {} \;",
+            "sudo env -S 'rm -rf /tmp/x'",
+            "timeout 10 eval 'rm -rf /tmp/x'",
+            "timeout 10 xargs rm",
+            "nice -n 10 find . -exec rm {} +",
+            "command eval 'rm -rf /tmp/x'",
+            // 値取得フラグを挟んでも wrap されたコマンドを正しく特定して再評価する。
+            "sudo -u root eval 'rm -rf /tmp/x'",
+            // xargs の -I（置換）や find の -execdir など別の述語形式でも検出する。
+            "sudo xargs -I {} rm {}",
+            r"sudo find . -execdir rm {} \;",
+            // env -S の中身がさらに eval 等でも再帰的に解析する。
+            "env -S 'eval rm -rf /tmp/x'",
+            // 連鎖ラッパーの終端が再評価系でも取りこぼさない。
+            "sudo sudo eval 'rm -rf /tmp/x'",
+            "busybox xargs rm",
+            "doas find . -exec kill -9 {} +",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| matches!(command_key(c).as_str(), "rm" | "kill" | "dd")),
+                "dangerous command should be detected in: {input} -> {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_commands_wrapper_reevaluation_no_false_positive() {
+        // ラッパー配下の非再評価系コマンド（echo/printf 等）の引数に危険コマンド名を
+        // 含む文字列があっても、それはコマンド位置ではないので検出しない。
+        // tail を join して丸ごと再解析する方式ではクォート内の `;` を再トークン化して
+        // `rm` を誤検出（false positive / 過剰ブロック）してしまうため、
+        // 再評価系ヘルパを直接適用する方式で回避している。
+        let mut parser = ShellParser::new();
+        for input in [
+            "sudo echo '; rm -rf /tmp/x'",
+            "sudo echo 'rm -rf /tmp/x'",
+            "timeout 10 echo '; rm -rf /'",
+            "sudo printf 'rm %s' /tmp/x",
+            // rm が find の -name の値や grep の検索語として現れてもコマンド位置ではない。
+            "sudo find . -name rm",
+            "sudo grep -r rm /etc",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                !commands.iter().any(|c| command_key(c) == "rm"),
+                "rm must NOT be detected (it is a quoted argument) in: {input} -> {commands:?}"
             );
         }
     }

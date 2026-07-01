@@ -1920,6 +1920,15 @@ impl ShellParser {
             }
 
             if !is_command_wrapper(&command_name) {
+                // 終端コマンド（非ラッパー）が eval / xargs / find -exec / env -S の
+                // ように後続をコマンドとして再評価する形の場合、内側の実コマンドを
+                // 取りこぼさないよう末尾ごと再解析する（shell -c は上で処理済み）。
+                if !is_shell_command(&command_name) {
+                    let tail = rest[command_index..].join(" ");
+                    for nested in self.extract_commands_fallback(&tail) {
+                        Self::push_unique_command(commands, &nested);
+                    }
+                }
                 return;
             }
             wrapper_name = command_name;

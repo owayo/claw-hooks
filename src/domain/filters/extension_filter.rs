@@ -505,11 +505,11 @@ mod tests {
     }
 
     #[test]
-    fn test_does_not_apply_to_before_prompt_event() {
+    fn test_does_not_apply_to_passthrough_event() {
         let filter = create_filter_with_go_hooks();
 
         let input = HookInput {
-            event: HookEvent::BeforePrompt,
+            event: HookEvent::Passthrough,
             tool_name: "UserPrompt".to_string(),
             tool_input: ToolInput::Stop(crate::domain::StopInput::default()),
             session_id: None,

@@ -48,7 +48,7 @@ pub enum HookEvent {
     /// Codex）が claw-hooks のスコープ外とみなすイベント
     /// （`SessionStart` / `UserPromptSubmit` / `PreInvocation` / 非シェルの
     /// `preToolUse` など）をこの variant にマップする。常に Allow で素通しする。
-    BeforePrompt,
+    Passthrough,
 
     /// サブエージェント起動前。
     ///
@@ -364,13 +364,13 @@ mod tests {
         assert_eq!(HookEvent::BeforeCommand, HookEvent::BeforeCommand);
         assert_eq!(HookEvent::AfterFileEdit, HookEvent::AfterFileEdit);
         assert_eq!(HookEvent::Stop, HookEvent::Stop);
-        assert_eq!(HookEvent::BeforePrompt, HookEvent::BeforePrompt);
+        assert_eq!(HookEvent::Passthrough, HookEvent::Passthrough);
         assert_eq!(HookEvent::SubagentStart, HookEvent::SubagentStart);
         assert_eq!(HookEvent::SubagentStop, HookEvent::SubagentStop);
 
         assert_ne!(HookEvent::BeforeCommand, HookEvent::AfterFileEdit);
         assert_ne!(HookEvent::BeforeCommand, HookEvent::Stop);
-        assert_ne!(HookEvent::BeforeCommand, HookEvent::BeforePrompt);
+        assert_ne!(HookEvent::BeforeCommand, HookEvent::Passthrough);
         assert_ne!(HookEvent::SubagentStart, HookEvent::SubagentStop);
     }
 
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(format!("{:?}", HookEvent::BeforeCommand), "BeforeCommand");
         assert_eq!(format!("{:?}", HookEvent::AfterFileEdit), "AfterFileEdit");
         assert_eq!(format!("{:?}", HookEvent::Stop), "Stop");
-        assert_eq!(format!("{:?}", HookEvent::BeforePrompt), "BeforePrompt");
+        assert_eq!(format!("{:?}", HookEvent::Passthrough), "Passthrough");
         assert_eq!(format!("{:?}", HookEvent::SubagentStart), "SubagentStart");
         assert_eq!(format!("{:?}", HookEvent::SubagentStop), "SubagentStop");
     }
@@ -502,13 +502,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decision_into_output_before_prompt_event() {
+    fn test_decision_into_output_passthrough_event() {
         let decision = Decision::allow();
-        let output = decision.into_output(HookEvent::BeforePrompt);
+        let output = decision.into_output(HookEvent::Passthrough);
 
-        // BeforePrompt Allow: トップレベルに decision を含めない
+        // Passthrough Allow: トップレベルに decision を含めない
         assert!(output.decision.is_none());
-        // BeforePrompt イベントでは hookSpecificOutput なし
+        // Passthrough イベントでは hookSpecificOutput なし
         assert!(output.hook_specific_output.is_none());
     }
 
@@ -651,12 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn test_decision_into_output_block_before_prompt() {
-        // BeforePrompt Block もトップレベル decision/reason を使用する。
+    fn test_decision_into_output_block_passthrough() {
+        // Passthrough Block もトップレベル decision/reason を使用する。
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        let output = decision.into_output(HookEvent::BeforePrompt);
+        let output = decision.into_output(HookEvent::Passthrough);
         assert_eq!(output.decision, Some("block".to_string()));
         assert_eq!(output.reason, Some("blocked".to_string()));
         assert!(output.hook_specific_output.is_none());

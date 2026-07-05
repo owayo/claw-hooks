@@ -166,7 +166,7 @@ mod tests {
                 session_id: None,
             },
             HookInput {
-                event: HookEvent::BeforePrompt,
+                event: HookEvent::Passthrough,
                 tool_name: "UnknownEvent".to_string(),
                 tool_input: ToolInput::Other(serde_json::json!({
                     "prompt": "other secret",

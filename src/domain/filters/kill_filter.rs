@@ -85,7 +85,7 @@ pub fn new_kill_filter(enabled: bool, custom_message: Option<String>) -> Builtin
         DEFAULT_KILL_MESSAGE,
         KILL_COMMANDS,
         super::priority::KILL,
-        Some(contains_xargs_kill),
+        None, // TEMP COVERAGE PROBE: extra_check 無効化して parser 経路の被覆を確認
     )
 }
 

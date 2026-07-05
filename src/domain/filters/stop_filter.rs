@@ -13,8 +13,9 @@ use crate::domain::{Decision, HookEvent, HookInput};
 
 /// プロセス間の再帰的な Stop フック実行を防止する環境変数。
 /// claw-hooks が Stop フックを実行する際、子プロセスにこの環境変数を設定する。
-/// 子プロセス（例: git-sc → Gemini CLI）が別の claw-hooks Stop イベントをトリガーした場合、
-/// この環境変数が継承され、Stop フックをスキップしてループを断ち切る。
+/// 子プロセス（例: git-sc が起動する別の AI エージェント CLI）が別の claw-hooks
+/// Stop イベントをトリガーした場合、この環境変数が継承され、Stop フックをスキップ
+/// してループを断ち切る。
 const STOP_ACTIVE_ENV: &str = "CLAW_HOOKS_STOP_ACTIVE";
 
 /// Stop イベントフックのフィルター。

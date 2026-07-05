@@ -179,7 +179,7 @@ impl HookService {
             }
             HookEvent::AfterFileEdit => self.handle_after_file_edit(input),
             HookEvent::Stop => self.handle_stop(input),
-            HookEvent::BeforePrompt => self.handle_before_prompt(input),
+            HookEvent::Passthrough => self.handle_passthrough(input),
             HookEvent::SubagentStart | HookEvent::SubagentStop => self.handle_subagent(input),
         }
     }
@@ -219,16 +219,16 @@ impl HookService {
         self.filter_chain.execute(input)
     }
 
-    /// BeforePrompt イベントの処理。
+    /// Passthrough イベントの処理。
     ///
-    /// BeforePrompt は claw-hooks が対応しない/スコープ外のイベント
+    /// Passthrough は claw-hooks が対応しない/スコープ外のイベント
     /// （SessionStart / UserPromptSubmit や各エージェント固有の未対応イベント等）を
-    /// 集約するパススルー用のマーカーとして扱う。claw-hooks は意図的に
+    /// 集約するパススルー用のマーカー。claw-hooks は意図的に
     /// コマンドブロック・保存後フック・Stop フック・サブエージェント通知に機能を
     /// 限定しており、ライフサイクル/プロンプトのオーケストレーションには踏み込まない。
     /// そのため常に Allow を返す。
-    fn handle_before_prompt(&self, _input: &HookInput) -> Decision {
-        debug!("Handling BeforePrompt event");
+    fn handle_passthrough(&self, _input: &HookInput) -> Decision {
+        debug!("Handling Passthrough event");
 
         // スコープ外イベントは常に許可（パススルー）
         Decision::allow()
@@ -404,11 +404,11 @@ mod tests {
     }
 
     #[test]
-    fn test_process_before_prompt_allows() {
+    fn test_process_passthrough_allows() {
         let service = make_service();
         let input = HookInput {
-            event: HookEvent::BeforePrompt,
-            tool_name: "BeforePrompt".to_string(),
+            event: HookEvent::Passthrough,
+            tool_name: "Passthrough".to_string(),
             tool_input: ToolInput::Other(serde_json::json!({})),
             session_id: None,
         };

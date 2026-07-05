@@ -295,11 +295,11 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     "{} unsupported event, passing through", self.log_prefix()
                 );
                 return Ok(HookInput {
-                    event: HookEvent::BeforePrompt, // パススルー用
+                    event: HookEvent::Passthrough, // パススルー用
                     tool_name: raw_event,
                     tool_input: raw
                         .get("tool_input")
@@ -471,12 +471,12 @@ impl FormatAdapter {
                         agent = self.format.label(),
                         hook_type = "preToolUse",
                         tool_name = %tool_name,
-                        mapped_event = ?HookEvent::BeforePrompt,
+                        mapped_event = ?HookEvent::Passthrough,
                         "{} unsupported preToolUse tool, passing through", self.log_prefix()
                     );
 
                     return Ok(HookInput {
-                        event: HookEvent::BeforePrompt,
+                        event: HookEvent::Passthrough,
                         tool_name,
                         tool_input: crate::domain::ToolInput::Other(raw),
                         session_id: None,
@@ -614,12 +614,12 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     "{} unsupported event, passing through", self.log_prefix()
                 );
 
                 Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
+                    event: HookEvent::Passthrough,
                     tool_name: event_name.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id: None,
@@ -737,12 +737,12 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     agent_action_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     "{} unsupported action, passing through", self.log_prefix()
                 );
 
                 return Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
+                    event: HookEvent::Passthrough,
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id: None,
@@ -988,7 +988,7 @@ impl FormatAdapter {
             // claw-hooks の処理対象外イベント: パススルーで Allow を返す
             "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
                 return Ok(HookInput {
-                    event: HookEvent::BeforePrompt, // パススルー用
+                    event: HookEvent::Passthrough, // パススルー用
                     tool_name: raw_event,
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id,
@@ -997,7 +997,7 @@ impl FormatAdapter {
             other => {
                 debug!(event = %other, "{} unknown event, treating as passthrough", self.log_prefix());
                 return Ok(HookInput {
-                    event: HookEvent::BeforePrompt, // パススルー用
+                    event: HookEvent::Passthrough, // パススルー用
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id,
@@ -1305,11 +1305,11 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = %raw_event,
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     "{} event is out of scope for claw-hooks, passing through", self.log_prefix()
                 );
                 Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
+                    event: HookEvent::Passthrough,
                     tool_name: raw_event,
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id,
@@ -1319,11 +1319,11 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     "{} unsupported event, passing through", self.log_prefix()
                 );
                 Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
+                    event: HookEvent::Passthrough,
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw),
                     session_id,
@@ -1387,13 +1387,13 @@ impl FormatAdapter {
                 debug!(
                     agent = self.format.label(),
                     raw_event = "PreToolUse",
-                    mapped_event = ?HookEvent::BeforePrompt,
+                    mapped_event = ?HookEvent::Passthrough,
                     raw_tool_name = other,
                     "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
                 );
 
                 Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
+                    event: HookEvent::Passthrough,
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(raw_args.clone()),
                     session_id,
@@ -1449,9 +1449,9 @@ impl FormatAdapter {
             }
             // Stop の Allow は {} を返す（"decision":"continue" 以外なら停止許可、最も無害な空オブジェクト）。
             (HookEvent::Stop, Decision::Allow { .. }) => serde_json::json!({}),
-            // PostToolUse / 内部 BeforePrompt（PreInvocation / PostInvocation / 未対応ツール）は
+            // PostToolUse / 内部 Passthrough（PreInvocation / PostInvocation / 未対応ツール）は
             // ブロック仕様が無いため、claw-hooks 側で Block を検出しても {} に倒す（公式仕様準拠）。
-            (HookEvent::AfterFileEdit, _) | (HookEvent::BeforePrompt, _) => serde_json::json!({}),
+            (HookEvent::AfterFileEdit, _) | (HookEvent::Passthrough, _) => serde_json::json!({}),
             // PreToolUse の Block は deny として返す（Antigravity 公式の主形式）。
             (_, Decision::Block { message }) => {
                 let truncated = self.normalize_and_truncate(message);
@@ -2597,8 +2597,8 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        // SessionStart は処理対象外 → BeforePrompt（パススルー）にマッピング
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        // SessionStart は処理対象外 → Passthrough（パススルー）にマッピング
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionStart");
     }
 
@@ -2613,8 +2613,8 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        // UserPromptSubmit は処理対象外 → BeforePrompt（パススルー）にマッピング
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        // UserPromptSubmit は処理対象外 → Passthrough（パススルー）にマッピング
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "UserPromptSubmit");
     }
 
@@ -2628,7 +2628,7 @@ mod tests {
 
         // 未知イベントは Stop にフォールバックせず、パススルーになること
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
     }
 
     #[test]
@@ -2758,7 +2758,7 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionStart");
     }
 
@@ -2771,7 +2771,7 @@ mod tests {
         }"#;
 
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "UserPromptSubmit");
     }
 
@@ -2803,7 +2803,7 @@ mod tests {
             .expect("未知イベントはパススルーされるべき");
         assert!(matches!(
             parsed.event,
-            crate::domain::HookEvent::BeforePrompt
+            crate::domain::HookEvent::Passthrough
         ));
     }
 
@@ -2820,7 +2820,7 @@ mod tests {
         // hook_event_name がない空オブジェクトは未対応イベントとしてパススルー
         let input = r#"{}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
     }
 
     #[test]
@@ -2830,7 +2830,7 @@ mod tests {
         let input =
             r#"{"hook_event_name":"afterShellExecution","command":"echo test","output":"test"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "afterShellExecution");
     }
 
@@ -2854,7 +2854,7 @@ mod tests {
         // command を持たないツールは claw-hooks の責務外としてパススルーする
         let input = r#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"path":"README.md"}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "Read");
     }
 
@@ -2867,7 +2867,7 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(
             result.event,
-            HookEvent::BeforePrompt,
+            HookEvent::Passthrough,
             "afterShellExecution が BeforeCommand に誤マッチしてはならない"
         );
         assert_ne!(result.event, HookEvent::BeforeCommand);
@@ -2888,7 +2888,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "unknown_action");
     }
 
@@ -3407,42 +3407,42 @@ mod tests {
     // === Claude パススルーイベントのテスト ===
 
     #[test]
-    fn test_claude_session_start_maps_to_before_prompt() {
-        // SessionStart → BeforePrompt にマップ
+    fn test_claude_session_start_maps_to_passthrough() {
+        // SessionStart → Passthrough にマップ
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name": "SessionStart", "session_id": "s1"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionStart");
     }
 
     #[test]
-    fn test_claude_user_prompt_submit_maps_to_before_prompt() {
-        // UserPromptSubmit → BeforePrompt にマップ
+    fn test_claude_user_prompt_submit_maps_to_passthrough() {
+        // UserPromptSubmit → Passthrough にマップ
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name": "UserPromptSubmit", "session_id": "s1"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "UserPromptSubmit");
     }
 
     #[test]
-    fn test_claude_session_end_maps_to_before_prompt() {
-        // SessionEnd → BeforePrompt にマップ
+    fn test_claude_session_end_maps_to_passthrough() {
+        // SessionEnd → Passthrough にマップ
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name": "SessionEnd", "session_id": "s1"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionEnd");
     }
 
     #[test]
-    fn test_claude_notification_maps_to_before_prompt() {
-        // Notification → BeforePrompt にマップ
+    fn test_claude_notification_maps_to_passthrough() {
+        // Notification → Passthrough にマップ
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name": "Notification", "session_id": "s1"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "Notification");
     }
 
@@ -3748,7 +3748,7 @@ mod tests {
             .expect("未知イベントはパススルーされるべき");
         assert!(matches!(
             parsed.event,
-            crate::domain::HookEvent::BeforePrompt
+            crate::domain::HookEvent::Passthrough
         ));
     }
 
@@ -3777,8 +3777,8 @@ mod tests {
             let result = adapter.parse_input(&input).unwrap();
             assert_eq!(
                 result.event,
-                HookEvent::BeforePrompt,
-                "パススル���イベント {} は BeforePrompt にマッピングされるべき",
+                HookEvent::Passthrough,
+                "パススル���イベント {} は Passthrough にマッピングされるべき",
                 event_name
             );
             assert_eq!(result.tool_name, event_name);
@@ -3792,7 +3792,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let input = r#"{"agent_action_name":"unknown_action","tool_info":{}}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "unknown_action");
     }
 
@@ -3846,7 +3846,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"FutureEvent","data":"test"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "FutureEvent");
     }
 
@@ -4081,14 +4081,14 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_pre_tool_use_write_to_file_is_passthrough() {
         // Antigravity の write_to_file は claw-hooks のコマンドブロックの対象外。
-        // BeforePrompt（パススルー）にマップされる。
+        // Passthrough（パススルー）にマップされる。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"PreToolUse",
             "toolCall":{"name":"write_to_file","args":{"TargetFile":"/workspace/foo.rs","Overwrite":false,"CodeContent":"fn main(){}"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "write_to_file");
     }
 
@@ -4100,7 +4100,7 @@ mod tests {
             "toolCall":{"name":"replace_file_content","args":{"TargetFile":"/workspace/foo.rs"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "replace_file_content");
     }
 
@@ -4132,7 +4132,7 @@ mod tests {
             "conversationId":"abc-123"
         }"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "PostToolUse");
         assert_eq!(result.session_id, Some("abc-123".to_string()));
     }
@@ -4142,7 +4142,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{"hook_event_name":"PreInvocation","invocationNum":3,"initialNumSteps":10}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "PreInvocation");
     }
 
@@ -4152,7 +4152,7 @@ mod tests {
         let input =
             r#"{"hook_event_name":"PostInvocation","invocationNum":3,"initialNumSteps":10}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "PostInvocation");
     }
 
@@ -4203,7 +4203,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{"hook_event_name":"SomeNewEvent","conversationId":"abc-123"}"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::BeforePrompt);
+        assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SomeNewEvent");
     }
 
@@ -4283,11 +4283,11 @@ mod tests {
 
     #[test]
     fn test_agy_output_passthrough_event_always_empty() {
-        // BeforePrompt（PreInvocation / PostInvocation / 未対応イベントが内部マップされる先）は
+        // Passthrough（PreInvocation / PostInvocation / 未対応イベントが内部マップされる先）は
         // ブロック仕様が無いため常に {} を返す。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let allow = adapter
-            .format_output(&Decision::allow(), HookEvent::BeforePrompt)
+            .format_output(&Decision::allow(), HookEvent::Passthrough)
             .unwrap();
         assert_eq!(allow, "{}");
         let block = adapter
@@ -4295,7 +4295,7 @@ mod tests {
                 &Decision::Block {
                     message: "blocked".to_string(),
                 },
-                HookEvent::BeforePrompt,
+                HookEvent::Passthrough,
             )
             .unwrap();
         assert_eq!(block, "{}");
@@ -4394,7 +4394,7 @@ mod tests {
             HookEvent::BeforeCommand,
             HookEvent::AfterFileEdit,
             HookEvent::Stop,
-            HookEvent::BeforePrompt,
+            HookEvent::Passthrough,
         ] {
             assert!(!adapter.use_stderr(&block, event));
             assert!(!adapter.use_stderr(&Decision::allow(), event));

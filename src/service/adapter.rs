@@ -444,158 +444,6 @@ impl FormatAdapter {
             "subagentStop" => self.parse_cursor_subagent_stop(raw),
             // 未対応イベント（afterShellExecution, postToolUse 等）は
             // パススルーとして処理し、ブロックしない
-            "__unused_preToolUse_placeholder__" => {
-                let tool_name = raw
-                    .get("tool_name")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("Missing tool_name for Cursor preToolUse"))?
-                    .to_string();
-
-                if tool_name != "Shell" && tool_name != "Bash" {
-                    debug!(
-                        agent = self.format.label(),
-                        hook_type = "preToolUse",
-                        tool_name = %tool_name,
-                        mapped_event = ?HookEvent::Passthrough,
-                        "{} unsupported preToolUse tool, passing through", self.log_prefix()
-                    );
-
-                    return Ok(HookInput {
-                        event: HookEvent::Passthrough,
-                        tool_name,
-                        tool_input: crate::domain::ToolInput::Other(raw),
-                        session_id: None,
-                    });
-                }
-
-                let command = raw
-                    .get("tool_input")
-                    .and_then(|v| v.get("command"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| anyhow!("Missing tool_input.command for Cursor preToolUse"))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "preToolUse",
-                    raw_tool_name = %tool_name,
-                    command_bytes = command.len(),
-                    mapped_event = ?HookEvent::BeforeCommand,
-                    mapped_tool = "Bash",
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::BeforeCommand,
-                    tool_name: "Bash".to_string(),
-                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                        command: command.to_string(),
-                        timeout: None,
-                    }),
-                    session_id: None,
-                })
-            }
-            "afterFileEdit" | "afterTabFileEdit" => {
-                let parsed: CursorFileEditInput = serde_json::from_value(raw)
-                    .map_err(|e| anyhow!("Failed to parse Cursor afterFileEdit: {}", e))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = event_name,
-                    file_path_bytes = parsed.file_path.len(),
-                    mapped_event = ?HookEvent::AfterFileEdit,
-                    mapped_tool = "Write",
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::AfterFileEdit,
-                    tool_name: "Write".to_string(),
-                    tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
-                        file_path: parsed.file_path,
-                        content: None,
-                    }),
-                    session_id: None,
-                })
-            }
-            "stop" => {
-                let parsed: CursorStopInput = serde_json::from_value(raw)
-                    .map_err(|e| anyhow!("Failed to parse Cursor stop: {}", e))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "stop",
-                    status = %parsed.status,
-                    loop_count = ?parsed.loop_count,
-                    mapped_event = ?HookEvent::Stop,
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::Stop,
-                    tool_name: "Stop".to_string(),
-                    tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                        status: Some(parsed.status),
-                        loop_count: parsed.loop_count,
-                        response: None,
-                        agent_message: None,
-                        stop_hook_active: false,
-                    }),
-                    session_id: None,
-                })
-            }
-            "subagentStart" => {
-                let parsed: CursorSubagentStartInput = serde_json::from_value(raw)
-                    .map_err(|e| anyhow!("Failed to parse Cursor subagentStart: {}", e))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "subagentStart",
-                    subagent_type = %parsed.subagent_type,
-                    mapped_event = ?HookEvent::SubagentStart,
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::SubagentStart,
-                    tool_name: "SubagentStart".to_string(),
-                    tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                        subagent_type: Some(parsed.subagent_type),
-                        prompt: parsed.prompt,
-                        status: None,
-                        duration: None,
-                    }),
-                    session_id: None,
-                })
-            }
-            "subagentStop" => {
-                let parsed: CursorSubagentStopInput = serde_json::from_value(raw)
-                    .map_err(|e| anyhow!("Failed to parse Cursor subagentStop: {}", e))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "subagentStop",
-                    subagent_type = %parsed.subagent_type,
-                    status = %parsed.subagent_status,
-                    mapped_event = ?HookEvent::SubagentStop,
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::SubagentStop,
-                    tool_name: "SubagentStop".to_string(),
-                    tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                        subagent_type: Some(parsed.subagent_type),
-                        prompt: None,
-                        status: Some(parsed.subagent_status),
-                        duration: parsed.duration,
-                    }),
-                    session_id: None,
-                })
-            }
-            // 未対応イベント（afterShellExecution, postToolUse 等）は
-            // パススルーとして処理し、ブロックしない
             other => {
                 debug!(
                     agent = self.format.label(),
@@ -612,6 +460,196 @@ impl FormatAdapter {
                 })
             }
         }
+    }
+
+    /// Cursor の beforeShellExecution をパースして内部 HookInput に変換する。
+    fn parse_cursor_before_shell(&self, raw: serde_json::Value) -> Result<HookInput> {
+        let parsed: CursorShellInput = serde_json::from_value(raw)
+            .map_err(|e| anyhow!("Failed to parse Cursor beforeShellExecution: {}", e))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = "beforeShellExecution",
+            command_bytes = parsed.command.len(),
+            has_cwd = parsed.cwd.is_some(),
+            mapped_event = ?HookEvent::BeforeCommand,
+            mapped_tool = "Bash",
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                command: parsed.command,
+                timeout: None,
+            }),
+            session_id: None,
+        })
+    }
+
+    /// Cursor の preToolUse（Shell/Bash のみ対象）をパースして内部 HookInput に変換する。
+    fn parse_cursor_pre_tool_use(&self, raw: serde_json::Value) -> Result<HookInput> {
+        let tool_name = raw
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing tool_name for Cursor preToolUse"))?
+            .to_string();
+
+        if tool_name != "Shell" && tool_name != "Bash" {
+            debug!(
+                agent = self.format.label(),
+                hook_type = "preToolUse",
+                tool_name = %tool_name,
+                mapped_event = ?HookEvent::Passthrough,
+                "{} unsupported preToolUse tool, passing through", self.log_prefix()
+            );
+
+            return Ok(HookInput {
+                event: HookEvent::Passthrough,
+                tool_name,
+                tool_input: crate::domain::ToolInput::Other(raw),
+                session_id: None,
+            });
+        }
+
+        let command = raw
+            .get("tool_input")
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("Missing tool_input.command for Cursor preToolUse"))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = "preToolUse",
+            raw_tool_name = %tool_name,
+            command_bytes = command.len(),
+            mapped_event = ?HookEvent::BeforeCommand,
+            mapped_tool = "Bash",
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                command: command.to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        })
+    }
+
+    /// Cursor の afterFileEdit / afterTabFileEdit をパースして内部 HookInput に変換する。
+    fn parse_cursor_after_file_edit(
+        &self,
+        raw: serde_json::Value,
+        event_name: &str,
+    ) -> Result<HookInput> {
+        let parsed: CursorFileEditInput = serde_json::from_value(raw)
+            .map_err(|e| anyhow!("Failed to parse Cursor afterFileEdit: {}", e))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = event_name,
+            file_path_bytes = parsed.file_path.len(),
+            mapped_event = ?HookEvent::AfterFileEdit,
+            mapped_tool = "Write",
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
+                file_path: parsed.file_path,
+                content: None,
+            }),
+            session_id: None,
+        })
+    }
+
+    /// Cursor の stop をパースして内部 Stop HookInput に変換する。
+    fn parse_cursor_stop(&self, raw: serde_json::Value) -> Result<HookInput> {
+        let parsed: CursorStopInput = serde_json::from_value(raw)
+            .map_err(|e| anyhow!("Failed to parse Cursor stop: {}", e))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = "stop",
+            status = %parsed.status,
+            loop_count = ?parsed.loop_count,
+            mapped_event = ?HookEvent::Stop,
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                status: Some(parsed.status),
+                loop_count: parsed.loop_count,
+                response: None,
+                agent_message: None,
+                stop_hook_active: false,
+            }),
+            session_id: None,
+        })
+    }
+
+    /// Cursor の subagentStart をパースして内部 HookInput に変換する。
+    fn parse_cursor_subagent_start(&self, raw: serde_json::Value) -> Result<HookInput> {
+        let parsed: CursorSubagentStartInput = serde_json::from_value(raw)
+            .map_err(|e| anyhow!("Failed to parse Cursor subagentStart: {}", e))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = "subagentStart",
+            subagent_type = %parsed.subagent_type,
+            mapped_event = ?HookEvent::SubagentStart,
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::SubagentStart,
+            tool_name: "SubagentStart".to_string(),
+            tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                subagent_type: Some(parsed.subagent_type),
+                prompt: parsed.prompt,
+                status: None,
+                duration: None,
+            }),
+            session_id: None,
+        })
+    }
+
+    /// Cursor の subagentStop をパースして内部 HookInput に変換する。
+    fn parse_cursor_subagent_stop(&self, raw: serde_json::Value) -> Result<HookInput> {
+        let parsed: CursorSubagentStopInput = serde_json::from_value(raw)
+            .map_err(|e| anyhow!("Failed to parse Cursor subagentStop: {}", e))?;
+
+        debug!(
+            agent = self.format.label(),
+            hook_type = "subagentStop",
+            subagent_type = %parsed.subagent_type,
+            status = %parsed.subagent_status,
+            mapped_event = ?HookEvent::SubagentStop,
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event: HookEvent::SubagentStop,
+            tool_name: "SubagentStop".to_string(),
+            tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                subagent_type: Some(parsed.subagent_type),
+                prompt: None,
+                status: Some(parsed.subagent_status),
+                duration: parsed.duration,
+            }),
+            session_id: None,
+        })
     }
 
     fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
@@ -992,31 +1030,7 @@ impl FormatAdapter {
         };
 
         if event == HookEvent::Stop {
-            let agent_message = raw
-                .get("last_assistant_message")
-                .or_else(|| raw.get("stop_reason"))
-                .or_else(|| raw.get("message"))
-                .or_else(|| raw.get("response"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let stop_hook_active = raw
-                .get("stop_hook_active")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            return Ok(HookInput {
-                event,
-                tool_name: "Stop".to_string(),
-                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                    status: None,
-                    loop_count: None,
-                    response: None,
-                    agent_message,
-                    stop_hook_active,
-                }),
-                session_id,
-            });
+            return Ok(Self::parse_codex_stop(&raw, session_id));
         }
 
         if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {

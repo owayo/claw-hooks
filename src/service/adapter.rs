@@ -1050,8 +1050,10 @@ impl FormatAdapter {
             "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
             "SubagentStart" | "subagent_start" => HookEvent::SubagentStart,
             "SubagentStop" | "subagent_stop" => HookEvent::SubagentStop,
-            // claw-hooks の処理対象外イベント: パススルーで Allow を返す
-            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
+            // claw-hooks の処理対象外イベント: ライフサイクル/プロンプト/コンパクション系は
+            // 危険コマンドブロック・保存後フック・Stop フックの責務外なので Allow で素通しする。
+            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit"
+            | "PreCompact" | "pre_compact" | "PostCompact" | "post_compact" => {
                 return Ok(HookInput {
                     event: HookEvent::Passthrough, // パススルー用
                     tool_name: raw_event,
@@ -2706,6 +2708,27 @@ mod tests {
         // UserPromptSubmit は処理対象外 → Passthrough（パススルー）にマッピング
         assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "UserPromptSubmit");
+    }
+
+    #[test]
+    fn test_codex_input_parsing_compact_events_passthrough() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+
+        for event in ["PreCompact", "PostCompact"] {
+            let input = format!(
+                r#"{{
+                    "hook_event_name": "{event}",
+                    "session_id": "abc-123",
+                    "turn_id": "turn-1",
+                    "trigger": "manual"
+                }}"#
+            );
+
+            let result = adapter.parse_input(&input).unwrap();
+            // Codex のコンパクションイベントは claw-hooks の責務外なのでパススルーする。
+            assert_eq!(result.event, HookEvent::Passthrough);
+            assert_eq!(result.tool_name, event);
+        }
     }
 
     #[test]

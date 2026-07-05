@@ -808,7 +808,7 @@ Standard `hook_event_name` + `tool_name` + `tool_input` schema. `apply_patch`'s 
 
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
-| `SessionStart` / `UserPromptSubmit` | pass-through allow |
+| `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | pass-through allow |
 | `PreToolUse` | BeforeCommand |
 | `PermissionRequest` | command guard before approval prompts (deny for dangerous Bash, `{}` for safe) |
 | `PostToolUse` | AfterFileEdit (`Bash` pass-through; `apply_patch` → MultiEdit) |

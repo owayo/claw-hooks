@@ -808,7 +808,7 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
-| `SessionStart` / `UserPromptSubmit` | パススルー allow |
+| `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | パススルー allow |
 | `PreToolUse` | BeforeCommand |
 | `PermissionRequest` | 承認プロンプト前のコマンドガード（危険な Bash は deny、安全なら `{}`） |
 | `PostToolUse` | AfterFileEdit（`Bash` パススルー、`apply_patch` → MultiEdit） |

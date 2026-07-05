@@ -153,7 +153,7 @@ cargo run -- version     # Show version
 - Official docs: https://antigravity.google/docs/customizations/hooks
 
 ### Codex CLI
-- Supports these hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`
+- Supports these hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Stop`
 - Use `--format codex` when testing
 - Allow output: `{}` (empty JSON, exit 0)
 - PreToolUse Block output: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式。legacy の `{"decision":"block"}` も受理されるが使用しない）
@@ -163,6 +163,7 @@ cargo run -- version     # Show version
 - PermissionRequest の parse error も PermissionRequest 専用 deny schema で返す
 - PreToolUse の parse error も PreToolUse 推奨形式（`hookSpecificOutput.permissionDecision="deny"`）で返す。イベント名が判別できない入力は legacy block 形式（全イベント共通で受理される）にフォールバック
 - PostToolUse の追加コンテキストは `hookSpecificOutput.additionalContext` で返す
+- Codex `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` は claw-hooks のスコープ外として allow パススルー
 - Codex `PreToolUse` / `PermissionRequest` / `PostToolUse` は `Bash` と `apply_patch` を受け取る。`apply_patch` は `MultiEdit` にマップし、patch コマンドから変更ファイルパスを抽出する
 - Codex `SubagentStart` / `SubagentStop` は内部通知イベントとして扱う。NanoBuddy 用に `ToolInput::Subagent` へマップするが、README.md / README.ja.md には記載しない
 - Official docs: https://developers.openai.com/codex/hooks

@@ -30,7 +30,7 @@ pub enum HookEvent {
     /// - Claude Code: `PostToolUse`（`Write` / `Edit` の保存後）
     /// - Cursor: `afterFileEdit`, `afterTabFileEdit`
     /// - Windsurf: `post_write_code`
-    /// - Codex CLI: `PostToolUse`（現行ランタイムは `Bash` 出力のパススルーのみ）
+    /// - Codex CLI: `PostToolUse`（`Bash` はパススルー、`apply_patch` は変更ファイルを抽出）
     AfterFileEdit,
 
     /// エージェントループ停止。

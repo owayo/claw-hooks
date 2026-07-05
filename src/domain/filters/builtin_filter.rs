@@ -10,8 +10,6 @@ pub struct BuiltinCommandFilter {
     message: String,
     commands: &'static [&'static str],
     priority: u32,
-    /// 追加のコマンド検出ロジック（KillFilter の xargs チェック用）
-    extra_check: Option<fn(&str) -> bool>,
 }
 
 impl BuiltinCommandFilter {
@@ -22,35 +20,28 @@ impl BuiltinCommandFilter {
         default_message: &str,
         commands: &'static [&'static str],
         priority: u32,
-        extra_check: Option<fn(&str) -> bool>,
     ) -> Self {
         Self {
             enabled,
             message: custom_message.unwrap_or_else(|| default_message.to_string()),
             commands,
             priority,
-            extra_check,
         }
     }
 
     /// コマンド文字列にブロック対象のコマンドが含まれるか判定する。
+    ///
+    /// 検出はパーサーの `extract_commands` に一本化する。パーサーは xargs
+    /// （`xargs -I` / `xargs sh -c` 等）を含む実行委譲を展開して内側コマンドを
+    /// 抽出済みのため、xargs 経由の kill もこの主経路で検出される。
     fn contains_blocked_command(&self, command: &str) -> bool {
         let mut parser = ShellParser::new();
         let extracted = parser.extract_commands(command);
 
-        if extracted.iter().any(|cmd| {
+        extracted.iter().any(|cmd| {
             let key = command_key(cmd);
             self.commands.iter().any(|blocked| *blocked == key)
-        }) {
-            return true;
-        }
-
-        // 追加チェック（例: xargs 経由の kill）
-        if let Some(check) = self.extra_check {
-            return check(command);
-        }
-
-        false
+        })
     }
 }
 
@@ -92,41 +83,40 @@ mod tests {
     use crate::domain::test_helpers::make_bash_input;
     use crate::domain::{FileOperationInput, ToolInput};
 
-    fn make_test_filter(enabled: bool, extra: Option<fn(&str) -> bool>) -> BuiltinCommandFilter {
+    fn make_test_filter(enabled: bool) -> BuiltinCommandFilter {
         BuiltinCommandFilter::new(
             enabled,
             None,
             "テストブロックメッセージ",
             &["testcmd", "testcmd2"],
             50,
-            extra,
         )
     }
 
     #[test]
     fn test_enabled_filter_blocks_matching_command() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = make_bash_input("testcmd --flag");
         assert!(filter.applies_to(&input));
     }
 
     #[test]
     fn test_disabled_filter_does_not_apply() {
-        let filter = make_test_filter(false, None);
+        let filter = make_test_filter(false);
         let input = make_bash_input("testcmd --flag");
         assert!(!filter.applies_to(&input));
     }
 
     #[test]
     fn test_non_matching_command_is_allowed() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = make_bash_input("safe_command --flag");
         assert!(!filter.applies_to(&input));
     }
 
     #[test]
     fn test_non_bash_tool_is_not_applied() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = HookInput {
             event: HookEvent::BeforeCommand,
             tool_name: "Write".to_string(),
@@ -141,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_after_file_edit_event_is_not_applied() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = HookInput {
             event: HookEvent::AfterFileEdit,
             tool_name: "Bash".to_string(),
@@ -156,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_execute_returns_block_with_message() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = make_bash_input("testcmd");
         let decision = filter.execute(&input);
         match decision {
@@ -175,7 +165,6 @@ mod tests {
             "デフォルトメッセージ",
             &["testcmd"],
             50,
-            None,
         );
         let input = make_bash_input("testcmd");
         let decision = filter.execute(&input);
@@ -189,43 +178,20 @@ mod tests {
 
     #[test]
     fn test_priority_returns_configured_value() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert_eq!(filter.priority(), 50);
     }
 
     #[test]
-    fn test_extra_check_triggers_block() {
-        // extra_check が true を返す場合、コマンド名が一致しなくてもブロック
-        fn always_block(_cmd: &str) -> bool {
-            true
-        }
-        let filter = make_test_filter(true, Some(always_block));
-        let input = make_bash_input("safe_command");
-        assert!(filter.applies_to(&input));
-    }
-
-    #[test]
-    fn test_extra_check_not_called_when_command_matches() {
-        // コマンド名が一致した場合、extra_check は呼ばれずに即座にブロック
-        fn should_not_reach(_cmd: &str) -> bool {
-            // この関数が呼ばれなくてもテストは通る
-            false
-        }
-        let filter = make_test_filter(true, Some(should_not_reach));
-        let input = make_bash_input("testcmd");
-        assert!(filter.applies_to(&input));
-    }
-
-    #[test]
     fn test_second_command_pattern_matches() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = make_bash_input("testcmd2 --arg");
         assert!(filter.applies_to(&input));
     }
 
     #[test]
     fn test_chained_command_matches() {
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = make_bash_input("echo hello && testcmd --flag");
         assert!(filter.applies_to(&input));
     }
@@ -233,7 +199,7 @@ mod tests {
     #[test]
     fn test_permission_request_event_is_applied() {
         // BeforeCommand と同じく PermissionRequest でも該当する Bash コマンドはブロック対象
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = HookInput {
             event: HookEvent::PermissionRequest,
             tool_name: "Bash".to_string(),
@@ -249,7 +215,7 @@ mod tests {
     #[test]
     fn test_permission_request_safe_command_allowed() {
         // PermissionRequest でも対象外コマンドは applies_to=false
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         let input = HookInput {
             event: HookEvent::PermissionRequest,
             tool_name: "Bash".to_string(),
@@ -263,20 +229,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extra_check_returns_false_does_not_block() {
-        // コマンド名が一致せず extra_check も false を返す場合はブロックしない
-        fn never_block(_cmd: &str) -> bool {
-            false
-        }
-        let filter = make_test_filter(true, Some(never_block));
-        let input = make_bash_input("safe_command --no-match");
-        assert!(!filter.applies_to(&input));
-    }
-
-    #[test]
     fn test_absolute_path_command_is_blocked() {
         // /bin/rm 等の絶対パス指定でブロックリスト判定をバイパスできないこと
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert!(filter.applies_to(&make_bash_input("/bin/testcmd --flag")));
         assert!(filter.applies_to(&make_bash_input("/usr/bin/testcmd --flag")));
         assert!(filter.applies_to(&make_bash_input("./testcmd --flag")));
@@ -285,7 +240,7 @@ mod tests {
     #[test]
     fn test_uppercase_command_is_blocked() {
         // Windows の `DEL` 等の大文字コマンドが小文字判定経由でブロックされること
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert!(filter.applies_to(&make_bash_input("TESTCMD --flag")));
         assert!(filter.applies_to(&make_bash_input("TestCmd --flag")));
     }
@@ -293,7 +248,7 @@ mod tests {
     #[test]
     fn test_executable_extension_is_blocked() {
         // `testcmd.exe` のように Windows 実行ファイル拡張子付きでもブロック対象
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert!(filter.applies_to(&make_bash_input("testcmd.exe --flag")));
         assert!(filter.applies_to(&make_bash_input("TESTCMD.EXE --flag")));
         assert!(filter.applies_to(&make_bash_input("testcmd.cmd --flag")));
@@ -304,14 +259,14 @@ mod tests {
     #[test]
     fn test_windows_path_command_is_blocked() {
         // Windows パス区切り `\` を含む絶対パスでもブロック対象
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert!(filter.applies_to(&make_bash_input("C:\\Windows\\testcmd.exe --flag")));
     }
 
     #[test]
     fn test_path_prefixed_wrapper_with_value_option_is_blocked() {
         // パス付き sudo の値付きオプションで、実行対象コマンドを見落とさないこと
-        let filter = make_test_filter(true, None);
+        let filter = make_test_filter(true);
         assert!(filter.applies_to(&make_bash_input("/usr/bin/sudo -u root testcmd --flag")));
     }
 }

@@ -13,70 +13,6 @@ const KILL_COMMANDS: &[&str] = &[
     "taskkill", // Windows
 ];
 
-/// xargs 経由の kill コマンドが含まれるか判定する。
-/// 値を取る xargs オプションを読み飛ばし、実際に実行されるコマンドだけを検査する。
-fn contains_xargs_kill(command: &str) -> bool {
-    for segment in command.split('|') {
-        let parts: Vec<&str> = segment.split_whitespace().collect();
-        // セグメント先頭トークンが厳密に `xargs` のときだけ検査する。
-        // `starts_with("xargs")` だと `xargs-wrapper` / `xargsfoo` のような
-        // 別コマンドを前方一致で xargs と誤判定し、過剰ブロックになる。
-        if parts.first() == Some(&"xargs") {
-            if let Some(cmd) = find_xargs_command(&parts[1..]) {
-                if KILL_COMMANDS.contains(&cmd) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn find_xargs_command<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let mut index = 0;
-
-    while let Some(arg) = args.get(index) {
-        if *arg == "--" {
-            index += 1;
-            break;
-        }
-
-        if !arg.starts_with('-') {
-            break;
-        }
-
-        index += if xargs_flag_takes_separate_value(arg) {
-            2
-        } else {
-            1
-        };
-    }
-
-    args.get(index).copied()
-}
-
-fn xargs_flag_takes_separate_value(flag: &str) -> bool {
-    matches!(
-        flag,
-        "-a" | "--arg-file"
-            | "-d"
-            | "--delimiter"
-            | "-E"
-            | "-e"
-            | "--eof"
-            | "-I"
-            | "-i"
-            | "--replace"
-            | "-L"
-            | "--max-lines"
-            | "-n"
-            | "--max-args"
-            | "-P"
-            | "--max-procs"
-            | "--process-slot-var"
-    )
-}
-
 /// kill 関連コマンドをブロックするフィルターを作成する。
 pub fn new_kill_filter(enabled: bool, custom_message: Option<String>) -> BuiltinCommandFilter {
     BuiltinCommandFilter::new(
@@ -85,7 +21,6 @@ pub fn new_kill_filter(enabled: bool, custom_message: Option<String>) -> Builtin
         DEFAULT_KILL_MESSAGE,
         KILL_COMMANDS,
         super::priority::KILL,
-        None, // TEMP COVERAGE PROBE: extra_check 無効化して parser 経路の被覆を確認
     )
 }
 
@@ -303,5 +238,39 @@ mod tests {
     #[test]
     fn test_kill_with_timeout_wrapper() {
         assert!(contains_kill_command("timeout 10 kill -9 1234"));
+    }
+
+    #[test]
+    fn temp_probe_xargs_via_full_filter() {
+        // TEMP: extra_check=None 状態で full filter(parser 経路のみ)の xargs 被覆を確認する。
+        // 陽性(ブロックされるべき)
+        assert!(
+            contains_kill_command("ps aux | grep node | xargs kill"),
+            "POS1"
+        );
+        assert!(contains_kill_command("pgrep node | xargs kill -9"), "POS2");
+        assert!(
+            contains_kill_command("pgrep node | xargs -- kill -9"),
+            "POS3"
+        );
+        assert!(
+            contains_kill_command("pgrep node | xargs -I {} kill -9 {}"),
+            "POS4"
+        );
+        assert!(
+            contains_kill_command("pgrep node | xargs sh -c 'kill -9 \"$@\"' sh"),
+            "POS5"
+        );
+        assert!(contains_kill_command("ps | xargs -n1 kill"), "POS6");
+        assert!(contains_kill_command("ps | xargs -r kill"), "POS7");
+        assert!(contains_kill_command("ps | xargs pkill"), "POS8");
+        assert!(contains_kill_command("ps | xargs killall"), "POS9");
+        assert!(contains_kill_command("ps | xargs taskkill"), "POS10");
+        // 陰性(ブロックされないべき)
+        assert!(!contains_kill_command("ps | xargs echo kill"), "NEG1");
+        assert!(!contains_kill_command("find . | xargs grep kill"), "NEG2");
+        // 前方一致の誤検知防止(xargs で始まる別コマンド)
+        assert!(!contains_kill_command("ps | xargs-wrapper kill"), "NEG_FP1");
+        assert!(!contains_kill_command("ps | xargsfoo kill"), "NEG_FP2");
     }
 }

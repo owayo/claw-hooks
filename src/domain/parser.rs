@@ -86,6 +86,190 @@ const SHELL_COMMANDS: &[&str] = &[
 /// find で後続引数をコマンドとして実行する述語
 const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
 
+/// ラッパーごとの「値を次トークンから取る」フラグ仕様（`WRAPPER_FLAG_SPECS` の要素）。
+struct WrapperFlagSpec {
+    /// 対象ラッパーの正規化済みコマンドキー（`command_key` の出力）。
+    /// strace/ltrace のように同じフラグ仕様を共有するツールは 1 エントリに複数キーを持つ。
+    keys: &'static [&'static str],
+    /// 値を次トークンから取る短縮フラグ。
+    short: &'static [&'static str],
+    /// 値を次トークンから取る長形フラグ。
+    long: &'static [&'static str],
+}
+
+/// ラッパーごとの「値を次トークンから取る」フラグ表。
+///
+/// 値取得フラグの過不足は「実コマンドの取りこぼし（フェイルオープン）」を生むだけで
+/// 過剰ブロックは生じないため、各ツールの実フラグ仕様に合わせて短縮形・長形ともに
+/// 網羅する。任意引数フラグ（例: watch -d）は `-d <cmd>` 形が一般的なので boolean 扱い
+/// （値を取らない）にして次トークンのコマンドを取りこぼさない。
+///
+/// 短縮形と長形を 1 エントリに併記して単一の表に集約することで、ラッパー追加時の
+/// 同期漏れ（短縮形だけ追加して長形を忘れる等 = fail-open）を構造的に防ぐ。
+/// ここに無いラッパー（setsid/nohup/command/pkexec/gosu/busybox 等）は
+/// 値取得フラグを持たない扱い。
+const WRAPPER_FLAG_SPECS: &[WrapperFlagSpec] = &[
+    WrapperFlagSpec {
+        keys: &["sudo"],
+        short: &[
+            "-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U",
+        ],
+        long: &[
+            "--user",
+            "--group",
+            "--host",
+            "--chdir",
+            "--prompt",
+            "--other-user",
+        ],
+    },
+    WrapperFlagSpec {
+        keys: &["env"],
+        short: &["-u", "-C", "-S"],
+        long: &[
+            "--unset",
+            "--chdir",
+            "--argv0",
+            "--split-string",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
+        ],
+    },
+    WrapperFlagSpec {
+        keys: &["timeout"],
+        short: &["-k", "-s"],
+        long: &["--signal", "--kill-after"],
+    },
+    WrapperFlagSpec {
+        keys: &["nice"],
+        short: &["-n"],
+        long: &["--adjustment"],
+    },
+    WrapperFlagSpec {
+        keys: &["ionice"],
+        short: &["-c", "-n"],
+        long: &["--class", "--classdata"],
+    },
+    WrapperFlagSpec {
+        keys: &["doas"],
+        short: &["-u"],
+        long: &[],
+    },
+    WrapperFlagSpec {
+        keys: &["exec"],
+        short: &["-a"],
+        long: &[],
+    },
+    WrapperFlagSpec {
+        keys: &["stdbuf"],
+        short: &["-i", "-o", "-e"],
+        long: &["--input", "--output", "--error"],
+    },
+    WrapperFlagSpec {
+        keys: &["taskset"],
+        short: &["-c", "-p"],
+        long: &["--cpu-list", "--pid"],
+    },
+    WrapperFlagSpec {
+        keys: &["watch"],
+        short: &["-n"],
+        long: &["--interval"],
+    },
+    WrapperFlagSpec {
+        keys: &["nsenter"],
+        short: &["-t", "-S", "-G"],
+        long: &["--target", "--setuid", "--setgid", "--root", "--wd"],
+    },
+    WrapperFlagSpec {
+        keys: &["unshare"],
+        short: &["-R", "-S", "-G"],
+        long: &[
+            "--map-user",
+            "--map-group",
+            "--setgroups",
+            "--root",
+            "--setuid",
+            "--setgid",
+            "--wd",
+        ],
+    },
+    WrapperFlagSpec {
+        keys: &["runuser"],
+        short: &["-u", "-g", "-c", "-G", "-s", "-w"],
+        long: &[
+            "--user",
+            "--group",
+            "--command",
+            "--supp-group",
+            "--shell",
+            "--session-command",
+            "--whitelist-environment",
+        ],
+    },
+    // `su` のオプション（GNU coreutils と util-linux 系で共通の主要なもの）。
+    // 値取得フラグを定義しないと、`su -s /bin/bash user rm` で `/bin/bash` を leading
+    // positional として消費し `user` をコマンドと誤認するため、検出漏れになる。
+    WrapperFlagSpec {
+        keys: &["su"],
+        short: &["-c", "-g", "-G", "-s"],
+        long: &[
+            "--command",
+            "--group",
+            "--supp-group",
+            "--shell",
+            "--session-command",
+        ],
+    },
+    WrapperFlagSpec {
+        keys: &["chroot"],
+        short: &[],
+        long: &["--userspec", "--groups"],
+    },
+    WrapperFlagSpec {
+        keys: &["setpriv"],
+        short: &[],
+        long: &[
+            "--reuid",
+            "--regid",
+            "--groups",
+            "--inh-caps",
+            "--ambient-caps",
+            "--bounding-set",
+            "--securebits",
+            "--pdeathsig",
+            "--selinux-label",
+            "--apparmor-profile",
+        ],
+    },
+    WrapperFlagSpec {
+        keys: &["flock"],
+        short: &["-w", "-E"],
+        long: &["--timeout", "--conflict-exit-code"],
+    },
+    WrapperFlagSpec {
+        keys: &["time"],
+        short: &["-o", "-f"],
+        long: &["--output", "--format"],
+    },
+    // strace / ltrace の値取得フラグ（出力先・式・PID・サイズ等）。`-o` を取りこぼすと
+    // `strace -o file rm` で rm を見落とすため網羅する。両ツールで共用する。
+    WrapperFlagSpec {
+        keys: &["strace", "ltrace"],
+        short: &[
+            "-o", "-e", "-p", "-s", "-E", "-P", "-a", "-S", "-u", "-b", "-l", "-X",
+        ],
+        long: &["--output", "--expression", "--attach"],
+    },
+];
+
+/// 正規化済みキーに対応するラッパーのフラグ仕様を返す。
+fn wrapper_flag_spec(wrapper_key: &str) -> Option<&'static WrapperFlagSpec> {
+    WRAPPER_FLAG_SPECS
+        .iter()
+        .find(|spec| spec.keys.contains(&wrapper_key))
+}
+
 /// 再評価系コマンドがシェルとして再評価する内側コマンド文字列
 /// （`ShellParser::reevaluated_inner_command_strings` の要素）。
 struct ReevaluatedInner {
@@ -232,22 +416,17 @@ fn brace_expanded_command(command: &str) -> Option<String> {
     (expanded != command).then_some(expanded)
 }
 
-/// SHELL_COMMANDS と一致するかを正規化キーで判定する。
+/// SHELL_COMMANDS と一致するかを正規化キーで判定する（テスト専用）。
+/// 本番経路は `reevaluated_inner_command_strings` が正規化済みキーで直接判定する。
+#[cfg(test)]
 fn is_shell_command(name: &str) -> bool {
-    let key = command_key(name);
-    SHELL_COMMANDS.iter().any(|s| *s == key)
+    SHELL_COMMANDS.contains(&command_key(name).as_str())
 }
 
 /// COMMAND_WRAPPERS と一致するかを正規化キーで判定する。
 fn is_command_wrapper(name: &str) -> bool {
     let key = command_key(name);
     COMMAND_WRAPPERS.iter().any(|s| *s == key)
-}
-
-/// 与えられた cmd_name が target コマンド（例: "xargs"、"eval"、"find"）かを
-/// パス・拡張子・大文字小文字を考慮して判定する。
-fn matches_command(cmd_name: &str, target: &str) -> bool {
-    command_key(cmd_name) == target
 }
 
 /// tree-sitter-bash を使用した AST ベースのシェルコマンドパーサー。
@@ -1160,109 +1339,25 @@ impl ShellParser {
         commands.extend(Self::pathological_block_commands());
     }
 
-    /// ラッパーごとに「値を取る」ことが確定している短縮フラグ
-    const SUDO_FLAGS_WITH_ARGS: &[&str] = &[
-        "-u", "-g", "-C", "-D", "-R", "-T", "-h", "-p", "-r", "-t", "-U",
-    ];
-    const ENV_FLAGS_WITH_ARGS: &[&str] = &["-u", "-C", "-S"];
-    const TIMEOUT_FLAGS_WITH_ARGS: &[&str] = &["-k", "-s"];
-    const NICE_FLAGS_WITH_ARGS: &[&str] = &["-n"];
-    const IONICE_FLAGS_WITH_ARGS: &[&str] = &["-c", "-n"];
-    const DOAS_FLAGS_WITH_ARGS: &[&str] = &["-u"];
-    const EXEC_FLAGS_WITH_ARGS: &[&str] = &["-a"];
-    const SUDO_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--user",
-        "--group",
-        "--host",
-        "--chdir",
-        "--prompt",
-        "--other-user",
-    ];
-    const ENV_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--unset",
-        "--chdir",
-        "--argv0",
-        "--split-string",
-        "--block-signal",
-        "--default-signal",
-        "--ignore-signal",
-    ];
-    const TIMEOUT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--signal", "--kill-after"];
-    const NICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--adjustment"];
-    const IONICE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--class", "--classdata"];
-    // 追加ラッパー（実行委譲）の値取得フラグ。値取得フラグの過不足は「実コマンドの取りこぼし
-    // （フェイルオープン）」を生むだけで過剰ブロックは生じないため、各ツールの実フラグ仕様に
-    // 合わせて短縮形・長形ともに網羅する。任意引数フラグ（例: watch -d）は `-d <cmd>` 形が
-    // 一般的なので boolean 扱い（値を取らない）にして次トークンのコマンドを取りこぼさない。
-    const STDBUF_FLAGS_WITH_ARGS: &[&str] = &["-i", "-o", "-e"];
-    const STDBUF_LONG_FLAGS_WITH_ARGS: &[&str] = &["--input", "--output", "--error"];
-    const TASKSET_FLAGS_WITH_ARGS: &[&str] = &["-c", "-p"];
-    const TASKSET_LONG_FLAGS_WITH_ARGS: &[&str] = &["--cpu-list", "--pid"];
-    const WATCH_FLAGS_WITH_ARGS: &[&str] = &["-n"];
-    const WATCH_LONG_FLAGS_WITH_ARGS: &[&str] = &["--interval"];
-    const NSENTER_FLAGS_WITH_ARGS: &[&str] = &["-t", "-S", "-G"];
-    const NSENTER_LONG_FLAGS_WITH_ARGS: &[&str] =
-        &["--target", "--setuid", "--setgid", "--root", "--wd"];
-    const UNSHARE_FLAGS_WITH_ARGS: &[&str] = &["-R", "-S", "-G"];
-    const UNSHARE_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--map-user",
-        "--map-group",
-        "--setgroups",
-        "--root",
-        "--setuid",
-        "--setgid",
-        "--wd",
-    ];
-    const RUNUSER_FLAGS_WITH_ARGS: &[&str] = &["-u", "-g", "-c", "-G", "-s", "-w"];
-    const RUNUSER_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--user",
-        "--group",
-        "--command",
-        "--supp-group",
-        "--shell",
-        "--session-command",
-        "--whitelist-environment",
-    ];
-    // `su` のオプション（GNU coreutils と util-linux 系で共通の主要なもの）。
-    // 値取得フラグを定義しないと、`su -s /bin/bash user rm` で `/bin/bash` を leading
-    // positional として消費し `user` をコマンドと誤認するため、検出漏れになる。
-    const SU_FLAGS_WITH_ARGS: &[&str] = &["-c", "-g", "-G", "-s"];
-    const SU_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--command",
-        "--group",
-        "--supp-group",
-        "--shell",
-        "--session-command",
-    ];
-    const CHROOT_LONG_FLAGS_WITH_ARGS: &[&str] = &["--userspec", "--groups"];
-    const FLOCK_FLAGS_WITH_ARGS: &[&str] = &["-w", "-E"];
-    const FLOCK_LONG_FLAGS_WITH_ARGS: &[&str] = &["--timeout", "--conflict-exit-code"];
-    const TIME_FLAGS_WITH_ARGS: &[&str] = &["-o", "-f"];
-    const TIME_LONG_FLAGS_WITH_ARGS: &[&str] = &["--output", "--format"];
-    // strace / ltrace の値取得フラグ（出力先・式・PID・サイズ等）。`-o` を取りこぼすと
-    // `strace -o file rm` で rm を見落とすため網羅する。両ツールで共用する。
-    const STRACE_FLAGS_WITH_ARGS: &[&str] = &[
-        "-o", "-e", "-p", "-s", "-E", "-P", "-a", "-S", "-u", "-b", "-l", "-X",
-    ];
-    const STRACE_LONG_FLAGS_WITH_ARGS: &[&str] = &["--output", "--expression", "--attach"];
-    const SETPRIV_LONG_FLAGS_WITH_ARGS: &[&str] = &[
-        "--reuid",
-        "--regid",
-        "--groups",
-        "--inh-caps",
-        "--ambient-caps",
-        "--bounding-set",
-        "--securebits",
-        "--pdeathsig",
-        "--selinux-label",
-        "--apparmor-profile",
-    ];
-
-    /// 指定ラッパーで「値を次トークンから取る」フラグかを判定する。
+    /// 指定ラッパーで「値を次トークンから取る」フラグかを判定する（テスト専用）。
+    /// ラッパー名はパス・拡張子・大文字混在（`/usr/bin/sudo` 等）のままでよい。
+    /// 本番経路は正規化済みキーを持つ呼び出し元が `wrapper_flag_takes_arg_key` を直接使う。
+    #[cfg(test)]
     fn wrapper_flag_takes_arg(wrapper: &str, flag: &str) -> bool {
+        Self::wrapper_flag_takes_arg_key(&command_key(wrapper), flag)
+    }
+
+    /// `wrapper_flag_takes_arg` の正規化済みキー版。
+    /// `find_wrapped_command_index` のトークンループのような高頻度呼び出し元が、
+    /// トークンごとの `command_key` 再計算（String 割当）を避けるために使う。
+    fn wrapper_flag_takes_arg_key(wrapper_key: &str, flag: &str) -> bool {
         if !flag.starts_with('-') || flag == "-" || flag == "--" {
             return false;
         }
+
+        let Some(spec) = wrapper_flag_spec(wrapper_key) else {
+            return false;
+        };
 
         let (base_flag, has_inline_value) = match flag.split_once('=') {
             Some((base, _)) => (base, true),
@@ -1273,7 +1368,7 @@ impl ShellParser {
             if has_inline_value {
                 return false;
             }
-            return Self::wrapper_long_flags_with_args(wrapper).contains(&base_flag);
+            return spec.long.contains(&base_flag);
         }
 
         // 短縮フラグの cluster（例: `-nu`、`-uroot`）を解釈する。
@@ -1282,10 +1377,9 @@ impl ShellParser {
         // - `-nv`（値取得フラグを含まない）→ 追加トークン不要
         if base_flag.len() > 2 {
             let cluster = &base_flag[1..];
-            let value_flags = Self::wrapper_short_flags_with_args(wrapper);
             for (idx, ch) in cluster.char_indices() {
                 let opt = format!("-{}", ch);
-                if value_flags.contains(&opt.as_str()) {
+                if spec.short.contains(&opt.as_str()) {
                     // cluster 末尾が値取得フラグなら追加トークン必要、
                     // それ以前の位置にあれば残りが inline 値とみなされる。
                     let has_inline_value = idx + ch.len_utf8() < cluster.len();
@@ -1295,55 +1389,7 @@ impl ShellParser {
             return false;
         }
 
-        Self::wrapper_short_flags_with_args(wrapper).contains(&base_flag)
-    }
-
-    fn wrapper_short_flags_with_args(wrapper: &str) -> &'static [&'static str] {
-        let key = command_key(wrapper);
-        match key.as_str() {
-            "sudo" => Self::SUDO_FLAGS_WITH_ARGS,
-            "env" => Self::ENV_FLAGS_WITH_ARGS,
-            "timeout" => Self::TIMEOUT_FLAGS_WITH_ARGS,
-            "nice" => Self::NICE_FLAGS_WITH_ARGS,
-            "ionice" => Self::IONICE_FLAGS_WITH_ARGS,
-            "doas" => Self::DOAS_FLAGS_WITH_ARGS,
-            "exec" => Self::EXEC_FLAGS_WITH_ARGS,
-            "stdbuf" => Self::STDBUF_FLAGS_WITH_ARGS,
-            "taskset" => Self::TASKSET_FLAGS_WITH_ARGS,
-            "watch" => Self::WATCH_FLAGS_WITH_ARGS,
-            "nsenter" => Self::NSENTER_FLAGS_WITH_ARGS,
-            "runuser" => Self::RUNUSER_FLAGS_WITH_ARGS,
-            "su" => Self::SU_FLAGS_WITH_ARGS,
-            "unshare" => Self::UNSHARE_FLAGS_WITH_ARGS,
-            "flock" => Self::FLOCK_FLAGS_WITH_ARGS,
-            "time" => Self::TIME_FLAGS_WITH_ARGS,
-            "strace" | "ltrace" => Self::STRACE_FLAGS_WITH_ARGS,
-            _ => &[],
-        }
-    }
-
-    fn wrapper_long_flags_with_args(wrapper: &str) -> &'static [&'static str] {
-        let key = command_key(wrapper);
-        match key.as_str() {
-            "sudo" => Self::SUDO_LONG_FLAGS_WITH_ARGS,
-            "env" => Self::ENV_LONG_FLAGS_WITH_ARGS,
-            "timeout" => Self::TIMEOUT_LONG_FLAGS_WITH_ARGS,
-            "nice" => Self::NICE_LONG_FLAGS_WITH_ARGS,
-            "ionice" => Self::IONICE_LONG_FLAGS_WITH_ARGS,
-            "watch" => Self::WATCH_LONG_FLAGS_WITH_ARGS,
-            "nsenter" => Self::NSENTER_LONG_FLAGS_WITH_ARGS,
-            "runuser" => Self::RUNUSER_LONG_FLAGS_WITH_ARGS,
-            "su" => Self::SU_LONG_FLAGS_WITH_ARGS,
-            "chroot" => Self::CHROOT_LONG_FLAGS_WITH_ARGS,
-            "setpriv" => Self::SETPRIV_LONG_FLAGS_WITH_ARGS,
-            "unshare" => Self::UNSHARE_LONG_FLAGS_WITH_ARGS,
-            "stdbuf" => Self::STDBUF_LONG_FLAGS_WITH_ARGS,
-            "taskset" => Self::TASKSET_LONG_FLAGS_WITH_ARGS,
-            "flock" => Self::FLOCK_LONG_FLAGS_WITH_ARGS,
-            "time" => Self::TIME_LONG_FLAGS_WITH_ARGS,
-            "strace" | "ltrace" => Self::STRACE_LONG_FLAGS_WITH_ARGS,
-            _ => &[],
-        }
+        spec.short.contains(&base_flag)
     }
 
     /// GNU timeout の制限時間トークンかを判定する（例: 10, 0.5, 30s, 5m）。
@@ -1407,7 +1453,8 @@ impl ShellParser {
             }
 
             if arg.starts_with('-') {
-                if Self::wrapper_flag_takes_arg(&wrapper_key, arg) {
+                // wrapper_key は正規化済みなので、トークンごとの再正規化を避ける key 版を使う。
+                if Self::wrapper_flag_takes_arg_key(&wrapper_key, arg) {
                     i += 2;
                 } else {
                     i += 1;
@@ -2102,8 +2149,10 @@ impl ShellParser {
         result
     }
 
-    /// コマンドと引数を抽出する（文字列ベースのフォールバック）。
-    fn extract_command_with_args_fallback(&self, command: &str) -> (String, Vec<String>) {
+    /// コマンドと引数を抽出する（テスト専用）。
+    /// 本番経路では使われないため、テストビルドでのみコンパイルする。
+    #[cfg(test)]
+    fn extract_command_with_args(&self, command: &str) -> (String, Vec<String>) {
         let mut parts = parse_shell_tokens(command);
         if parts.is_empty() {
             return (String::new(), Vec::new());
@@ -2111,12 +2160,6 @@ impl ShellParser {
 
         let cmd = parts.remove(0);
         (cmd, parts)
-    }
-
-    /// コマンドと引数を抽出する（公開 API）。
-    #[allow(dead_code)]
-    pub fn extract_command_with_args(&self, command: &str) -> (String, Vec<String>) {
-        self.extract_command_with_args_fallback(command)
     }
 }
 

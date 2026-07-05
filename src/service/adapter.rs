@@ -434,31 +434,17 @@ impl FormatAdapter {
             .to_string();
 
         match event_name.as_str() {
-            "beforeShellExecution" => {
-                let parsed: CursorShellInput = serde_json::from_value(raw)
-                    .map_err(|e| anyhow!("Failed to parse Cursor beforeShellExecution: {}", e))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    hook_type = "beforeShellExecution",
-                    command_bytes = parsed.command.len(),
-                    has_cwd = parsed.cwd.is_some(),
-                    mapped_event = ?HookEvent::BeforeCommand,
-                    mapped_tool = "Bash",
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::BeforeCommand,
-                    tool_name: "Bash".to_string(),
-                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                        command: parsed.command,
-                        timeout: None,
-                    }),
-                    session_id: None,
-                })
+            "beforeShellExecution" => self.parse_cursor_before_shell(raw),
+            "preToolUse" => self.parse_cursor_pre_tool_use(raw),
+            "afterFileEdit" | "afterTabFileEdit" => {
+                self.parse_cursor_after_file_edit(raw, &event_name)
             }
-            "preToolUse" => {
+            "stop" => self.parse_cursor_stop(raw),
+            "subagentStart" => self.parse_cursor_subagent_start(raw),
+            "subagentStop" => self.parse_cursor_subagent_stop(raw),
+            // 未対応イベント（afterShellExecution, postToolUse 等）は
+            // パススルーとして処理し、ブロックしない
+            "__unused_preToolUse_placeholder__" => {
                 let tool_name = raw
                     .get("tool_name")
                     .and_then(|v| v.as_str())

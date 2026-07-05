@@ -21,6 +21,19 @@ fn default_output_max_length() -> usize {
 }
 
 /// メイン設定構造体。
+///
+/// # 設定フィールド追加時のチェックリスト
+///
+/// フィールド定義は外部設定スキーマの明示性を優先して単一ソース化（マクロ生成）して
+/// いないため、フィールドを追加・変更する際は以下を漏れなく更新すること:
+///
+/// 1. この `Config` 構造体（フィールド + doc コメント）
+/// 2. `impl Default for Config`（デフォルト値）
+/// 3. `ProjectConfig`（プロジェクト上書き用の `Option<T>` 版）
+/// 4. `Config::merge_project`（上書き/マージの規則）
+/// 5. `config/validation.rs`（値域チェックが必要な場合）
+/// 6. `config/service.rs` のデフォルト設定テンプレートと README（ユーザ向け文書）
+/// 7. `merge_project` / デシリアライズのテスト
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {

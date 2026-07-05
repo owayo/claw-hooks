@@ -84,7 +84,7 @@ pub fn new_kill_filter(enabled: bool, custom_message: Option<String>) -> Builtin
         custom_message,
         DEFAULT_KILL_MESSAGE,
         KILL_COMMANDS,
-        10,
+        super::priority::KILL,
         Some(contains_xargs_kill),
     )
 }

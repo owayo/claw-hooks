@@ -17,7 +17,7 @@ pub fn new_dd_filter(enabled: bool, custom_message: Option<String>) -> BuiltinCo
         custom_message,
         DEFAULT_DD_MESSAGE,
         DD_COMMANDS,
-        15,
+        super::priority::DD,
         None,
     )
 }

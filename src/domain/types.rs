@@ -15,7 +15,6 @@ pub enum HookEvent {
     /// - Claude Code: `PreToolUse`
     /// - Cursor: `beforeShellExecution`
     /// - Windsurf: `pre_run_command`
-    /// - Gemini CLI: `BeforeTool`
     /// - Codex CLI: `PreToolUse`
     BeforeCommand,
 
@@ -31,7 +30,6 @@ pub enum HookEvent {
     /// - Claude Code: `PostToolUse`（`Write` / `Edit` の保存後）
     /// - Cursor: `afterFileEdit`, `afterTabFileEdit`
     /// - Windsurf: `post_write_code`
-    /// - Gemini CLI: `AfterTool`（`write_file` などの書き込み後）
     /// - Codex CLI: `PostToolUse`（現行ランタイムは `Bash` 出力のパススルーのみ）
     AfterFileEdit,
 
@@ -41,14 +39,15 @@ pub enum HookEvent {
     /// - Claude Code: `Stop`
     /// - Cursor: `stop`
     /// - Windsurf: `post_cascade_response`（非同期の事後フック。実行はベストエフォート）
-    /// - Gemini CLI: `AfterAgent`
     /// - Codex CLI: `Stop`
     Stop,
 
-    /// ユーザープロンプト送信前（Gemini CLI のみ）。
+    /// 未対応・スコープ外イベント用の汎用パススルーマーカー。
     ///
-    /// 外部イベント名:
-    /// - Gemini CLI: `BeforeAgent`
+    /// 各フォーマットアダプター（Claude Code / Cursor / Windsurf / Antigravity /
+    /// Codex）が claw-hooks のスコープ外とみなすイベント
+    /// （`SessionStart` / `UserPromptSubmit` / `PreInvocation` / 非シェルの
+    /// `preToolUse` など）をこの variant にマップする。常に Allow で素通しする。
     BeforePrompt,
 
     /// サブエージェント起動前。
@@ -93,16 +92,6 @@ impl HookInput {
             Some(&bash.command)
         } else {
             None
-        }
-    }
-
-    /// ファイル操作入力からファイルパスを取得する。
-    #[allow(dead_code)]
-    pub fn file_path(&self) -> Option<&str> {
-        match &self.tool_input {
-            ToolInput::File(file) => Some(&file.file_path),
-            ToolInput::Files(files) => files.first().map(|file| file.file_path.as_str()),
-            _ => None,
         }
     }
 }
@@ -348,7 +337,6 @@ impl Decision {
 
     /// 別の判定から追加コンテキストをマージする。
     /// 両方にコンテキストがある場合は改行で結合される。
-    #[allow(dead_code)]
     pub fn merge_context(self, other_context: Option<String>) -> Self {
         match self {
             Decision::Allow { additional_context } => {

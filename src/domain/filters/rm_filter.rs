@@ -20,7 +20,7 @@ pub fn new_rm_filter(enabled: bool, custom_message: Option<String>) -> BuiltinCo
         custom_message,
         DEFAULT_RM_MESSAGE,
         RM_COMMANDS,
-        20,
+        super::priority::RM,
         None,
     )
 }

@@ -400,8 +400,7 @@ impl FormatAdapter {
                     reason: None,
                 },
                 Decision::Block { message } => {
-                    let normalized = normalize_lint_output(message);
-                    let truncated = truncate_output(&normalized, self.output_max_length);
+                    let truncated = self.normalize_and_truncate(message);
                     ClaudeStopOutput {
                         decision: Some("block".to_string()),
                         reason: Some(truncated),
@@ -636,8 +635,7 @@ impl FormatAdapter {
         if event == HookEvent::Stop || event == HookEvent::SubagentStop {
             return match decision {
                 Decision::Block { message } => {
-                    let normalized = normalize_lint_output(message);
-                    let truncated = truncate_output(&normalized, self.output_max_length);
+                    let truncated = self.normalize_and_truncate(message);
                     let output = CursorStopOutput {
                         followup_message: truncated,
                     };
@@ -791,8 +789,7 @@ impl FormatAdapter {
         match decision {
             Decision::Allow { .. } => Ok("{}".to_string()),
             Decision::Block { message } => {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
+                let truncated = self.normalize_and_truncate(message);
                 Ok(truncated)
             }
         }
@@ -4076,8 +4073,7 @@ impl FormatAdapter {
             }
             Decision::Allow { .. } => serde_json::json!({}),
             Decision::Block { message } => {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
+                let truncated = self.normalize_and_truncate(message);
                 if event == HookEvent::PermissionRequest {
                     serde_json::json!({
                         "hookSpecificOutput": {
@@ -4122,6 +4118,11 @@ impl FormatAdapter {
                 message: truncate_output(message, self.output_max_length),
             },
         }
+    }
+
+    /// メッセージを正規化してから output_max_length で切り詰める。
+    fn normalize_and_truncate(&self, message: &str) -> String {
+        truncate_output(&normalize_lint_output(message), self.output_max_length)
     }
 
     fn parse_apply_patch_file_inputs(command: &str) -> Vec<crate::domain::FileOperationInput> {
@@ -4382,8 +4383,7 @@ impl FormatAdapter {
             // Stop の Block は "continue" + reason でエージェントを再起動させ、reason を
             // system message としてエージェントに注入する（lint/typecheck の修正指示等）。
             (HookEvent::Stop, Decision::Block { message }) => {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
+                let truncated = self.normalize_and_truncate(message);
                 serde_json::json!({
                     "decision": "continue",
                     "reason": truncated
@@ -4396,8 +4396,7 @@ impl FormatAdapter {
             (HookEvent::AfterFileEdit, _) | (HookEvent::BeforePrompt, _) => serde_json::json!({}),
             // PreToolUse の Block は deny として返す（Antigravity 公式の主形式）。
             (_, Decision::Block { message }) => {
-                let normalized = normalize_lint_output(message);
-                let truncated = truncate_output(&normalized, self.output_max_length);
+                let truncated = self.normalize_and_truncate(message);
                 serde_json::json!({
                     "decision": "deny",
                     "reason": truncated

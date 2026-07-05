@@ -335,7 +335,7 @@ impl Filter for StopHookFilter {
     }
 
     fn priority(&self) -> u32 {
-        100 // 低優先度 - 他のフィルターの後に実行
+        super::priority::STOP // 低優先度 - 他のフィルターの後に実行
     }
 }
 

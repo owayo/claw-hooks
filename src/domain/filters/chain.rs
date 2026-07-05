@@ -91,29 +91,22 @@ impl FilterChain {
     /// 適用可能な全フィルターを実行し、最初のブロック判定を返す。
     /// Allow判定の場合、全フィルターのadditional_contextがマージされる。
     pub fn execute(&self, input: &HookInput) -> Decision {
-        let mut merged_context: Option<String> = None;
+        let mut result = Decision::allow();
 
         for filter in &self.filters {
             if filter.applies_to(input) {
                 let decision = filter.execute(input);
                 match decision {
                     Decision::Block { .. } => return decision,
+                    // 全Allow判定のadditional_contextを改行区切りでマージする
                     Decision::Allow { additional_context } => {
-                        // 全Allow判定のadditional_contextをマージ
-                        if let Some(ctx) = additional_context {
-                            merged_context = match merged_context {
-                                Some(existing) => Some(format!("{}\n{}", existing, ctx)),
-                                None => Some(ctx),
-                            };
-                        }
+                        result = result.merge_context(additional_context);
                     }
                 }
             }
         }
 
-        Decision::Allow {
-            additional_context: merged_context,
-        }
+        result
     }
 }
 

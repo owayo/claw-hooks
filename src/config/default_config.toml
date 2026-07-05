@@ -1,0 +1,101 @@
+# claw-hooks configuration file
+# https://github.com/owayo/claw-hooks
+
+# Enable blocking of rm/rmdir/del/erase commands (default: true)
+rm_block = true
+# Custom message for rm blocking (recommended: use with safe-rm)
+# safe-rm: https://github.com/owayo/safe-rm
+rm_block_message = "🚫 Use safe-rm instead: safe-rm <file> (validates Git status and path containment). Only clean/ignored files in project allowed."
+
+# Enable blocking of kill/pkill/killall/taskkill commands (default: true)
+kill_block = true
+# Custom message for kill blocking (recommended: use with safe-kill)
+# safe-kill: https://github.com/owayo/safe-kill
+kill_block_message = "🚫 Use safe-kill instead: safe-kill <PID>, safe-kill -N <name> (pkill-style), or safe-kill -p <port>. Use -s <signal> for signal."
+
+# Enable blocking of dd command (default: true)
+dd_block = true
+# Custom message for dd blocking
+dd_block_message = "🚫 dd command blocked for safety."
+
+# Enable debug logging to file (default: false)
+debug = false
+
+# Path to log directory (default: same directory as config.toml/logs)
+# If --config is specified, logs go to that directory/logs
+# log_path = "~/.config/claw-hooks/logs"
+
+# Custom command filters
+# Block specific commands and suggest alternatives
+# [[custom_filters]]
+# command = "npm"
+# args = ["install", "i", "add"]         # Blocks: npm install, npm i, npm add
+# message = "⚠️ Use `pnpm` instead of `npm`"
+
+# [[custom_filters]]
+# command = "yarn"
+# message = "⚠️ Use `pnpm` instead of `yarn`"
+
+# [[custom_filters]]
+# command = "pip3?"                       # Regex: matches pip or pip3
+# args = ["install", "uninstall"]
+# message = "Use `uv pip` instead"
+
+# Timeout in seconds for reported stop hooks and extension hook commands (default: 60)
+# Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
+# report=false stop hooks are started detached and are not waited on.
+# hook_timeout = 60
+
+# Maximum length of output messages in characters (default: 1000)
+# Prevents AI agent context window overflow from large outputs
+# Set to 0 for unlimited output
+# output_max_length = 1000
+
+# Extension-based hooks (map format)
+# Execute external tools when specific file types are modified
+# Each command template must contain exactly one {file}
+# File paths containing ../, <, or > are blocked for safety
+# [extension_hooks]
+# ".css" = ["biome format --write {file}", "biome lint --write {file}"]
+# ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
+# ".rs" = ["rustfmt {file}"]
+# ".ts" = ["biome check {file}"]
+# ".tsx" = ["biome check {file}"]
+
+# Stop hooks
+# Execute commands when the agent loop ends (notifications, sounds, cleanup)
+# Commands in the same stage run in parallel; stages run sequentially (1→5).
+# stage: 1-5 (default: 5) — lower stages run first
+# report: true/false (default: true if condition is set, false otherwise)
+# report=false starts commands detached; stdout/stderr are discarded.
+# [[stop_hooks]]
+# commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
+
+# [[stop_hooks]]
+# commands = ["notify-send 'Agent completed'"]  # Linux notification
+
+# Conditional stop hooks (project-wide lint on stop)
+# Detects project type and runs lint/typecheck.
+# On failure, the result is returned to the AI agent so it can fix the issues.
+# condition fields (AND logic): file_exists, command_exists
+# [[stop_hooks]]
+# commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
+# condition = { file_exists = "Cargo.toml" }
+# stage = 3
+
+# [[stop_hooks]]
+# commands = ["pnpm exec tsc --noEmit"]
+# condition = { file_exists = "tsconfig.json" }
+# stage = 3
+
+# [[stop_hooks]]
+# commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
+# condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+
+# [[stop_hooks]]
+# commands = ["biome check --write ."]
+# condition = { file_exists = "package.json" }
+
+# Auto commit & push (requires git-sc: https://github.com/owayo/git-smart-commit)
+# [[stop_hooks]]
+# commands = ["git-sc --all --yes --quiet"]

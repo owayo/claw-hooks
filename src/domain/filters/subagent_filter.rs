@@ -59,7 +59,7 @@ impl Filter for SubagentFilter {
     }
 
     fn priority(&self) -> u32 {
-        90 // カスタムフィルターと拡張/ストップフックの間
+        super::priority::SUBAGENT // カスタムフィルターと拡張/ストップフックの間
     }
 }
 

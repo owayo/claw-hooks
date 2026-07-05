@@ -378,7 +378,7 @@ impl Filter for ExtensionHookFilter {
     }
 
     fn priority(&self) -> u32 {
-        100 // 低優先度 — 他のフィルターの後に実行
+        super::priority::EXTENSION // 低優先度 — 他のフィルターの後に実行
     }
 }
 

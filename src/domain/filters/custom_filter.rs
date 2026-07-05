@@ -198,7 +198,7 @@ impl Filter for CustomCommandFilter {
     }
 
     fn priority(&self) -> u32 {
-        50 // 中優先度
+        super::priority::CUSTOM // 中優先度
     }
 }
 

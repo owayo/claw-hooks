@@ -26,6 +26,7 @@ pub fn new_dd_filter(enabled: bool, custom_message: Option<String>) -> BuiltinCo
 mod tests {
     use super::*;
     use crate::domain::filters::Filter;
+    use crate::domain::test_helpers::make_bash_input;
     use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
     fn make_filter(enabled: bool, msg: Option<String>) -> BuiltinCommandFilter {
@@ -34,15 +35,7 @@ mod tests {
 
     fn contains_dd_command(command: &str) -> bool {
         let filter = make_filter(true, None);
-        let input = HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(crate::domain::BashInput {
-                command: command.to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        };
+        let input = make_bash_input(command);
         filter.applies_to(&input)
     }
 
@@ -64,34 +57,14 @@ mod tests {
     #[test]
     fn test_applies_to_before_command_bash_dd() {
         let filter = make_filter(true, None);
-
-        let input = HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(crate::domain::BashInput {
-                command: "dd if=/dev/zero of=/dev/sda".to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        };
-
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
         assert!(filter.applies_to(&input));
     }
 
     #[test]
     fn test_does_not_apply_when_disabled() {
         let filter = make_filter(false, None);
-
-        let input = HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(crate::domain::BashInput {
-                command: "dd if=/dev/zero of=/dev/sda".to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        };
-
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
         assert!(!filter.applies_to(&input));
     }
 
@@ -115,17 +88,7 @@ mod tests {
     #[test]
     fn test_execute_returns_block() {
         let filter = make_filter(true, Some("Custom dd block message".to_string()));
-
-        let input = HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(crate::domain::BashInput {
-                command: "dd if=/dev/zero of=/dev/sda".to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        };
-
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
         let decision = filter.execute(&input);
         match decision {
             Decision::Block { message } => {
@@ -166,15 +129,7 @@ mod tests {
     #[test]
     fn test_new_dd_filter_default_message() {
         let filter = make_filter(true, None);
-        let input = HookInput {
-            event: HookEvent::BeforeCommand,
-            tool_name: "Bash".to_string(),
-            tool_input: ToolInput::Bash(crate::domain::BashInput {
-                command: "dd if=/dev/zero of=/dev/sda".to_string(),
-                timeout: None,
-            }),
-            session_id: None,
-        };
+        let input = make_bash_input("dd if=/dev/zero of=/dev/sda");
         match filter.execute(&input) {
             Decision::Block { message } => {
                 assert!(

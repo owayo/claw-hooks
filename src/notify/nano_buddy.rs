@@ -1,5 +1,20 @@
 //! NanoBuddy通知（Darwin Notification API経由）
 
+/// 拡張子文字列をリトルエンディアンu64にエンコード（最大8バイト）。
+///
+/// 純粋なビット演算でプラットフォーム非依存。macOS の NanoBuddy 通知
+/// (`macos::notify_extension_hook`) と各種テストの両方から使用する。
+/// macOS ビルドとテストビルドでのみ参照されるため、それ以外では
+/// dead_code を避けるべく `cfg` で除外する。
+#[cfg(any(target_os = "macos", test))]
+fn encode_ext(ext: &str) -> u64 {
+    let mut value: u64 = 0;
+    for (i, byte) in ext.bytes().take(8).enumerate() {
+        value |= (byte as u64) << (i * 8);
+    }
+    value
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::CString;
@@ -87,15 +102,6 @@ mod macos {
         }
     }
 
-    /// 拡張子文字列をリトルエンディアンu64にエンコード（最大8バイト）
-    pub fn encode_ext(ext: &str) -> u64 {
-        let mut value: u64 = 0;
-        for (i, byte) in ext.bytes().take(8).enumerate() {
-            value |= (byte as u64) << (i * 8);
-        }
-        value
-    }
-
     /// 拡張子フックの完了をNanoBuddyに通知する。
     pub fn notify_extension_hook(ext: &str) {
         let name = match CString::new(EXT_NOTIFICATION) {
@@ -108,7 +114,7 @@ mod macos {
             if notify_register_check(name.as_ptr(), &mut token) != 0 {
                 return;
             }
-            let _ = notify_set_state(token, encode_ext(ext));
+            let _ = notify_set_state(token, super::encode_ext(ext));
             let _ = notify_post(name.as_ptr());
             // notify_register_check で取得した token を解放する。
             // 解放しないと extension hook が呼ばれるたびにプロセス内の
@@ -198,22 +204,6 @@ pub fn notify_subagent_stop(subagent_type: &str, session_id: Option<&str>) {
     {
         let _ = subagent_type;
         let _ = session_id;
-    }
-}
-
-/// 拡張子をリトルエンディアンu64にエンコード（テスト用公開）
-#[cfg(test)]
-pub fn encode_ext(ext: &str) -> u64 {
-    #[cfg(target_os = "macos")]
-    return macos::encode_ext(ext);
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut value: u64 = 0;
-        for (i, byte) in ext.bytes().take(8).enumerate() {
-            value |= (byte as u64) << (i * 8);
-        }
-        value
     }
 }
 

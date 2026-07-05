@@ -952,8 +952,523 @@ struct WindsurfToolInfo {
     response: Option<String>,
 }
 
+// === Codex CLI フォーマット ===
+// 公式ドキュメント: https://developers.openai.com/codex/hooks
+
+impl FormatAdapter {
+    fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
+
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Codex input: {}", e))?;
+
+        debug!(input = %summarize_hook_input(input), "{} parsed JSON", self.log_prefix());
+
+        // イベント名は必須。互換性のため "event" エイリアスも受け付ける。
+        let raw_event = raw
+            .get("hook_event_name")
+            .or_else(|| raw.get("event"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
+            .to_string();
+
+        let session_id = raw
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let event = match raw_event.as_str() {
+            "Stop" | "stop" => HookEvent::Stop,
+            "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
+            "PermissionRequest" | "permission_request" => HookEvent::PermissionRequest,
+            "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
+            "SubagentStart" | "subagent_start" => HookEvent::SubagentStart,
+            "SubagentStop" | "subagent_stop" => HookEvent::SubagentStop,
+            // claw-hooks の処理対象外イベント: パススルーで Allow を返す
+            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt, // パススルー用
+                    tool_name: raw_event,
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                });
+            }
+            other => {
+                debug!(event = %other, "{} unknown event, treating as passthrough", self.log_prefix());
+                return Ok(HookInput {
+                    event: HookEvent::BeforePrompt, // パススルー用
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                });
+            }
+        };
+
+        if event == HookEvent::Stop {
+            let agent_message = raw
+                .get("last_assistant_message")
+                .or_else(|| raw.get("stop_reason"))
+                .or_else(|| raw.get("message"))
+                .or_else(|| raw.get("response"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let stop_hook_active = raw
+                .get("stop_hook_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            return Ok(HookInput {
+                event,
+                tool_name: "Stop".to_string(),
+                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                    status: None,
+                    loop_count: None,
+                    response: None,
+                    agent_message,
+                    stop_hook_active,
+                }),
+                session_id,
+            });
+        }
+
+        if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
+            let subagent_type = raw
+                .get("agent_type")
+                .or_else(|| raw.get("subagent_type"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("Missing agent_type field"))?
+                .to_string();
+
+            return Ok(HookInput {
+                event,
+                tool_name: raw_event,
+                tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                    subagent_type: Some(subagent_type),
+                    prompt: raw
+                        .get("prompt")
+                        .or_else(|| raw.get("task"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    status: raw.get("status").and_then(|v| v.as_str()).map(String::from),
+                    duration: raw
+                        .get("duration_ms")
+                        .or_else(|| raw.get("duration"))
+                        .and_then(|v| v.as_u64()),
+                }),
+                session_id,
+            });
+        }
+
+        // ツールイベント
+        let raw_tool_name = raw
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing tool_name field"))?
+            .to_string();
+
+        // Codex のツール名を内部のツール名にマッピング
+        let mapped_tool_name = match raw_tool_name.as_str() {
+            "shell" | "run_command" | "execute" => "Bash".to_string(),
+            "write_file" | "create_file" | "edit_file" => "Write".to_string(),
+            "apply_patch" => "MultiEdit".to_string(),
+            "read_file" => "Read".to_string(),
+            other => other.to_string(),
+        };
+
+        let raw_tool_input = raw
+            .get("tool_input")
+            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+        let tool_input = if raw_tool_name == "apply_patch" {
+            // Bash 経路と同様に空文字列の command も fail-closed にする（必須フィールド扱い）。
+            let command = raw_tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
+            crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
+        } else {
+            Self::parse_tool_input_for_tool("Codex", &mapped_tool_name, raw_tool_input)?
+        };
+
+        debug!(
+            agent = self.format.label(),
+            raw_event = %raw_event,
+            mapped_event = ?event,
+            raw_tool_name = %raw_tool_name,
+            mapped_tool = %mapped_tool_name,
+            "{} parsed input", self.log_prefix()
+        );
+
+        Ok(HookInput {
+            event,
+            tool_name: mapped_tool_name,
+            tool_input,
+            session_id,
+        })
+    }
+
+    fn format_codex_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Codex CLI: Allow は exit 0 + 空 JSON（公式ドキュメント推奨）。
+        // PermissionRequest の Block は専用の hookSpecificOutput で deny を返す。
+        // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny" を使用する
+        // （legacy の {"decision":"block"} も受理されるが、公式ドキュメントの主形式に合わせる）。
+        // PostToolUse / Stop の Block は {"decision":"block","reason":"..."} がそれぞれの正式形式。
+        let output = match decision {
+            Decision::Allow {
+                additional_context: Some(ctx),
+            } if event == HookEvent::AfterFileEdit => {
+                let truncated = truncate_output(ctx, self.output_max_length);
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": truncated
+                    }
+                })
+            }
+            Decision::Allow { .. } => serde_json::json!({}),
+            Decision::Block { message } => {
+                let truncated = self.normalize_and_truncate(message);
+                if event == HookEvent::PermissionRequest {
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PermissionRequest",
+                            "decision": {
+                                "behavior": "deny",
+                                "message": truncated
+                            }
+                        }
+                    })
+                } else if event == HookEvent::BeforeCommand {
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": truncated
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "decision": "block",
+                        "reason": truncated
+                    })
+                }
+            }
+        };
+        serde_json::to_string(&output)
+            .map_err(|e| anyhow!("Failed to serialize Codex output: {}", e))
+    }
+
+    /// Decision のメッセージを output_max_length で切り詰める。
+    fn truncate_decision(&self, decision: &Decision) -> Decision {
+        match decision {
+            Decision::Allow {
+                additional_context: ctx,
+            } => Decision::Allow {
+                additional_context: ctx
+                    .as_ref()
+                    .map(|c| truncate_output(c, self.output_max_length)),
+            },
+            Decision::Block { message } => Decision::Block {
+                message: truncate_output(message, self.output_max_length),
+            },
+        }
+    }
+
+    /// メッセージを正規化してから output_max_length で切り詰める。
+    fn normalize_and_truncate(&self, message: &str) -> String {
+        truncate_output(&normalize_lint_output(message), self.output_max_length)
+    }
+
+    fn parse_apply_patch_file_inputs(command: &str) -> Vec<crate::domain::FileOperationInput> {
+        Self::extract_apply_patch_paths(command)
+            .into_iter()
+            .map(|file_path| crate::domain::FileOperationInput {
+                file_path,
+                content: None,
+            })
+            .collect()
+    }
+
+    fn extract_apply_patch_paths(command: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut last_replaceable_index = None;
+
+        for line in command.lines() {
+            let line = line.trim_end_matches('\r');
+            if let Some(path) = line
+                .strip_prefix("*** Add File: ")
+                .or_else(|| line.strip_prefix("*** Update File: "))
+            {
+                last_replaceable_index = Self::push_unique_apply_patch_path(&mut paths, path);
+            } else if let Some(path) = line.strip_prefix("*** Move to: ") {
+                let path = path.trim();
+                if path.is_empty() {
+                    last_replaceable_index = None;
+                    continue;
+                }
+
+                if let Some(index) = last_replaceable_index.take() {
+                    if let Some(existing_index) = paths.iter().position(|existing| existing == path)
+                    {
+                        if existing_index != index {
+                            paths.remove(index);
+                        }
+                    } else if let Some(existing) = paths.get_mut(index) {
+                        *existing = path.to_string();
+                    }
+                } else {
+                    Self::push_unique_apply_patch_path(&mut paths, path);
+                }
+            } else if line.strip_prefix("*** Delete File: ").is_some() || line.starts_with("*** ") {
+                // 削除対象には保存後フックを実行できない。その他の patch 制御行で rename 候補を閉じる。
+                last_replaceable_index = None;
+            }
+        }
+
+        paths
+    }
+
+    fn push_unique_apply_patch_path(paths: &mut Vec<String>, path: &str) -> Option<usize> {
+        let path = path.trim();
+        if path.is_empty() {
+            return None;
+        }
+
+        if let Some(index) = paths.iter().position(|existing| existing == path) {
+            Some(index)
+        } else {
+            paths.push(path.to_string());
+            Some(paths.len() - 1)
+        }
+    }
+}
+
+// === Antigravity CLI フォーマット ===
+// 公式仕様: docs/hooks/antigravity/antigravity_cli.md
+//
+// 入力（stdin JSON, camelCase）:
+//   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath
+//   - PreToolUse: toolCall { name, args }, stepIdx
+//   - PostToolUse: stepIdx, error (toolCall は含まれない)
+//   - PreInvocation / PostInvocation: invocationNum, initialNumSteps
+//   - Stop: executionNum, terminationReason, error, fullyIdle
+//
+// 出力（stdout JSON）:
+//   - PreToolUse: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
+//   - PostToolUse: {} （事後フックでありブロック不可。エラー伝達も仕様には無い）
+//   - PreInvocation / PostInvocation: { injectSteps?, terminationBehavior? } （claw-hooks スコープ外）
+//   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
+//
+// claw-hooks のスコープ的制約:
+//   - PostToolUse は仕様上発火するが、ペイロードは stepIdx と error のみで toolCall を持たない。
+//     出力も {} 固定。よって「どのファイルが編集されたか」を復元できず、ファイル単位の
+//     拡張子フック（保存後の auto-format）は成立しない。代替: Stop hooks で lint/typecheck を
+//     回し、failure を Stop の "continue" で再投入する。
+//   - PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で、
+//     コマンドブロック・拡張子フックの責務外なのでパススルー（{}）で素通しする。
+impl FormatAdapter {
+    fn parse_agy_input(&self, input: &str) -> Result<HookInput> {
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
+
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Antigravity input: {}", e))?;
+
+        // hook_event_name が正規フィールド。event エイリアスも受ける。
+        let raw_event = raw
+            .get("hook_event_name")
+            .or_else(|| raw.get("event"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
+            .to_string();
+
+        // Antigravity は conversationId を会話 ID として渡す。
+        // session_id エイリアスでも受ける（ローカルテストや他エージェントからの転送向け）。
+        let session_id = raw
+            .get("conversationId")
+            .or_else(|| raw.get("session_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match raw_event.as_str() {
+            "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
+            "Stop" => Ok(Self::parse_agy_stop(&raw, session_id)),
+            // PostToolUse は発火するが、ペイロードに toolCall が含まれない（stepIdx と error のみ）
+            // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
+            // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
+            // いずれもパススルーで Allow を返す。
+            "PostToolUse" | "PreInvocation" | "PostInvocation" => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = %raw_event,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} event is out of scope for claw-hooks, passing through", self.log_prefix()
+                );
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: raw_event,
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                })
+            }
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    "{} unsupported event, passing through", self.log_prefix()
+                );
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                })
+            }
+        }
+    }
+
+    /// Antigravity の PreToolUse をパースして内部 HookInput に変換する。
+    fn parse_agy_pre_tool_use(
+        &self,
+        raw: &serde_json::Value,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
+        let tool_call = raw
+            .get("toolCall")
+            .ok_or_else(|| anyhow!("Missing toolCall field"))?;
+        let raw_tool_name = tool_call
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing toolCall.name field"))?
+            .to_string();
+        let raw_args = tool_call
+            .get("args")
+            .ok_or_else(|| anyhow!("Missing toolCall.args field"))?;
+
+        match raw_tool_name.as_str() {
+            // run_command: Antigravity のシェル実行ツール。args.CommandLine をコマンド本文として扱う。
+            "run_command" => {
+                let command = raw_args
+                    .get("CommandLine")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("Missing toolCall.args.CommandLine field"))?;
+
+                debug!(
+                    agent = self.format.label(),
+                    raw_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforeCommand,
+                    raw_tool_name = %raw_tool_name,
+                    mapped_tool = "Bash",
+                    command_bytes = command.len(),
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforeCommand,
+                    tool_name: "Bash".to_string(),
+                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: command.to_string(),
+                        timeout: None,
+                    }),
+                    session_id,
+                })
+            }
+            // run_command 以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
+            // view_file / list_dir / find_by_name / grep_search / invoke_subagent / ...）は
+            // claw-hooks のコマンドブロックの対象外。Allow パスとして素通しする。
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    raw_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforePrompt,
+                    raw_tool_name = other,
+                    "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforePrompt,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw_args.clone()),
+                    session_id,
+                })
+            }
+        }
+    }
+
+    /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
+    fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+        let termination_reason = raw
+            .get("terminationReason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // terminationReason が "error" のとき、Antigravity は別途 error フィールドに詳細メッセージを入れる。
+        // 互換性のため、agent_message は error → terminationReason の順で取り出す。
+        let agent_message = raw
+            .get("error")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| termination_reason.clone());
+
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                status: termination_reason,
+                loop_count: None,
+                response: None,
+                agent_message,
+                stop_hook_active: false,
+            }),
+            session_id,
+        }
+    }
+
+    fn format_agy_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // Antigravity の出力スキーマはイベントによって異なる:
+        //   - PreToolUse: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
+        //   - PostToolUse / PreInvocation / PostInvocation: {} 固定（ブロック不可）
+        //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は {}
+        let output = match (event, decision) {
+            // Stop の Block は "continue" + reason でエージェントを再起動させ、reason を
+            // system message としてエージェントに注入する（lint/typecheck の修正指示等）。
+            (HookEvent::Stop, Decision::Block { message }) => {
+                let truncated = self.normalize_and_truncate(message);
+                serde_json::json!({
+                    "decision": "continue",
+                    "reason": truncated
+                })
+            }
+            // Stop の Allow は {} を返す（"decision":"continue" 以外なら停止許可、最も無害な空オブジェクト）。
+            (HookEvent::Stop, Decision::Allow { .. }) => serde_json::json!({}),
+            // PostToolUse / 内部 BeforePrompt（PreInvocation / PostInvocation / 未対応ツール）は
+            // ブロック仕様が無いため、claw-hooks 側で Block を検出しても {} に倒す（公式仕様準拠）。
+            (HookEvent::AfterFileEdit, _) | (HookEvent::BeforePrompt, _) => serde_json::json!({}),
+            // PreToolUse の Block は deny として返す（Antigravity 公式の主形式）。
+            (_, Decision::Block { message }) => {
+                let truncated = self.normalize_and_truncate(message);
+                serde_json::json!({
+                    "decision": "deny",
+                    "reason": truncated
+                })
+            }
+            // PreToolUse の Allow は "allow" を返す（明示的に allow を宣言する）。
+            (_, Decision::Allow { .. }) => serde_json::json!({"decision": "allow"}),
+        };
+        serde_json::to_string(&output)
+            .map_err(|e| anyhow!("Failed to serialize Antigravity output: {}", e))
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -3891,521 +4406,5 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         // Antigravity は JSON を stdout に返すため stderr 書き込みは不要
         assert!(!adapter.format_uses_stderr_for_errors());
-    }
-}
-
-// === Codex CLI フォーマット ===
-// 公式ドキュメント: https://developers.openai.com/codex/hooks
-
-impl FormatAdapter {
-    fn parse_codex_input(&self, input: &str) -> Result<HookInput> {
-        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
-
-        let raw: serde_json::Value = serde_json::from_str(input)
-            .map_err(|e| anyhow!("Failed to parse Codex input: {}", e))?;
-
-        debug!(input = %summarize_hook_input(input), "{} parsed JSON", self.log_prefix());
-
-        // イベント名は必須。互換性のため "event" エイリアスも受け付ける。
-        let raw_event = raw
-            .get("hook_event_name")
-            .or_else(|| raw.get("event"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
-            .to_string();
-
-        let session_id = raw
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let event = match raw_event.as_str() {
-            "Stop" | "stop" => HookEvent::Stop,
-            "PreToolUse" | "pre_tool_use" | "BeforeTool" => HookEvent::BeforeCommand,
-            "PermissionRequest" | "permission_request" => HookEvent::PermissionRequest,
-            "PostToolUse" | "post_tool_use" | "AfterTool" => HookEvent::AfterFileEdit,
-            "SubagentStart" | "subagent_start" => HookEvent::SubagentStart,
-            "SubagentStop" | "subagent_stop" => HookEvent::SubagentStop,
-            // claw-hooks の処理対象外イベント: パススルーで Allow を返す
-            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit" => {
-                return Ok(HookInput {
-                    event: HookEvent::BeforePrompt, // パススルー用
-                    tool_name: raw_event,
-                    tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id,
-                });
-            }
-            other => {
-                debug!(event = %other, "{} unknown event, treating as passthrough", self.log_prefix());
-                return Ok(HookInput {
-                    event: HookEvent::BeforePrompt, // パススルー用
-                    tool_name: other.to_string(),
-                    tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id,
-                });
-            }
-        };
-
-        if event == HookEvent::Stop {
-            let agent_message = raw
-                .get("last_assistant_message")
-                .or_else(|| raw.get("stop_reason"))
-                .or_else(|| raw.get("message"))
-                .or_else(|| raw.get("response"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let stop_hook_active = raw
-                .get("stop_hook_active")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            return Ok(HookInput {
-                event,
-                tool_name: "Stop".to_string(),
-                tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                    status: None,
-                    loop_count: None,
-                    response: None,
-                    agent_message,
-                    stop_hook_active,
-                }),
-                session_id,
-            });
-        }
-
-        if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
-            let subagent_type = raw
-                .get("agent_type")
-                .or_else(|| raw.get("subagent_type"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("Missing agent_type field"))?
-                .to_string();
-
-            return Ok(HookInput {
-                event,
-                tool_name: raw_event,
-                tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                    subagent_type: Some(subagent_type),
-                    prompt: raw
-                        .get("prompt")
-                        .or_else(|| raw.get("task"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    status: raw.get("status").and_then(|v| v.as_str()).map(String::from),
-                    duration: raw
-                        .get("duration_ms")
-                        .or_else(|| raw.get("duration"))
-                        .and_then(|v| v.as_u64()),
-                }),
-                session_id,
-            });
-        }
-
-        // ツールイベント
-        let raw_tool_name = raw
-            .get("tool_name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing tool_name field"))?
-            .to_string();
-
-        // Codex のツール名を内部のツール名にマッピング
-        let mapped_tool_name = match raw_tool_name.as_str() {
-            "shell" | "run_command" | "execute" => "Bash".to_string(),
-            "write_file" | "create_file" | "edit_file" => "Write".to_string(),
-            "apply_patch" => "MultiEdit".to_string(),
-            "read_file" => "Read".to_string(),
-            other => other.to_string(),
-        };
-
-        let raw_tool_input = raw
-            .get("tool_input")
-            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
-        let tool_input = if raw_tool_name == "apply_patch" {
-            // Bash 経路と同様に空文字列の command も fail-closed にする（必須フィールド扱い）。
-            let command = raw_tool_input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
-            crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
-        } else {
-            Self::parse_tool_input_for_tool("Codex", &mapped_tool_name, raw_tool_input)?
-        };
-
-        debug!(
-            agent = self.format.label(),
-            raw_event = %raw_event,
-            mapped_event = ?event,
-            raw_tool_name = %raw_tool_name,
-            mapped_tool = %mapped_tool_name,
-            "{} parsed input", self.log_prefix()
-        );
-
-        Ok(HookInput {
-            event,
-            tool_name: mapped_tool_name,
-            tool_input,
-            session_id,
-        })
-    }
-
-    fn format_codex_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Codex CLI: Allow は exit 0 + 空 JSON（公式ドキュメント推奨）。
-        // PermissionRequest の Block は専用の hookSpecificOutput で deny を返す。
-        // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny" を使用する
-        // （legacy の {"decision":"block"} も受理されるが、公式ドキュメントの主形式に合わせる）。
-        // PostToolUse / Stop の Block は {"decision":"block","reason":"..."} がそれぞれの正式形式。
-        let output = match decision {
-            Decision::Allow {
-                additional_context: Some(ctx),
-            } if event == HookEvent::AfterFileEdit => {
-                let truncated = truncate_output(ctx, self.output_max_length);
-                serde_json::json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": truncated
-                    }
-                })
-            }
-            Decision::Allow { .. } => serde_json::json!({}),
-            Decision::Block { message } => {
-                let truncated = self.normalize_and_truncate(message);
-                if event == HookEvent::PermissionRequest {
-                    serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PermissionRequest",
-                            "decision": {
-                                "behavior": "deny",
-                                "message": truncated
-                            }
-                        }
-                    })
-                } else if event == HookEvent::BeforeCommand {
-                    serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": truncated
-                        }
-                    })
-                } else {
-                    serde_json::json!({
-                        "decision": "block",
-                        "reason": truncated
-                    })
-                }
-            }
-        };
-        serde_json::to_string(&output)
-            .map_err(|e| anyhow!("Failed to serialize Codex output: {}", e))
-    }
-
-    /// Decision のメッセージを output_max_length で切り詰める。
-    fn truncate_decision(&self, decision: &Decision) -> Decision {
-        match decision {
-            Decision::Allow {
-                additional_context: ctx,
-            } => Decision::Allow {
-                additional_context: ctx
-                    .as_ref()
-                    .map(|c| truncate_output(c, self.output_max_length)),
-            },
-            Decision::Block { message } => Decision::Block {
-                message: truncate_output(message, self.output_max_length),
-            },
-        }
-    }
-
-    /// メッセージを正規化してから output_max_length で切り詰める。
-    fn normalize_and_truncate(&self, message: &str) -> String {
-        truncate_output(&normalize_lint_output(message), self.output_max_length)
-    }
-
-    fn parse_apply_patch_file_inputs(command: &str) -> Vec<crate::domain::FileOperationInput> {
-        Self::extract_apply_patch_paths(command)
-            .into_iter()
-            .map(|file_path| crate::domain::FileOperationInput {
-                file_path,
-                content: None,
-            })
-            .collect()
-    }
-
-    fn extract_apply_patch_paths(command: &str) -> Vec<String> {
-        let mut paths = Vec::new();
-        let mut last_replaceable_index = None;
-
-        for line in command.lines() {
-            let line = line.trim_end_matches('\r');
-            if let Some(path) = line
-                .strip_prefix("*** Add File: ")
-                .or_else(|| line.strip_prefix("*** Update File: "))
-            {
-                last_replaceable_index = Self::push_unique_apply_patch_path(&mut paths, path);
-            } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-                let path = path.trim();
-                if path.is_empty() {
-                    last_replaceable_index = None;
-                    continue;
-                }
-
-                if let Some(index) = last_replaceable_index.take() {
-                    if let Some(existing_index) = paths.iter().position(|existing| existing == path)
-                    {
-                        if existing_index != index {
-                            paths.remove(index);
-                        }
-                    } else if let Some(existing) = paths.get_mut(index) {
-                        *existing = path.to_string();
-                    }
-                } else {
-                    Self::push_unique_apply_patch_path(&mut paths, path);
-                }
-            } else if line.strip_prefix("*** Delete File: ").is_some() || line.starts_with("*** ") {
-                // 削除対象には保存後フックを実行できない。その他の patch 制御行で rename 候補を閉じる。
-                last_replaceable_index = None;
-            }
-        }
-
-        paths
-    }
-
-    fn push_unique_apply_patch_path(paths: &mut Vec<String>, path: &str) -> Option<usize> {
-        let path = path.trim();
-        if path.is_empty() {
-            return None;
-        }
-
-        if let Some(index) = paths.iter().position(|existing| existing == path) {
-            Some(index)
-        } else {
-            paths.push(path.to_string());
-            Some(paths.len() - 1)
-        }
-    }
-}
-
-// === Antigravity CLI フォーマット ===
-// 公式仕様: docs/hooks/antigravity/antigravity_cli.md
-//
-// 入力（stdin JSON, camelCase）:
-//   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath
-//   - PreToolUse: toolCall { name, args }, stepIdx
-//   - PostToolUse: stepIdx, error (toolCall は含まれない)
-//   - PreInvocation / PostInvocation: invocationNum, initialNumSteps
-//   - Stop: executionNum, terminationReason, error, fullyIdle
-//
-// 出力（stdout JSON）:
-//   - PreToolUse: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
-//   - PostToolUse: {} （事後フックでありブロック不可。エラー伝達も仕様には無い）
-//   - PreInvocation / PostInvocation: { injectSteps?, terminationBehavior? } （claw-hooks スコープ外）
-//   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
-//
-// claw-hooks のスコープ的制約:
-//   - PostToolUse は仕様上発火するが、ペイロードは stepIdx と error のみで toolCall を持たない。
-//     出力も {} 固定。よって「どのファイルが編集されたか」を復元できず、ファイル単位の
-//     拡張子フック（保存後の auto-format）は成立しない。代替: Stop hooks で lint/typecheck を
-//     回し、failure を Stop の "continue" で再投入する。
-//   - PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で、
-//     コマンドブロック・拡張子フックの責務外なのでパススルー（{}）で素通しする。
-impl FormatAdapter {
-    fn parse_agy_input(&self, input: &str) -> Result<HookInput> {
-        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
-
-        let raw: serde_json::Value = serde_json::from_str(input)
-            .map_err(|e| anyhow!("Failed to parse Antigravity input: {}", e))?;
-
-        // hook_event_name が正規フィールド。event エイリアスも受ける。
-        let raw_event = raw
-            .get("hook_event_name")
-            .or_else(|| raw.get("event"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
-            .to_string();
-
-        // Antigravity は conversationId を会話 ID として渡す。
-        // session_id エイリアスでも受ける（ローカルテストや他エージェントからの転送向け）。
-        let session_id = raw
-            .get("conversationId")
-            .or_else(|| raw.get("session_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        match raw_event.as_str() {
-            "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
-            "Stop" => Ok(Self::parse_agy_stop(&raw, session_id)),
-            // PostToolUse は発火するが、ペイロードに toolCall が含まれない（stepIdx と error のみ）
-            // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
-            // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
-            // いずれもパススルーで Allow を返す。
-            "PostToolUse" | "PreInvocation" | "PostInvocation" => {
-                debug!(
-                    agent = self.format.label(),
-                    hook_event_name = %raw_event,
-                    mapped_event = ?HookEvent::BeforePrompt,
-                    "{} event is out of scope for claw-hooks, passing through", self.log_prefix()
-                );
-                Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
-                    tool_name: raw_event,
-                    tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id,
-                })
-            }
-            other => {
-                debug!(
-                    agent = self.format.label(),
-                    hook_event_name = other,
-                    mapped_event = ?HookEvent::BeforePrompt,
-                    "{} unsupported event, passing through", self.log_prefix()
-                );
-                Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
-                    tool_name: other.to_string(),
-                    tool_input: crate::domain::ToolInput::Other(raw),
-                    session_id,
-                })
-            }
-        }
-    }
-
-    /// Antigravity の PreToolUse をパースして内部 HookInput に変換する。
-    fn parse_agy_pre_tool_use(
-        &self,
-        raw: &serde_json::Value,
-        session_id: Option<String>,
-    ) -> Result<HookInput> {
-        let tool_call = raw
-            .get("toolCall")
-            .ok_or_else(|| anyhow!("Missing toolCall field"))?;
-        let raw_tool_name = tool_call
-            .get("name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing toolCall.name field"))?
-            .to_string();
-        let raw_args = tool_call
-            .get("args")
-            .ok_or_else(|| anyhow!("Missing toolCall.args field"))?;
-
-        match raw_tool_name.as_str() {
-            // run_command: Antigravity のシェル実行ツール。args.CommandLine をコマンド本文として扱う。
-            "run_command" => {
-                let command = raw_args
-                    .get("CommandLine")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("Missing toolCall.args.CommandLine field"))?;
-
-                debug!(
-                    agent = self.format.label(),
-                    raw_event = "PreToolUse",
-                    mapped_event = ?HookEvent::BeforeCommand,
-                    raw_tool_name = %raw_tool_name,
-                    mapped_tool = "Bash",
-                    command_bytes = command.len(),
-                    "{} parsed input", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::BeforeCommand,
-                    tool_name: "Bash".to_string(),
-                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
-                        command: command.to_string(),
-                        timeout: None,
-                    }),
-                    session_id,
-                })
-            }
-            // run_command 以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
-            // view_file / list_dir / find_by_name / grep_search / invoke_subagent / ...）は
-            // claw-hooks のコマンドブロックの対象外。Allow パスとして素通しする。
-            other => {
-                debug!(
-                    agent = self.format.label(),
-                    raw_event = "PreToolUse",
-                    mapped_event = ?HookEvent::BeforePrompt,
-                    raw_tool_name = other,
-                    "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
-                );
-
-                Ok(HookInput {
-                    event: HookEvent::BeforePrompt,
-                    tool_name: other.to_string(),
-                    tool_input: crate::domain::ToolInput::Other(raw_args.clone()),
-                    session_id,
-                })
-            }
-        }
-    }
-
-    /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
-    fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
-        let termination_reason = raw
-            .get("terminationReason")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // terminationReason が "error" のとき、Antigravity は別途 error フィールドに詳細メッセージを入れる。
-        // 互換性のため、agent_message は error → terminationReason の順で取り出す。
-        let agent_message = raw
-            .get("error")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| termination_reason.clone());
-
-        HookInput {
-            event: HookEvent::Stop,
-            tool_name: "Stop".to_string(),
-            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                status: termination_reason,
-                loop_count: None,
-                response: None,
-                agent_message,
-                stop_hook_active: false,
-            }),
-            session_id,
-        }
-    }
-
-    fn format_agy_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
-        // Antigravity の出力スキーマはイベントによって異なる:
-        //   - PreToolUse: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
-        //   - PostToolUse / PreInvocation / PostInvocation: {} 固定（ブロック不可）
-        //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は {}
-        let output = match (event, decision) {
-            // Stop の Block は "continue" + reason でエージェントを再起動させ、reason を
-            // system message としてエージェントに注入する（lint/typecheck の修正指示等）。
-            (HookEvent::Stop, Decision::Block { message }) => {
-                let truncated = self.normalize_and_truncate(message);
-                serde_json::json!({
-                    "decision": "continue",
-                    "reason": truncated
-                })
-            }
-            // Stop の Allow は {} を返す（"decision":"continue" 以外なら停止許可、最も無害な空オブジェクト）。
-            (HookEvent::Stop, Decision::Allow { .. }) => serde_json::json!({}),
-            // PostToolUse / 内部 BeforePrompt（PreInvocation / PostInvocation / 未対応ツール）は
-            // ブロック仕様が無いため、claw-hooks 側で Block を検出しても {} に倒す（公式仕様準拠）。
-            (HookEvent::AfterFileEdit, _) | (HookEvent::BeforePrompt, _) => serde_json::json!({}),
-            // PreToolUse の Block は deny として返す（Antigravity 公式の主形式）。
-            (_, Decision::Block { message }) => {
-                let truncated = self.normalize_and_truncate(message);
-                serde_json::json!({
-                    "decision": "deny",
-                    "reason": truncated
-                })
-            }
-            // PreToolUse の Allow は "allow" を返す（明示的に allow を宣言する）。
-            (_, Decision::Allow { .. }) => serde_json::json!({"decision": "allow"}),
-        };
-        serde_json::to_string(&output)
-            .map_err(|e| anyhow!("Failed to serialize Antigravity output: {}", e))
     }
 }

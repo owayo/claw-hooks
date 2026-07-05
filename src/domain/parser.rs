@@ -25,6 +25,12 @@ const MAX_RECURSION_DEPTH: usize = 64;
 #[cfg(feature = "ast-parser")]
 const MAX_NODE_DEPTH: usize = 500;
 
+/// 括弧 `()`・ブレース `{}` のネスト深さ上限（病的入力ガード）。
+/// `is_pathological_command` が合算ネスト深さをこの値と比較し、超過する入力は
+/// 解析を諦め安全側（危険コマンド候補）に倒して fail-closed を保つ。
+/// 正当なコマンドで超えることはまずない。
+const MAX_NESTING_DEPTH: usize = 96;
+
 thread_local! {
     /// 再帰解析の現在の深さ（スレッドローカル）。同一スレッドの再帰チェーン内で
     /// 共有され、`RecursionGuard` により increment / decrement される。
@@ -80,6 +86,18 @@ const SHELL_COMMANDS: &[&str] = &[
 /// find で後続引数をコマンドとして実行する述語
 const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
 
+/// 再評価系コマンドがシェルとして再評価する内側コマンド文字列
+/// （`ShellParser::reevaluated_inner_command_strings` の要素）。
+struct ReevaluatedInner {
+    /// 再評価される内側コマンド文字列。
+    text: String,
+    /// 内側文字列そのものを 1 つの完全コマンド文字列として扱うべきか。
+    /// xargs のみ true: `xargs rm -rf` の `rm -rf` は再帰解析とは別に、それ自体が
+    /// アンカー付きカスタムフィルタ（`^rm`）の照合対象となる完全コマンド文字列になる。
+    /// コマンド名抽出経路では再帰解析が名前を拾うため、このフラグは参照しない。
+    raw_is_command_string: bool,
+}
+
 /// コマンド名を判定用のキーに正規化する。
 ///
 /// 以下を行う:
@@ -123,10 +141,11 @@ fn expand_braces_first_choice(word: &str) -> String {
     out
 }
 
-/// ブレース展開の再帰深さ上限。病的入力ガード（`is_pathological_command`）と同じ値。
-/// これを超える深さは正当なコマンドでは生じず、超過時は残りをそのまま追記して
-/// スタックオーバーフローを避ける（runtime 経路では事前に病的入力として block 済み）。
-const MAX_BRACE_EXPAND_DEPTH: usize = 96;
+/// ブレース展開の再帰深さ上限。病的入力ガード（`MAX_NESTING_DEPTH`）と同値でなければ
+/// ならない: runtime 経路ではブレースネストがこれを超える入力は `is_pathological_command`
+/// が事前に block するため、この値が実際に到達し得る再帰深さの上限になる。
+/// 超過時は残りをそのまま追記してスタックオーバーフローを避ける。
+const MAX_BRACE_EXPAND_DEPTH: usize = MAX_NESTING_DEPTH;
 
 /// `s` を1パスで走査し、コマンド名位置のブレース展開を「最初の非空選択肢」で畳んだ結果を
 /// `out` へ追記する。選んだ選択肢は再帰的に展開する。各バイトは1回だけ走査・コピーされる
@@ -313,8 +332,6 @@ impl ShellParser {
     fn is_pathological_command(command: &str) -> bool {
         /// コマンド文字列長の上限（バイト）。
         const MAX_COMMAND_LEN: usize = 65_536;
-        /// 括弧ネスト深さの上限。正当なコマンドで超えることはまずない。
-        const MAX_PAREN_DEPTH: usize = 96;
 
         if command.len() > MAX_COMMAND_LEN {
             return true;
@@ -337,7 +354,7 @@ impl ShellParser {
                 _ => {}
             }
         }
-        max_depth > MAX_PAREN_DEPTH
+        max_depth > MAX_NESTING_DEPTH
     }
 
     /// 病的入力に対して返す、安全側（危険コマンド候補）のコマンド一覧。
@@ -420,21 +437,13 @@ impl ShellParser {
                         };
                         command_strings.push(full_cmd);
 
-                        // shell -c "command" を処理 - ネストされたコマンド文字列を抽出
-                        // シェルコマンド抽出にはクォート除去済み引数を使用
-                        if is_shell_command(&cmd_name) {
-                            let args = self.get_command_arguments(node, source);
-                            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
-                                let nested = self.extract_command_strings(&shell_cmd);
-                                command_strings.extend(nested);
-                            }
-                        }
+                        // 内側コマンドの抽出にはクォート除去済み引数を使用（一度だけ取得して共有）
+                        let args = self.get_command_arguments(node, source);
 
                         // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も
                         // 抽出する。これを行わないと `^npm install` のようなアンカー付きカスタム
                         // フィルタが `sudo npm install` で素通りする。
                         if is_command_wrapper(&cmd_name) {
-                            let args = self.get_command_arguments(node, source);
                             if let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args) {
                                 let inner = args[idx..].join(" ");
                                 if !inner.is_empty() {
@@ -443,39 +452,16 @@ impl ShellParser {
                             }
                         }
 
-                        // env -S / --split-string を処理（分割文字列をコマンドとして再評価）
-                        if matches_command(&cmd_name, "env") {
-                            let args = self.get_command_arguments(node, source);
-                            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
-                                command_strings.extend(self.extract_command_strings(&env_cmd));
+                        // shell -c / env -S / xargs / eval / find -exec など、後続をコマンド
+                        // として再評価する形の内側コマンド文字列も抽出する。ディスパッチは
+                        // コマンド名抽出経路（extract_reevaluated_inner_commands）と同一実装
+                        // （reevaluated_inner_command_strings）を共有し、経路間の実装乖離に
+                        // よる検出漏れ（fail-open）を防ぐ。
+                        for inner in Self::reevaluated_inner_command_strings(&cmd_name, &args) {
+                            if inner.raw_is_command_string {
+                                command_strings.push(inner.text.clone());
                             }
-                        }
-
-                        // xargs を処理 - 実行されるコマンドを抽出
-                        if matches_command(&cmd_name, "xargs") {
-                            let args = self.get_command_arguments(node, source);
-                            if let Some(xargs_cmd) =
-                                Self::extract_xargs_command_string_from_args(&args)
-                            {
-                                command_strings.push(xargs_cmd.clone());
-                                command_strings.extend(self.extract_command_strings(&xargs_cmd));
-                            }
-                        }
-
-                        // eval は引数をシェルとして再評価するため、内側の文字列も解析する
-                        if matches_command(&cmd_name, "eval") {
-                            let args = self.get_command_arguments(node, source);
-                            if let Some(eval_cmd) = Self::join_eval_args(&args) {
-                                command_strings.extend(self.extract_command_strings(&eval_cmd));
-                            }
-                        }
-
-                        // find -exec/-execdir は後続の引数をコマンドとして実行する
-                        if matches_command(&cmd_name, "find") {
-                            let args = self.get_command_arguments(node, source);
-                            for exec_cmd in Self::extract_find_exec_commands(&args) {
-                                command_strings.extend(self.extract_command_strings(&exec_cmd));
-                            }
+                            command_strings.extend(self.extract_command_strings(&inner.text));
                         }
                     }
                 }
@@ -570,13 +556,6 @@ impl ShellParser {
         };
         command_strings.push(full_cmd);
 
-        // shell -c "command" を処理
-        if is_shell_command(&cmd_name) {
-            if let Some(shell_cmd) = Self::extract_shell_c_from_args(&args) {
-                command_strings.extend(self.extract_command_strings_fallback(&shell_cmd));
-            }
-        }
-
         // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も抽出する。
         // アンカー付きカスタムフィルタが `sudo npm install` で素通りするのを防ぐ。
         if is_command_wrapper(&cmd_name) {
@@ -588,33 +567,15 @@ impl ShellParser {
             }
         }
 
-        // env -S / --split-string を処理（分割文字列をコマンドとして再評価）
-        if matches_command(&cmd_name, "env") {
-            if let Some(env_cmd) = Self::extract_env_split_string_from_args(&args) {
-                command_strings.extend(self.extract_command_strings_fallback(&env_cmd));
+        // shell -c / env -S / xargs / eval / find -exec など、後続をコマンドとして
+        // 再評価する形の内側コマンド文字列も抽出する。ディスパッチはコマンド名抽出経路
+        // と同一実装（reevaluated_inner_command_strings）を共有し、経路間の実装乖離に
+        // よる検出漏れ（fail-open）を防ぐ。
+        for inner in Self::reevaluated_inner_command_strings(&cmd_name, &args) {
+            if inner.raw_is_command_string {
+                command_strings.push(inner.text.clone());
             }
-        }
-
-        // xargs 対象コマンドを処理
-        if matches_command(&cmd_name, "xargs") {
-            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(&args) {
-                command_strings.push(xargs_cmd.clone());
-                command_strings.extend(self.extract_command_strings_fallback(&xargs_cmd));
-            }
-        }
-
-        // eval は引数をシェルとして再評価するため、内側の文字列も解析する。
-        if matches_command(&cmd_name, "eval") {
-            if let Some(eval_cmd) = Self::join_eval_args(&args) {
-                command_strings.extend(self.extract_command_strings_fallback(&eval_cmd));
-            }
-        }
-
-        // find -exec/-execdir は後続の引数をコマンドとして実行する。
-        if matches_command(&cmd_name, "find") {
-            for exec_cmd in Self::extract_find_exec_commands(&args) {
-                command_strings.extend(self.extract_command_strings_fallback(&exec_cmd));
-            }
+            command_strings.extend(self.extract_command_strings_fallback(&inner.text));
         }
 
         // 引数内のコマンド置換を処理。
@@ -683,6 +644,70 @@ impl ShellParser {
         }
     }
 
+    /// 再評価系コマンド（shell -c / env -S / xargs / eval / find -exec）が後続の引数を
+    /// コマンドとして再評価する場合、その内側コマンド文字列を列挙する純粋ヘルパ。
+    ///
+    /// AST/fallback × コマンド名抽出/コマンド文字列抽出の全経路がこの単一ディスパッチを
+    /// 共有し、再帰先（AST か fallback か、名前抽出か文字列抽出か）は呼び出し側が選ぶ。
+    /// かつては経路ごとに同じ分岐が個別実装されており、片方にだけ再評価形式が欠けて
+    /// 検出漏れ（fail-open）が生じた（例: ラッパー配下の env/xargs/eval/find 再評価漏れ）。
+    /// 新しい再評価形式への対応はこの関数にのみ追加すればよい。
+    /// 返却順に意味はない（全消費者は集合として扱う）。
+    fn reevaluated_inner_command_strings(cmd_name: &str, args: &[String]) -> Vec<ReevaluatedInner> {
+        let mut inners = Vec::new();
+        // 判定キーは一度だけ計算して全分岐で共有する（command_key は String 割当を伴う）。
+        let key = command_key(cmd_name);
+        // shell -c "command"（bash/sh/... のほか su -c / runuser -c / flock -c も含む）
+        if SHELL_COMMANDS.contains(&key.as_str()) {
+            if let Some(shell_cmd) = Self::extract_shell_c_from_args(args) {
+                inners.push(ReevaluatedInner {
+                    text: shell_cmd,
+                    raw_is_command_string: false,
+                });
+            }
+        }
+        match key.as_str() {
+            // env -S / --split-string（分割文字列をコマンドとして再評価）
+            "env" => {
+                if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
+                    inners.push(ReevaluatedInner {
+                        text: env_cmd,
+                        raw_is_command_string: false,
+                    });
+                }
+            }
+            // xargs（標準入力の各要素に対して実行するコマンド）
+            "xargs" => {
+                if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(args) {
+                    inners.push(ReevaluatedInner {
+                        text: xargs_cmd,
+                        raw_is_command_string: true,
+                    });
+                }
+            }
+            // eval（引数をシェルとして再評価）
+            "eval" => {
+                if let Some(eval_cmd) = Self::join_eval_args(args) {
+                    inners.push(ReevaluatedInner {
+                        text: eval_cmd,
+                        raw_is_command_string: false,
+                    });
+                }
+            }
+            // find -exec/-execdir（後続の引数をコマンドとして実行）
+            "find" => {
+                for exec_cmd in Self::extract_find_exec_commands(args) {
+                    inners.push(ReevaluatedInner {
+                        text: exec_cmd,
+                        raw_is_command_string: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+        inners
+    }
+
     /// 再評価系コマンド（shell -c / env -S / xargs / eval / find -exec）の内側コマンドを
     /// 抽出する。これらは後続の引数をコマンドとして再評価するため、内側の実コマンドを
     /// 取りこぼすと危険コマンド検出が漏れる（fail-open）。
@@ -690,8 +715,9 @@ impl ShellParser {
     /// トップレベル（extract_commands_from_node）とラッパー配下
     /// （process_wrapper_args）の双方から呼ぶ。かつては両者が同じロジックを個別に
     /// 実装しており、ラッパー側にだけ env/xargs/eval/find の再評価処理が欠けていたため、
-    /// `sudo eval "rm -rf /"` などが素通り（fail-open）していた。共通ヘルパに集約して
-    /// 再発を防ぐ。
+    /// `sudo eval "rm -rf /"` などが素通り（fail-open）していた。ディスパッチ本体は
+    /// `reevaluated_inner_command_strings` に単一実装され、コマンド文字列抽出経路とも
+    /// 共有される。
     #[cfg(feature = "ast-parser")]
     fn extract_reevaluated_inner_commands(
         &mut self,
@@ -699,44 +725,9 @@ impl ShellParser {
         args: &[String],
         commands: &mut Vec<String>,
     ) {
-        // shell -c "command"
-        if is_shell_command(cmd_name) {
-            if let Some(shell_cmd) = Self::extract_shell_c_from_args(args) {
-                for nested in self.extract_commands(&shell_cmd) {
-                    Self::push_unique_command(commands, &nested);
-                }
-            }
-        }
-        // env -S / --split-string（分割文字列をコマンドとして再評価）
-        if matches_command(cmd_name, "env") {
-            if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
-                for nested in self.extract_commands(&env_cmd) {
-                    Self::push_unique_command(commands, &nested);
-                }
-            }
-        }
-        // xargs（標準入力の各要素に対して実行するコマンド）
-        if matches_command(cmd_name, "xargs") {
-            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(args) {
-                for nested in self.extract_commands(&xargs_cmd) {
-                    Self::push_unique_command(commands, &nested);
-                }
-            }
-        }
-        // eval（引数をシェルとして再評価）
-        if matches_command(cmd_name, "eval") {
-            if let Some(eval_cmd) = Self::join_eval_args(args) {
-                for nested in self.extract_commands(&eval_cmd) {
-                    Self::push_unique_command(commands, &nested);
-                }
-            }
-        }
-        // find -exec/-execdir（後続の引数をコマンドとして実行）
-        if matches_command(cmd_name, "find") {
-            for exec_cmd in Self::extract_find_exec_commands(args) {
-                for nested in self.extract_commands(&exec_cmd) {
-                    Self::push_unique_command(commands, &nested);
-                }
+        for inner in Self::reevaluated_inner_command_strings(cmd_name, args) {
+            for nested in self.extract_commands(&inner.text) {
+                Self::push_unique_command(commands, &nested);
             }
         }
     }
@@ -1872,42 +1863,17 @@ impl ShellParser {
     /// 再評価系コマンド（shell -c / env -S / xargs / eval / find -exec）の内側コマンドを
     /// 抽出する（フォールバック経路）。AST 経路の extract_reevaluated_inner_commands と
     /// 対になり、トップレベル（extract_commands_from_segment_fallback）とラッパー展開
-    /// （expand_wrapper_commands_fallback）の双方から呼ぶ。
+    /// （expand_wrapper_commands_fallback）の双方から呼ぶ。ディスパッチ本体は
+    /// `reevaluated_inner_command_strings` に単一実装され、AST 経路・コマンド文字列
+    /// 抽出経路とも共有される。
     fn extract_reevaluated_inner_commands_fallback(
         &self,
         cmd_name: &str,
         args: &[String],
         commands: &mut Vec<String>,
     ) {
-        // shell -c "command"
-        if is_shell_command(cmd_name) {
-            if let Some(shell_cmd) = Self::extract_shell_c_from_args(args) {
-                commands.extend(self.extract_commands_fallback(&shell_cmd));
-            }
-        }
-        // env -S / --split-string（分割文字列をコマンドとして再評価）
-        if matches_command(cmd_name, "env") {
-            if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
-                commands.extend(self.extract_commands_fallback(&env_cmd));
-            }
-        }
-        // xargs（標準入力の各要素に対して実行するコマンド）
-        if matches_command(cmd_name, "xargs") {
-            if let Some(xargs_cmd) = Self::extract_xargs_command_string_from_args(args) {
-                commands.extend(self.extract_commands_fallback(&xargs_cmd));
-            }
-        }
-        // eval（引数をシェルとして再評価）
-        if matches_command(cmd_name, "eval") {
-            if let Some(eval_cmd) = Self::join_eval_args(args) {
-                commands.extend(self.extract_commands_fallback(&eval_cmd));
-            }
-        }
-        // find -exec/-execdir（後続の引数をコマンドとして実行）
-        if matches_command(cmd_name, "find") {
-            for exec_cmd in Self::extract_find_exec_commands(args) {
-                commands.extend(self.extract_commands_fallback(&exec_cmd));
-            }
+        for inner in Self::reevaluated_inner_command_strings(cmd_name, args) {
+            commands.extend(self.extract_commands_fallback(&inner.text));
         }
     }
 

@@ -1,5 +1,7 @@
 //! フィルターチェーンの実装。
 
+use tracing::warn;
+
 use crate::config::Config;
 use crate::domain::Decision;
 use crate::domain::HookInput;
@@ -35,23 +37,35 @@ impl FilterChain {
 
         // カスタムフィルターを追加
         for custom in &config.custom_filters {
+            // 正規表現のコンパイルに失敗したカスタムフィルターはスキップする。
+            // 設定はユーザー由来のためエラー（パターンを含み得る）もログに残す。
             let filter: Box<dyn Filter> = if custom.args.is_empty() {
                 // 正規表現モード: commandを正規表現パターンとして扱う
-                if let Ok(f) = CustomCommandFilter::new(&custom.command, custom.message.clone()) {
-                    Box::new(f)
-                } else {
-                    continue;
+                match CustomCommandFilter::new(&custom.command, custom.message.clone()) {
+                    Ok(f) => Box::new(f),
+                    Err(e) => {
+                        warn!(
+                            "⚠️ 無効なカスタムフィルター（正規表現モード）をスキップしました: command={:?}, error={}",
+                            custom.command, e
+                        );
+                        continue;
+                    }
                 }
             } else {
                 // Argsモード: 正規表現コマンド名 + 引数マッチング
-                if let Ok(f) = CustomCommandFilter::with_args(
+                match CustomCommandFilter::with_args(
                     &custom.command,
                     custom.args.clone(),
                     custom.message.clone(),
                 ) {
-                    Box::new(f)
-                } else {
-                    continue;
+                    Ok(f) => Box::new(f),
+                    Err(e) => {
+                        warn!(
+                            "⚠️ 無効なカスタムフィルター（Argsモード）をスキップしました: command={:?}, error={}",
+                            custom.command, e
+                        );
+                        continue;
+                    }
                 }
             };
             filters.push(filter);

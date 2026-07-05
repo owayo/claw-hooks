@@ -60,7 +60,7 @@ impl HookService {
         // 制限超過時はフェイルクローズ（ブロック）として扱う。
         // バイト列として読み取り、サイズ制限は生のバイト長で判定する。
         // `read_to_string` は不正な UTF-8 で `?` により即時エラー終了
-        // （exit 1・stdout 空）に倒れるが、これは Codex/Gemini では
+        // （exit 1・stdout 空）に倒れるが、これは Codex/Antigravity では
         // 「フック失敗＝判定無視」と解釈されフェイルオープンになる
         // （危険コマンドのブロックが効かなくなる）。そのため一旦バイトで読み、
         // 損失あり変換でフェイルクローズ経路（パース失敗→ブロック、または
@@ -70,21 +70,14 @@ impl HookService {
         let mut limited = stdin_locked.take(MAX_INPUT_BYTES + 1);
         limited.read_to_end(&mut raw)?;
         if raw.len() as u64 > MAX_INPUT_BYTES {
-            if self.trace {
-                eprintln!(
-                    "🔍 [TRACE] ERROR: Input exceeds limit: {} bytes (max {})",
-                    raw.len(),
-                    MAX_INPUT_BYTES
-                );
-            }
-            error!(
+            // 入力過大でフェイルクローズ。ログには実バイト数と上限を残しつつ、
+            // エージェントへ返す本文は短い定型文（"Input too large"）にする。
+            let log_message = format!(
                 "Input exceeds limit: {} bytes (max {})",
                 raw.len(),
                 MAX_INPUT_BYTES
             );
-            let output_json = self.adapter.format_error("Input too large");
-            self.write_error_output(&mut stdout, &output_json)?;
-            return Ok(self.adapter.error_exit_code());
+            return self.fail_closed(&mut stdout, &log_message, "Input too large", None);
         }
         // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
         // （置換文字 U+FFFD に変換され、後続のパース/検出はフェイルクローズで動作する）。
@@ -98,14 +91,13 @@ impl HookService {
         }
 
         if input.is_empty() {
-            if self.trace {
-                eprintln!("🔍 [TRACE] ERROR: No input received from stdin");
-            }
-            error!("No input received from stdin");
             // セキュリティ: フェイルクローズ - 入力がない場合はブロック
-            let output_json = self.adapter.format_error("No input received from stdin");
-            self.write_error_output(&mut stdout, &output_json)?;
-            return Ok(self.adapter.error_exit_code());
+            return self.fail_closed(
+                &mut stdout,
+                "No input received from stdin",
+                "No input received from stdin",
+                None,
+            );
         }
 
         debug!("Received input: {}", summarize_hook_input(&input));
@@ -123,21 +115,11 @@ impl HookService {
                 parsed
             }
             Err(e) => {
+                // セキュリティ: フェイルクローズ終了コード（2 = block）。
+                // パース失敗経路は元入力からイベント名を判定し、エージェント別の
+                // 適切な deny フォーマット（format_error_for_input）で返す。
                 let error_msg = format!("Failed to parse input: {}", e);
-                if self.trace {
-                    eprintln!("🔍 [TRACE] Parse error: {}", error_msg);
-                }
-                error!("{}", error_msg);
-                // 適切なフォーマットでエラーを出力
-                // セキュリティ: フェイルクローズ終了コード（2 = block）
-                let output_json = self.adapter.format_error_for_input(&error_msg, &input);
-                self.write_error_output(&mut stdout, &output_json)?;
-                // フェイルクローズ。プロセスを直接終了せず終了コードを返すことで、
-                // 非同期ログ（tracing-appender）のフラッシュ用ガードを呼び出し側
-                // （main）で確実に drop してから終了できるようにする
-                // （process::exit はスタックローカルの drop を実行しないため、
-                //  ここで直接終了するとパースエラー診断ログが欠落し得る）。
-                return Ok(self.adapter.error_exit_code());
+                return self.fail_closed(&mut stdout, &error_msg, &error_msg, Some(&input));
             }
         };
 
@@ -237,12 +219,55 @@ impl HookService {
         self.filter_chain.execute(input)
     }
 
-    /// BeforePrompt イベントの処理（Gemini CLI のみ）。
+    /// BeforePrompt イベントの処理。
+    ///
+    /// BeforePrompt は claw-hooks が対応しない/スコープ外のイベント
+    /// （SessionStart / UserPromptSubmit や各エージェント固有の未対応イベント等）を
+    /// 集約するパススルー用のマーカーとして扱う。claw-hooks は意図的に
+    /// コマンドブロック・保存後フック・Stop フック・サブエージェント通知に機能を
+    /// 限定しており、ライフサイクル/プロンプトのオーケストレーションには踏み込まない。
+    /// そのため常に Allow を返す。
     fn handle_before_prompt(&self, _input: &HookInput) -> Decision {
         debug!("Handling BeforePrompt event");
 
-        // BeforePrompt は現在パススルーイベント
+        // スコープ外イベントは常に許可（パススルー）
         Decision::allow()
+    }
+
+    /// フェイルクローズ（ブロック）でエラー応答を返す共通処理。
+    ///
+    /// 3 つのフェイルクローズ経路（入力過大 / 空入力 / パース失敗）で重複していた
+    /// 「トレース出力 → error! ログ → エラー整形 → 出力書き込み → 終了コード返却」を集約する。
+    ///
+    /// - `log_message`: トレース（stderr）と `error!` ログに残す診断メッセージ。
+    /// - `emit_message`: エージェントへ返す整形済みエラーの本文。通常は `log_message`
+    ///   と同一だが、入力過大時のみ短い定型文（"Input too large"）を用いる。
+    /// - `raw_input`: パース失敗経路のみ元入力を渡す。イベント名を判定して
+    ///   エージェント別の適切な deny フォーマット（`format_error_for_input`）で返すため。
+    ///   `None` の場合は汎用フォーマット（`format_error`）を用いる。
+    ///
+    /// プロセスを直接終了せず終了コードを返すのは、非同期ログ（tracing-appender）の
+    /// フラッシュ用ガードを呼び出し側（main）で確実に drop してから終了するため
+    /// （`process::exit` はスタックローカルの drop を実行しないため、ここで直接終了すると
+    /// 診断ログが欠落し得る）。
+    fn fail_closed(
+        &self,
+        stdout: &mut io::StdoutLock,
+        log_message: &str,
+        emit_message: &str,
+        raw_input: Option<&str>,
+    ) -> Result<i32> {
+        if self.trace {
+            eprintln!("🔍 [TRACE] ERROR: {}", log_message);
+        }
+        error!("{}", log_message);
+        // パース失敗経路は元入力からイベント名を判定して適切なフォーマットで返す。
+        let output_json = match raw_input {
+            Some(input) => self.adapter.format_error_for_input(emit_message, input),
+            None => self.adapter.format_error(emit_message),
+        };
+        self.write_error_output(stdout, &output_json)?;
+        Ok(self.adapter.error_exit_code())
     }
 
     /// フェイルクローズ時のエラー出力を適切なストリームに書き込む。

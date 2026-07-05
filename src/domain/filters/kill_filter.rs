@@ -67,13 +67,14 @@ mod tests {
     fn test_xargs_kill_does_not_false_positive_on_similar_command() {
         // `xargs-wrapper` / `xargsfoo` は `xargs` で始まる別コマンドであり、
         // xargs 経由の kill ではないため過剰ブロックしないこと（前方一致の誤検知防止）。
-        assert!(!contains_xargs_kill("ps | xargs-wrapper kill"));
-        assert!(!contains_xargs_kill("ps | xargsfoo kill"));
+        // 検出は parser の extract_commands（フィルタ主経路）が担うため入力レベルで検証する。
+        assert!(!contains_kill_command("ps | xargs-wrapper kill"));
+        assert!(!contains_kill_command("ps | xargsfoo kill"));
         // 本物の xargs kill は引き続き検出する（回帰防止）。
-        assert!(contains_xargs_kill("ps aux | xargs kill"));
-        assert!(contains_xargs_kill("pgrep node | xargs kill -9"));
+        assert!(contains_kill_command("ps aux | xargs kill"));
+        assert!(contains_kill_command("pgrep node | xargs kill -9"));
         // 値取りフラグを挟んでも検出する。
-        assert!(contains_xargs_kill("ps | xargs -r kill"));
+        assert!(contains_kill_command("ps | xargs -r kill"));
     }
 
     #[test]
@@ -211,66 +212,34 @@ mod tests {
         assert!(!contains_kill_command("grep killall docs.txt"));
     }
 
-    // === xargs 追加テスト ===
+    // === xargs 経由 kill の入力レベル回帰テスト ===
+    // 旧 contains_xargs_kill ユニットテストが担保していたケースを、フィルタ入力レベル
+    // （parser の extract_commands 主経路）で検証する回帰テストとして維持する。
 
     #[test]
-    fn test_contains_xargs_kill_direct() {
-        assert!(contains_xargs_kill("ps | xargs kill"));
-        assert!(contains_xargs_kill("pgrep node | xargs kill -9"));
-        assert!(contains_xargs_kill("ps | xargs pkill"));
-        assert!(contains_xargs_kill("ps | xargs killall"));
-        assert!(contains_xargs_kill("ps | xargs taskkill"));
+    fn test_xargs_kill_variants_detected_via_parser_path() {
+        assert!(contains_kill_command("ps | xargs kill"));
+        assert!(contains_kill_command("pgrep node | xargs kill -9"));
+        assert!(contains_kill_command("ps | xargs pkill"));
+        assert!(contains_kill_command("ps | xargs killall"));
+        assert!(contains_kill_command("ps | xargs taskkill"));
     }
 
     #[test]
-    fn test_contains_xargs_kill_with_flags() {
-        assert!(contains_xargs_kill("ps | xargs -n1 kill"));
-        assert!(contains_xargs_kill("ps | xargs -P4 kill"));
-        assert!(contains_xargs_kill("ps | xargs -I {} kill -9 {}"));
+    fn test_xargs_kill_with_flags_detected_via_parser_path() {
+        assert!(contains_kill_command("ps | xargs -n1 kill"));
+        assert!(contains_kill_command("ps | xargs -P4 kill"));
+        assert!(contains_kill_command("ps | xargs -I {} kill -9 {}"));
     }
 
     #[test]
-    fn test_contains_xargs_kill_non_kill() {
-        assert!(!contains_xargs_kill("find . | xargs echo"));
-        assert!(!contains_xargs_kill("find . | xargs rm"));
+    fn test_xargs_non_kill_command_not_detected_via_parser_path() {
+        assert!(!contains_kill_command("find . | xargs echo"));
+        assert!(!contains_kill_command("find . | xargs rm"));
     }
 
     #[test]
     fn test_kill_with_timeout_wrapper() {
         assert!(contains_kill_command("timeout 10 kill -9 1234"));
-    }
-
-    #[test]
-    fn temp_probe_xargs_via_full_filter() {
-        // TEMP: extra_check=None 状態で full filter(parser 経路のみ)の xargs 被覆を確認する。
-        // 陽性(ブロックされるべき)
-        assert!(
-            contains_kill_command("ps aux | grep node | xargs kill"),
-            "POS1"
-        );
-        assert!(contains_kill_command("pgrep node | xargs kill -9"), "POS2");
-        assert!(
-            contains_kill_command("pgrep node | xargs -- kill -9"),
-            "POS3"
-        );
-        assert!(
-            contains_kill_command("pgrep node | xargs -I {} kill -9 {}"),
-            "POS4"
-        );
-        assert!(
-            contains_kill_command("pgrep node | xargs sh -c 'kill -9 \"$@\"' sh"),
-            "POS5"
-        );
-        assert!(contains_kill_command("ps | xargs -n1 kill"), "POS6");
-        assert!(contains_kill_command("ps | xargs -r kill"), "POS7");
-        assert!(contains_kill_command("ps | xargs pkill"), "POS8");
-        assert!(contains_kill_command("ps | xargs killall"), "POS9");
-        assert!(contains_kill_command("ps | xargs taskkill"), "POS10");
-        // 陰性(ブロックされないべき)
-        assert!(!contains_kill_command("ps | xargs echo kill"), "NEG1");
-        assert!(!contains_kill_command("find . | xargs grep kill"), "NEG2");
-        // 前方一致の誤検知防止(xargs で始まる別コマンド)
-        assert!(!contains_kill_command("ps | xargs-wrapper kill"), "NEG_FP1");
-        assert!(!contains_kill_command("ps | xargsfoo kill"), "NEG_FP2");
     }
 }

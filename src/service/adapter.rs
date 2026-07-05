@@ -311,69 +311,110 @@ impl FormatAdapter {
             }
         };
 
-        // Stopイベントを特別に処理（tool_nameやtool_inputが無い）
-        let (tool_name, tool_input) = if event == HookEvent::Stop {
-            (
-                "Stop".to_string(),
-                crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                    status: None,
-                    loop_count: None,
-                    response: None,
-                    agent_message: claude_input.last_assistant_message.clone(),
-                    stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
-                }),
-            )
-        } else if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
-            // SubagentStart/SubagentStop: 生のJSONからサブエージェント情報を抽出
-            // 注意: serde(untagged)のToolInputはStopInputの全フィールドがオプションのため、
-            // tool_inputオブジェクトをOther(Value)ではなくStop(StopInput)として
-            // デシリアライズする可能性があるため、生の入力を再パースする。
-            // agent_type はルートレベルまたは tool_input 内にある場合がある
-            let root_agent_type = raw
-                .get("agent_type")
+        // Stop / Subagent / ツール系をイベント別ハンドラに委譲する。
+        if event == HookEvent::Stop {
+            return Ok(self.parse_claude_stop(claude_input));
+        }
+        if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
+            return Ok(self.parse_claude_subagent(&raw, event, claude_input));
+        }
+        self.parse_claude_tool(event, claude_input)
+    }
+
+    /// Claude の Stop イベントを内部 Stop HookInput に変換する（tool_name/tool_input は持たない）。
+    fn parse_claude_stop(&self, claude_input: ClaudeInput) -> HookInput {
+        let tool_name = "Stop".to_string();
+        let tool_input = crate::domain::ToolInput::Stop(crate::domain::StopInput {
+            status: None,
+            loop_count: None,
+            response: None,
+            agent_message: claude_input.last_assistant_message.clone(),
+            stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
+        });
+
+        debug!(
+            agent = self.format.label(),
+            event = ?HookEvent::Stop,
+            tool_name = %tool_name,
+            "{} parsed input", self.log_prefix()
+        );
+
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name,
+            tool_input,
+            session_id: claude_input.session_id,
+        }
+    }
+
+    /// Claude の SubagentStart / SubagentStop を内部 HookInput に変換する。
+    fn parse_claude_subagent(
+        &self,
+        raw: &serde_json::Value,
+        event: HookEvent,
+        claude_input: ClaudeInput,
+    ) -> HookInput {
+        // SubagentStart/SubagentStop: 生のJSONからサブエージェント情報を抽出
+        // 注意: serde(untagged)のToolInputはStopInputの全フィールドがオプションのため、
+        // tool_inputオブジェクトをOther(Value)ではなくStop(StopInput)として
+        // デシリアライズする可能性があるため、生の入力を再パースする。
+        // agent_type はルートレベルまたは tool_input 内にある場合がある
+        let root_agent_type = raw
+            .get("agent_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let subagent_input = if let Some(val) = raw.get("tool_input") {
+            let tool_input_type = val
+                .get("subagent_type")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
-            let subagent_input = if let Some(val) = raw.get("tool_input") {
-                let tool_input_type = val
-                    .get("subagent_type")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                crate::domain::SubagentInput {
-                    // ルートレベルのagent_type（"Explore"のような人間が読める名前）を優先
-                    // tool_input.subagent_type（セッションID/UUIDを含む場合がある）より優先
-                    subagent_type: root_agent_type.or(tool_input_type),
-                    prompt: val.get("prompt").and_then(|v| v.as_str()).map(String::from),
-                    status: val.get("status").and_then(|v| v.as_str()).map(String::from),
-                    duration: val.get("duration").and_then(|v| v.as_u64()),
-                }
-            } else {
-                crate::domain::SubagentInput {
-                    subagent_type: root_agent_type,
-                    ..Default::default()
-                }
-            };
-            let tool_name = if event == HookEvent::SubagentStart {
-                "SubagentStart"
-            } else {
-                "SubagentStop"
-            };
-            (
-                tool_name.to_string(),
-                crate::domain::ToolInput::Subagent(subagent_input),
-            )
+            crate::domain::SubagentInput {
+                // ルートレベルのagent_type（"Explore"のような人間が読める名前）を優先
+                // tool_input.subagent_type（セッションID/UUIDを含む場合がある）より優先
+                subagent_type: root_agent_type.or(tool_input_type),
+                prompt: val.get("prompt").and_then(|v| v.as_str()).map(String::from),
+                status: val.get("status").and_then(|v| v.as_str()).map(String::from),
+                duration: val.get("duration").and_then(|v| v.as_u64()),
+            }
         } else {
-            let tool_name = claude_input
-                .tool_name
-                .ok_or_else(|| anyhow!("Missing tool_name field"))?;
-            let raw_tool_input = claude_input
-                .tool_input
-                .ok_or_else(|| anyhow!("Missing tool_input field"))?;
-            let tool_input =
-                Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input)?;
-            (tool_name, tool_input)
+            crate::domain::SubagentInput {
+                subagent_type: root_agent_type,
+                ..Default::default()
+            }
         };
+        let tool_name = if event == HookEvent::SubagentStart {
+            "SubagentStart"
+        } else {
+            "SubagentStop"
+        }
+        .to_string();
+
+        debug!(
+            agent = self.format.label(),
+            event = ?event,
+            tool_name = %tool_name,
+            "{} parsed input", self.log_prefix()
+        );
+
+        HookInput {
+            event,
+            tool_name,
+            tool_input: crate::domain::ToolInput::Subagent(subagent_input),
+            session_id: claude_input.session_id,
+        }
+    }
+
+    /// Claude のツールイベント（Bash / Write / Edit / MultiEdit）を内部 HookInput に変換する。
+    fn parse_claude_tool(&self, event: HookEvent, claude_input: ClaudeInput) -> Result<HookInput> {
+        let tool_name = claude_input
+            .tool_name
+            .ok_or_else(|| anyhow!("Missing tool_name field"))?;
+        let raw_tool_input = claude_input
+            .tool_input
+            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+        let tool_input = Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input)?;
 
         debug!(
             agent = self.format.label(),
@@ -1034,35 +1075,84 @@ impl FormatAdapter {
         }
 
         if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
-            let subagent_type = raw
-                .get("agent_type")
-                .or_else(|| raw.get("subagent_type"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow!("Missing agent_type field"))?
-                .to_string();
-
-            return Ok(HookInput {
-                event,
-                tool_name: raw_event,
-                tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                    subagent_type: Some(subagent_type),
-                    prompt: raw
-                        .get("prompt")
-                        .or_else(|| raw.get("task"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    status: raw.get("status").and_then(|v| v.as_str()).map(String::from),
-                    duration: raw
-                        .get("duration_ms")
-                        .or_else(|| raw.get("duration"))
-                        .and_then(|v| v.as_u64()),
-                }),
-                session_id,
-            });
+            return Self::parse_codex_subagent(&raw, event, raw_event, session_id);
         }
 
-        // ツールイベント
+        self.parse_codex_tool(&raw, event, raw_event, session_id)
+    }
+
+    /// Codex の Stop イベントを内部 Stop HookInput に変換する。
+    fn parse_codex_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+        let agent_message = raw
+            .get("last_assistant_message")
+            .or_else(|| raw.get("stop_reason"))
+            .or_else(|| raw.get("message"))
+            .or_else(|| raw.get("response"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let stop_hook_active = raw
+            .get("stop_hook_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                status: None,
+                loop_count: None,
+                response: None,
+                agent_message,
+                stop_hook_active,
+            }),
+            session_id,
+        }
+    }
+
+    /// Codex の SubagentStart / SubagentStop を内部 HookInput に変換する。
+    fn parse_codex_subagent(
+        raw: &serde_json::Value,
+        event: HookEvent,
+        raw_event: String,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
+        let subagent_type = raw
+            .get("agent_type")
+            .or_else(|| raw.get("subagent_type"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing agent_type field"))?
+            .to_string();
+
+        Ok(HookInput {
+            event,
+            tool_name: raw_event,
+            tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                subagent_type: Some(subagent_type),
+                prompt: raw
+                    .get("prompt")
+                    .or_else(|| raw.get("task"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                status: raw.get("status").and_then(|v| v.as_str()).map(String::from),
+                duration: raw
+                    .get("duration_ms")
+                    .or_else(|| raw.get("duration"))
+                    .and_then(|v| v.as_u64()),
+            }),
+            session_id,
+        })
+    }
+
+    /// Codex のツールイベント（Bash / Write / apply_patch 等）を内部 HookInput に変換する。
+    fn parse_codex_tool(
+        &self,
+        raw: &serde_json::Value,
+        event: HookEvent,
+        raw_event: String,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
         let raw_tool_name = raw
             .get("tool_name")
             .and_then(|v| v.as_str())

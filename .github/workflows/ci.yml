@@ -10,6 +10,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust 1.85 toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Check MSRV (all features)
+        run: cargo check --locked --all-features
+
+      # AST 無効時のフォールバックパーサーも MSRV でビルドできることを保証する。
+      - name: Check MSRV (no default features)
+        run: cargo check --locked --no-default-features
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -50,7 +66,7 @@ jobs:
 
   build:
     name: Build
-    needs: test
+    needs: [msrv, test]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

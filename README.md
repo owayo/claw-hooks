@@ -126,7 +126,8 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 ## Requirements
 
 - **OS**: macOS, Linux, Windows
-- **Dependencies**: None (single binary)
+- **Runtime dependencies**: None (single binary)
+- **Source builds / development**: Rust 1.85 or newer. CI also runs locked dependency checks on Rust 1.85 to keep the declared MSRV valid.
 
 ## Installation
 
@@ -145,6 +146,14 @@ cargo build --release
 ```
 
 Binary: `target/release/claw-hooks`
+
+For contributor checks:
+
+```bash
+make msrv
+cargo test --all-features
+cargo test --no-default-features
+```
 
 ### From GitHub Releases
 

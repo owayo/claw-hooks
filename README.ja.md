@@ -126,7 +126,8 @@ sys.exit(0)
 ## 動作要件
 
 - **OS**: macOS, Linux, Windows
-- **依存**: なし（単一バイナリ）
+- **実行時依存**: なし（単一バイナリ）
+- **ソースビルド/開発**: Rust 1.85 以上。CI でも Rust 1.85 で lockfile 固定の依存チェックを実行し、宣言した MSRV が有効であることを保証します。
 
 ## インストール
 
@@ -145,6 +146,14 @@ cargo build --release
 ```
 
 バイナリ: `target/release/claw-hooks`
+
+開発時の確認:
+
+```bash
+make msrv
+cargo test --all-features
+cargo test --no-default-features
+```
 
 ### GitHub Releases から
 

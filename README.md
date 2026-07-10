@@ -486,7 +486,7 @@ message = "Ask the user to run this command manually"
 # Detects project type by file existence and tool availability.
 # On failure, the result is returned to the AI agent so it can fix the issues
 # on runtimes that support stop-time feedback (Windsurf remains best-effort).
-# condition fields (AND logic): file_exists, command_exists
+# condition fields (AND logic): file_exists, file_not_exists, command_exists, command_not_exists
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
@@ -610,7 +610,7 @@ Windsurf is the main exception here: its `post_cascade_response` hook is an asyn
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `commands` | `string[]` | (required) | Commands to execute (in parallel within the same stage) |
-| `condition` | `object` | (none) | Execution condition (AND logic: `file_exists`, `command_exists`) |
+| `condition` | `object` | (none) | Execution condition (AND logic: `file_exists`, `file_not_exists`, `command_exists`, `command_not_exists`) |
 | `stage` | `1-5` | `5` | Execution order. Lower stages run first. Hooks in the same stage run in parallel. |
 | `report` | `bool` | (auto) | Whether to report results to the AI agent. Default: `true` if `condition` is set, `false` otherwise. |
 
@@ -619,7 +619,9 @@ Windsurf is the main exception here: its `post_cascade_response` hook is an asyn
 | Field | Description |
 |-------|-------------|
 | `file_exists` | Run only when this file exists in the working directory |
+| `file_not_exists` | Run only when this file does NOT exist in the working directory (useful for fallbacks such as "no lockfile of type X here") |
 | `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; on Unix the file must have an executable bit; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
+| `command_not_exists` | Run only when this command is NOT available in PATH |
 
 ```toml
 # Stage-based execution: analysis → lint → commit

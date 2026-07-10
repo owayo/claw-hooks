@@ -486,7 +486,7 @@ message = "ユーザーに直接実行を依頼してください"
 # プロジェクト構成ファイルの存在とツールの利用可能性を検出し、lint/typecheckを実行。
 # 失敗時は、Stop時フィードバックに対応したエージェントでは結果をAIへ返し、
 # エージェントが問題を修正します（Windsurf はベストエフォート）。
-# conditionフィールド（AND条件）: file_exists, command_exists
+# conditionフィールド（AND条件）: file_exists, file_not_exists, command_exists, command_not_exists
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
@@ -610,7 +610,7 @@ condition = { file_exists = "tsconfig.json" }
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|-----------|------|
 | `commands` | `string[]` | (必須) | 実行するコマンド（同じstage内で並列実行） |
-| `condition` | `object` | (なし) | 実行条件（AND条件: `file_exists`, `command_exists`） |
+| `condition` | `object` | (なし) | 実行条件（AND条件: `file_exists`, `file_not_exists`, `command_exists`, `command_not_exists`） |
 | `stage` | `1-5` | `5` | 実行順序。小さいstageが先に実行される。同じstage内のフックは並列実行。 |
 | `report` | `bool` | (自動) | 結果をAIエージェントに返すかどうか。デフォルト: `condition`ありなら`true`、なしなら`false`。 |
 
@@ -619,7 +619,9 @@ condition = { file_exists = "tsconfig.json" }
 | フィールド | 説明 |
 |-----------|------|
 | `file_exists` | 作業ディレクトリにこのファイルが存在する場合のみ実行 |
+| `file_not_exists` | 作業ディレクトリにこのファイルが **存在しない** 場合のみ実行（例: 「このロックファイルが無い時のフォールバック」）|
 | `command_exists` | このコマンドがPATH上に存在する場合のみ実行（Windows の `PATHEXT` を考慮。Unix では実行ビットが必要。`./tool` や `/usr/bin/tool` のような明示パスも判定可能） |
+| `command_not_exists` | このコマンドがPATH上に **存在しない** 場合のみ実行 |
 
 ```toml
 # ステージベースの実行: 分析 → lint → コミット

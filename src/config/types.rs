@@ -227,15 +227,23 @@ pub struct CustomFilter {
 
 /// Stop フックの実行条件。
 /// 指定されたすべてのフィールドは AND で評価（すべて満たす必要がある）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct HookCondition {
     /// このファイルが存在する場合のみフックを実行（cwd からの相対パス）
     #[serde(default)]
     pub file_exists: Option<String>,
 
+    /// このファイルが存在しない場合のみフックを実行（cwd からの相対パス）
+    #[serde(default)]
+    pub file_not_exists: Option<String>,
+
     /// このコマンドが PATH に存在する場合のみフックを実行
     #[serde(default)]
     pub command_exists: Option<String>,
+
+    /// このコマンドが PATH に存在しない場合のみフックを実行
+    #[serde(default)]
+    pub command_not_exists: Option<String>,
 }
 
 impl HookCondition {
@@ -247,8 +255,18 @@ impl HookCondition {
                 return false;
             }
         }
+        if let Some(ref file) = self.file_not_exists {
+            if cwd.join(file).exists() {
+                return false;
+            }
+        }
         if let Some(ref cmd) = self.command_exists {
             if !Self::command_in_path(cmd) {
+                return false;
+            }
+        }
+        if let Some(ref cmd) = self.command_not_exists {
+            if Self::command_in_path(cmd) {
                 return false;
             }
         }
@@ -405,6 +423,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(condition.is_satisfied(cwd));
@@ -415,6 +435,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("nonexistent-file-xyz.toml".to_string()),
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(!condition.is_satisfied(cwd));
@@ -425,6 +447,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: None,
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
         assert!(condition.is_satisfied(cwd));
@@ -435,6 +459,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("".to_string()),
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new("/nonexistent-path-xyz");
         // 空文字列と存在しないパスの結合 → 条件不成立
@@ -449,6 +475,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: None,
             command_exists: Some("sh".to_string()),
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
         assert!(condition.is_satisfied(cwd));
@@ -459,6 +487,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: None,
             command_exists: Some("nonexistent-command-xyz-abc-999".to_string()),
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
         assert!(!condition.is_satisfied(cwd));
@@ -470,6 +500,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: Some("sh".to_string()),
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(condition.is_satisfied(cwd));
@@ -481,6 +513,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: Some("nonexistent-command-xyz-abc-999".to_string()),
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(!condition.is_satisfied(cwd));
@@ -492,6 +526,66 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("nonexistent-file-xyz.toml".to_string()),
             command_exists: Some("sh".to_string()),
+            file_not_exists: None,
+            command_not_exists: None,
+        };
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(!condition.is_satisfied(cwd));
+    }
+
+    // === file_not_exists / command_not_exists テスト ===
+
+    #[test]
+    fn test_hook_condition_file_not_exists_satisfied() {
+        // 対象ファイルが「存在しない」ときにフックを実行する条件
+        let condition = HookCondition {
+            file_not_exists: Some("nonexistent-file-xyz.toml".to_string()),
+            ..Default::default()
+        };
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(condition.is_satisfied(cwd));
+    }
+
+    #[test]
+    fn test_hook_condition_file_not_exists_blocks_when_present() {
+        // 対象ファイルが存在すると条件不成立
+        let condition = HookCondition {
+            file_not_exists: Some("Cargo.toml".to_string()),
+            ..Default::default()
+        };
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(!condition.is_satisfied(cwd));
+    }
+
+    #[test]
+    fn test_hook_condition_command_not_exists_satisfied() {
+        // 対象コマンドが PATH に存在しないとき条件成立
+        let condition = HookCondition {
+            command_not_exists: Some("nonexistent-command-xyz-abc-999".to_string()),
+            ..Default::default()
+        };
+        let cwd = Path::new("/tmp");
+        assert!(condition.is_satisfied(cwd));
+    }
+
+    #[test]
+    fn test_hook_condition_command_not_exists_blocks_when_present() {
+        // 対象コマンドが PATH にあると条件不成立
+        let condition = HookCondition {
+            command_not_exists: Some("sh".to_string()),
+            ..Default::default()
+        };
+        let cwd = Path::new("/tmp");
+        assert!(!condition.is_satisfied(cwd));
+    }
+
+    #[test]
+    fn test_hook_condition_file_exists_and_file_not_exists_combined() {
+        // file_exists と file_not_exists の AND — 一方が満たされない → false
+        let condition = HookCondition {
+            file_exists: Some("Cargo.toml".to_string()),
+            file_not_exists: Some("Cargo.toml".to_string()),
+            ..Default::default()
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(!condition.is_satisfied(cwd));
@@ -941,6 +1035,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: None,
@@ -977,6 +1073,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: Some(false),
@@ -1106,6 +1204,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: None,
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         // 任意のパスで条件を満たす
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1118,6 +1218,8 @@ mod tests {
         let condition = HookCondition {
             file_exists: Some("src/main.rs".to_string()),
             command_exists: None,
+            file_not_exists: None,
+            command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(condition.is_satisfied(cwd));

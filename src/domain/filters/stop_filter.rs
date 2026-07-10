@@ -642,6 +642,8 @@ mod tests {
             commands: vec!["false".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("nonexistent-file-xyz-abc.toml".to_string()),
             }),
 
@@ -661,6 +663,8 @@ mod tests {
             commands: vec!["true".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -680,6 +684,8 @@ mod tests {
             commands: vec!["sh -c 'echo lint-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -710,6 +716,8 @@ mod tests {
             ],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -738,6 +746,8 @@ mod tests {
             commands: vec!["nonexistent-lint-tool-xyz-123".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -759,6 +769,8 @@ mod tests {
                 commands: vec!["sh -c 'echo first-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
 
@@ -770,6 +782,8 @@ mod tests {
                 commands: vec!["sh -c 'echo second-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
 
@@ -811,6 +825,8 @@ mod tests {
                 commands: vec!["true".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
 
@@ -833,6 +849,8 @@ mod tests {
             ],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -861,6 +879,8 @@ mod tests {
             commands: vec!["true".to_string(), "echo ok".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -883,6 +903,8 @@ mod tests {
             ],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -915,6 +937,8 @@ mod tests {
             ],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -1062,6 +1086,8 @@ mod tests {
             commands: vec!["sleep 10".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -1129,6 +1155,8 @@ mod tests {
             commands: vec!["true".to_string(), "sleep 10".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -1262,6 +1290,8 @@ mod tests {
                 commands: vec!["true".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(1),
@@ -1271,6 +1301,8 @@ mod tests {
                 commands: vec!["sh -c 'echo stage5-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(5),
@@ -1341,6 +1373,8 @@ mod tests {
             ],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
 
@@ -1385,6 +1419,8 @@ mod tests {
                 commands: vec![format!("sh -c 'echo done > {}'", marker_path)],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(1),
@@ -1397,6 +1433,8 @@ mod tests {
                 )],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(3),
@@ -1423,6 +1461,8 @@ mod tests {
             commands: vec!["sh -c 'echo report-off-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
             stage: None,
@@ -1486,6 +1526,8 @@ mod tests {
             commands: vec!["sh -c 'echo default-report-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
             stage: None,
@@ -1600,6 +1642,8 @@ mod tests {
                 commands: vec!["sh -c 'echo stage1-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(1),
@@ -1609,6 +1653,8 @@ mod tests {
                 commands: vec!["sh -c 'echo stage3-error >&2; exit 1'".to_string()],
                 condition: Some(HookCondition {
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                     file_exists: Some("Cargo.toml".to_string()),
                 }),
                 stage: Some(3),
@@ -1648,6 +1694,8 @@ mod tests {
             commands: vec!["sh -c 'echo should-not-run >&2; exit 1'".to_string()],
             condition: Some(crate::config::HookCondition {
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
                 file_exists: Some("Cargo.toml".to_string()),
             }),
             stage: None,

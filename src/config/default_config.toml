@@ -77,7 +77,7 @@ debug = false
 # Conditional stop hooks (project-wide lint on stop)
 # Detects project type and runs lint/typecheck.
 # On failure, the result is returned to the AI agent so it can fix the issues.
-# condition fields (AND logic): file_exists, command_exists
+# condition fields (AND logic): file_exists, file_not_exists, command_exists, command_not_exists
 # [[stop_hooks]]
 # commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 # condition = { file_exists = "Cargo.toml" }

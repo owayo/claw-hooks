@@ -123,10 +123,26 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
                     bail!("stop_hooks[{}]: condition.file_exists cannot be empty", i);
                 }
             }
+            if let Some(ref file_not_exists) = condition.file_not_exists {
+                if file_not_exists.is_empty() {
+                    bail!(
+                        "stop_hooks[{}]: condition.file_not_exists cannot be empty",
+                        i
+                    );
+                }
+            }
             if let Some(ref command_exists) = condition.command_exists {
                 if command_exists.is_empty() {
                     bail!(
                         "stop_hooks[{}]: condition.command_exists cannot be empty",
+                        i
+                    );
+                }
+            }
+            if let Some(ref command_not_exists) = condition.command_not_exists {
+                if command_not_exists.is_empty() {
+                    bail!(
+                        "stop_hooks[{}]: condition.command_not_exists cannot be empty",
                         i
                     );
                 }
@@ -323,6 +339,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("".to_string()),
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: None,
@@ -338,6 +356,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: None,
@@ -353,10 +373,42 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: None,
                 command_exists: Some("".to_string()),
+                file_not_exists: None,
+                command_not_exists: None,
             }),
 
             stage: None,
 
+            report: None,
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_file_not_exists_condition() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
+            condition: Some(HookCondition {
+                file_not_exists: Some("".to_string()),
+                ..Default::default()
+            }),
+            stage: None,
+            report: None,
+        });
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_command_not_exists_condition() {
+        let mut config = default_config();
+        config.stop_hooks.push(StopHook {
+            commands: vec!["cargo clippy --all-targets --all-features -- -D warnings".to_string()],
+            condition: Some(HookCondition {
+                command_not_exists: Some("".to_string()),
+                ..Default::default()
+            }),
+            stage: None,
             report: None,
         });
         assert!(validate(&config).is_err());
@@ -370,6 +422,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: Some("cargo".to_string()),
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: None,
@@ -412,6 +466,8 @@ mod tests {
             condition: Some(HookCondition {
                 file_exists: Some("Cargo.toml".to_string()),
                 command_exists: None,
+                file_not_exists: None,
+                command_not_exists: None,
             }),
             stage: None,
             report: None,
@@ -571,6 +627,8 @@ mod tests {
                 condition: Some(HookCondition {
                     file_exists: Some("tsconfig.json".to_string()),
                     command_exists: None,
+                    file_not_exists: None,
+                    command_not_exists: None,
                 }),
                 stage: None,
                 report: None,

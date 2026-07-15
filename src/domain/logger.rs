@@ -1,24 +1,75 @@
 //! ローカルタイムゾーンを使用した日次ローテーション付きログシステム。
 
 use anyhow::Result;
-use logroller::{LogRollerBuilder, Rotation, RotationAge, TimeZone};
+use chrono::Local;
+use logroller::{LogRoller, LogRollerBuilder, Rotation, RotationAge, TimeZone};
 use std::fs;
+use std::io::{self, Write as IoWrite};
 use std::path::Path;
-use time::macros::format_description;
-use tracing_appender::non_blocking::WorkerGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::time::OffsetTime;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::prelude::*;
 
 use crate::config::Config;
 
+/// ローカル時刻を既存ログと同じ形式で出力するタイマー。
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, writer: &mut Writer<'_>) -> std::fmt::Result {
+        write!(writer, "{}", Local::now().format("%Y-%m-%d %H:%M:%S"))
+    }
+}
+
+/// `LogRoller` を tracing layer と終了時ガードで共有する writer。
+#[derive(Clone)]
+struct SharedLogWriter(Arc<Mutex<LogRoller>>);
+
+impl SharedLogWriter {
+    fn lock(&self) -> MutexGuard<'_, LogRoller> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+struct LockedLogWriter<'a>(MutexGuard<'a, LogRoller>);
+
+impl IoWrite for LockedLogWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl<'a> MakeWriter<'a> for SharedLogWriter {
+    type Writer = LockedLogWriter<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LockedLogWriter(self.lock())
+    }
+}
+
+/// `process::exit` の前にログとローテーション処理を確実に完了させるガード。
+pub struct LoggingGuard {
+    writer: SharedLogWriter,
+}
+
+impl Drop for LoggingGuard {
+    fn drop(&mut self) {
+        let _ = self.writer.lock().flush();
+    }
+}
+
 /// ログシステムを初期化する。
-///
-/// 戻り値の `WorkerGuard` を呼び出し側で保持する必要がある。
-/// ドロップ時にバックグラウンドのログ書き込みスレッドへ残バッファを
-/// フラッシュさせるため、main の寿命まで保持しないと最後の数件が欠落する。
-pub fn init(config: &Config) -> Result<WorkerGuard> {
+pub fn init(config: &Config) -> Result<LoggingGuard> {
     // 必要に応じてログディレクトリを作成
     if !config.log_path.exists() {
         fs::create_dir_all(&config.log_path)?;
@@ -33,22 +84,26 @@ pub fn init(config: &Config) -> Result<WorkerGuard> {
         .rotation(Rotation::AgeBased(RotationAge::Daily))
         .time_zone(TimeZone::Local) // ローテーションにシステムのローカルタイムゾーンを使用
         .max_keep_files(3)
+        .graceful_shutdown(true)
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create log roller: {}", e))?;
 
-    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+    let writer = SharedLogWriter(Arc::new(Mutex::new(appender)));
+    let guard = LoggingGuard {
+        writer: writer.clone(),
+    };
 
     // タイムスタンプにローカルタイムゾーンを使用
-    let time_format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-    let timer = OffsetTime::new(local_offset, time_format);
+    let timer = LocalTimer;
 
     // ファイル出力付きサブスクライバを設定
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .with(
             fmt::layer()
-                .with_writer(non_blocking)
+                // Mutex<Write> は tracing-subscriber 公式の同期 MakeWriter 実装。
+                // 不要な time/parsing 依存を持つ tracing-appender を経由しない。
+                .with_writer(writer)
                 .with_ansi(false)
                 .with_target(true)
                 .with_thread_ids(false)
@@ -60,9 +115,6 @@ pub fn init(config: &Config) -> Result<WorkerGuard> {
     tracing::subscriber::set_global_default(subscriber)
         .map_err(|e| anyhow::anyhow!("Failed to set global subscriber: {}", e))?;
 
-    // ガードを返す。呼び出し側で main の寿命に束縛して保持する必要がある。
-    // mem::forget するとデストラクタが呼ばれず、未フラッシュのログが
-    // プロセス終了時に失われる。
     Ok(guard)
 }
 

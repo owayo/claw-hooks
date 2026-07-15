@@ -22,16 +22,14 @@ fn main() -> Result<()> {
     // 設定ファイルの読み込み
     let config = ConfigService::load(cli.config.as_deref())?;
 
-    // デバッグモード時にロギングを初期化。
-    // ガードはコマンド実行が終わるまで保持し、プロセス終了の直前に明示的に drop して
-    // 非同期ログのバッファを確実にフラッシュする（drop しないと終了直前のログが欠落する）。
+    // デバッグモード時に同期ファイルロギングを初期化。
     let logger_guard = if cli.debug || config.debug {
         Some(domain::logger::init(&config)?)
     } else {
         None
     };
 
-    // コマンド実行（終了コードを集約し、ログのフラッシュ後にプロセス終了する）
+    // コマンド実行（フック判定の終了コードを集約する）
     let exit_code: i32 = match cli.command {
         Commands::Hook { format, trace } => {
             let service = HookService::new(config, format, trace);
@@ -71,8 +69,8 @@ fn main() -> Result<()> {
         }
     };
 
-    // 非同期ログ（tracing-appender）のバッファを確実にフラッシュするため、
-    // プロセス終了の直前にロガーガードを明示的に drop する。
+    // process::exit はデストラクタを実行しないため、ローテーション worker を先に完了させる。
     drop(logger_guard);
+    // Hook 固有の終了コードを維持してプロセスを終了する。
     std::process::exit(exit_code);
 }

@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_hook_condition_file_satisfied_command_not() {
-        // file_exists OK, command_exists NG → false
+        // file_exists は成立、command_exists は不成立 → false
         let condition = HookCondition {
             file_exists: Some("Cargo.toml".to_string()),
             command_exists: Some("nonexistent-command-xyz-abc-999".to_string()),
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_hook_condition_command_satisfied_file_not() {
-        // command_exists OK, file_exists NG → false
+        // command_exists は成立、file_exists は不成立 → false
         let condition = HookCondition {
             file_exists: Some("nonexistent-file-xyz.toml".to_string()),
             command_exists: Some("sh".to_string()),

@@ -250,7 +250,7 @@ impl StopHookFilter {
                             // タイムアウトは異常終了 — 成功として扱わない
                             Some(format!(
                                 "⏱ Stop hook timed out after {}s: {}",
-                                timeout_secs, &command
+                                timeout_secs, command
                             ))
                         } else if result.output.status.success() {
                             None
@@ -409,7 +409,7 @@ mod tests {
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
-    // === Edge Case Tests ===
+    // === エッジケースのテスト ===
 
     #[test]
     fn test_execute_command_empty_is_error() {
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(filter.priority(), 100);
     }
 
-    // === Loop prevention ===
+    // === ループ防止のテスト ===
 
     #[test]
     fn test_stop_hook_active_true_skips_all_hooks() {
@@ -607,7 +607,7 @@ mod tests {
         assert!(matches!(decision, Decision::Allow { .. }));
     }
 
-    // === Conditional hooks ===
+    // === 条件付きフックのテスト ===
 
     fn make_stop_input() -> HookInput {
         HookInput {
@@ -1022,11 +1022,11 @@ mod tests {
         );
     }
 
-    // === Timeout tests ===
+    // === タイムアウトのテスト ===
 
     #[test]
     fn test_execute_command_timeout_kills_process() {
-        // sleep 10 should be killed after 2 second timeout
+        // sleep 10 は2秒のタイムアウト後に終了させる
         let start = std::time::Instant::now();
         let result = StopHookFilter::execute_command_tracked("sleep 10", 2, None);
         let elapsed = start.elapsed();
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_stop_hook_timeout_unconditional() {
-        // Unconditional hook with timeout should allow (fire-and-forget, timeout just warns)
+        // 無条件フックは非同期実行のため、タイムアウトしても警告のみで許可する
         let hooks = vec![StopHook {
             commands: vec!["sleep 10".to_string()],
             condition: None,
@@ -1133,7 +1133,7 @@ mod tests {
         let result = result.unwrap();
         assert!(result.timed_out, "Expected tracked timeout output");
         let output = result.output;
-        // stdout is empty on timeout (reader threads are not joined to avoid blocking)
+        // ブロック回避のため読み取りスレッドを join しないので、タイムアウト時の stdout は空になる
         assert!(
             output.stdout.is_empty(),
             "Stdout should be empty on timeout"
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn test_stop_hook_custom_timeout_value() {
-        // Verify custom timeout value is respected (3s timeout, 1s command succeeds)
+        // 個別指定した3秒のタイムアウト内に、1秒のコマンドが成功することを確認する
         let hooks = vec![StopHook {
             commands: vec!["sleep 1".to_string()],
             condition: None,
@@ -1325,7 +1325,7 @@ mod tests {
         }
     }
 
-    // === Agent message propagation tests ===
+    // === エージェントメッセージ伝播のテスト ===
 
     #[test]
     fn test_execute_command_passes_agent_message_env() {
@@ -1402,13 +1402,13 @@ mod tests {
         );
     }
 
-    // === Stage ordering tests ===
+    // === ステージ順序のテスト ===
 
     #[test]
     fn test_stage_ordering_lower_stage_runs_first() {
         use crate::config::HookCondition;
-        // Stage 1 creates a marker file, Stage 3 checks for it.
-        // If stage ordering works, marker will exist when stage 3 runs.
+        // ステージ1でマーカーファイルを作り、ステージ3で存在を確認する。
+        // ステージ順が正しければ、ステージ3の実行時点でマーカーが存在する。
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-stage-order-{}", std::process::id()));
         let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
@@ -1451,7 +1451,7 @@ mod tests {
         let _ = std::fs::remove_file(marker);
     }
 
-    // === Report behavior tests ===
+    // === report 動作のテスト ===
 
     #[test]
     fn test_report_false_ignores_failure() {
@@ -1502,7 +1502,7 @@ mod tests {
 
     #[test]
     fn test_default_report_no_condition_allows_on_failure() {
-        // Hook without condition and without explicit report (defaults to false)
+        // 条件も明示的な report もないフックは false が既定値になる
         let hooks = vec![StopHook {
             commands: vec!["sh -c 'echo no-report-error >&2; exit 1'".to_string()],
             condition: None,
@@ -1521,7 +1521,7 @@ mod tests {
     #[test]
     fn test_default_report_with_condition_blocks_on_failure() {
         use crate::config::HookCondition;
-        // Hook with condition and without explicit report (defaults to true)
+        // 条件があり明示的な report がないフックは true が既定値になる
         let hooks = vec![StopHook {
             commands: vec!["sh -c 'echo default-report-error >&2; exit 1'".to_string()],
             condition: Some(HookCondition {
@@ -1635,8 +1635,8 @@ mod tests {
     #[test]
     fn test_mixed_stages_and_reports() {
         use crate::config::HookCondition;
-        // Stage 1: report=false (fire-and-forget)
-        // Stage 3: report=true (should block)
+        // ステージ1: report=false（非同期実行）
+        // ステージ3: report=true（ブロック対象）
         let hooks = vec![
             StopHook {
                 commands: vec!["sh -c 'echo stage1-error >&2; exit 1'".to_string()],

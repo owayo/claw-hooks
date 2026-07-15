@@ -40,7 +40,7 @@
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf is best-effort)
 - ⏱️ **Hook Timeout** - Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
 - 📏 **Output Truncation** - Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
-- 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs — without touching real diagnostic content
+- 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved
 - 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata and byte-size summaries. Raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
 - 🛑 **Bounded Input** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process — an empty-stdout death would otherwise look like "skipped decision = fail-open" to Antigravity/Codex
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
@@ -109,6 +109,7 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 - Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`. Antigravity's `PostToolUse` fires too, but its payload omits the original `toolCall` so the edited file path can't be recovered — use Stop hooks for project-wide lint/typecheck instead.
 - Codex `PostToolUse` + `Bash` passes through; `apply_patch` is parsed for changed file paths (delete-only patches are skipped).
 - Paths with `../`, shell redirection (`<`, `>`), tabs, newlines, or NUL bytes are rejected. Agent payloads missing required fields fail closed.
+- Successful no-op formatter/linter notices are not returned to the agent. Output that reports a rewritten file, a warning, or a failure remains visible; command labels expose only the configured program name, not the expanded file path or argument summary.
 
 ### Comparison
 
@@ -771,6 +772,8 @@ Unsupported Cursor events, including non-shell `preToolUse` tools, are passed th
 
 For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
 
+Malformed `stop` payloads fail closed with the event's native `followup_message` shape; claw-hooks does not emit the command-hook-only `permission` field for this path.
+
 ### Windsurf (`--format windsurf`)
 
 Uses `agent_action_name` field:
@@ -802,7 +805,7 @@ camelCase schema. A representative PreToolUse payload:
 }
 ```
 
-`Stop` carries `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`.
+`PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`. Missing or incorrectly typed required fields fail closed using the event's native deny/continue response.
 
 | hook_event_name | toolCall.name | Internal Mapping |
 |---|---|---|
@@ -900,7 +903,8 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 |---|---|---|---|
 | Claude Code | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `2` + **stderr** plain text |
 | Cursor / Windsurf | `0` | `2` (Windsurf BeforeCommand writes stderr; Cursor Stop stays `0` with `followup_message`) | `2` |
-| Antigravity / Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + deny JSON (non-zero is treated as hook infra failure and discarded) |
+| Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific JSON (`deny` for PreToolUse, `continue` for Stop) |
+| Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny/block JSON (non-zero is treated as hook infra failure and discarded) |
 
 ## Performance
 

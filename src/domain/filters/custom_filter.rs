@@ -219,17 +219,17 @@ mod tests {
     fn test_custom_filter_regex_with_semicolon() {
         let filter = CustomCommandFilter::new("yarn", "Use pnpm instead".to_string()).unwrap();
 
-        // yarn after semicolon should be detected
+        // セミコロン後の yarn も検出する
         assert!(filter.matches("echo \"install\"; yarn install"));
 
-        // yarn in quotes should NOT trigger (it's not a command)
+        // クォート内の yarn はコマンドではないため検出しない
         assert!(!filter.matches("echo \"not yarn install\"; pnpm install"));
 
         // 直接のyarnコマンド
         assert!(filter.matches("yarn install"));
         assert!(filter.matches("yarn add react"));
 
-        // pnpm should pass
+        // pnpm は許可する
         assert!(!filter.matches("pnpm install"));
     }
 
@@ -237,12 +237,12 @@ mod tests {
     fn test_custom_filter_regex_with_chained_commands() {
         let filter = CustomCommandFilter::new("python", "Use uv instead".to_string()).unwrap();
 
-        // python in chained commands
+        // 連結コマンド内の python も検出する
         assert!(filter.matches("cd /app && python script.py"));
         assert!(filter.matches("echo done; python main.py"));
         assert!(filter.matches("ls | python filter.py"));
 
-        // python in quotes should NOT trigger
+        // クォート内の python は検出しない
         assert!(!filter.matches("echo \"python is great\""));
     }
 
@@ -262,12 +262,12 @@ mod tests {
         assert!(filter.matches("npm add react"));
         assert!(filter.matches("npm install lodash"));
 
-        // Should not match (different subcommand)
+        // 異なるサブコマンドにはマッチしない
         assert!(!filter.matches("npm run build"));
         assert!(!filter.matches("npm test"));
         assert!(!filter.matches("npm --version"));
 
-        // Should not match (different command)
+        // 異なるコマンドにはマッチしない
         assert!(!filter.matches("pnpm install"));
         assert!(!filter.matches("yarn add"));
     }
@@ -336,7 +336,7 @@ mod tests {
         )
         .unwrap();
 
-        // Should match both pip and pip3
+        // pip と pip3 の両方にマッチする
         assert!(filter.matches("pip install requests"));
         assert!(filter.matches("pip3 install requests"));
         assert!(filter.matches("pip uninstall requests"));
@@ -350,7 +350,7 @@ mod tests {
         assert!(!filter.matches("python install"));
     }
 
-    // === Edge Case Tests ===
+    // === エッジケースのテスト ===
 
     #[test]
     fn test_custom_filter_invalid_regex_returns_error() {
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_custom_filter_args_ignores_flags_before_arg() {
-        // args mode matches first argument, flags before should be ignored
+        // 引数モードは最初の引数を照合し、前置フラグは対象外とする
         let filter = CustomCommandFilter::with_args(
             "npm",
             vec!["install".to_string()],
@@ -374,7 +374,7 @@ mod tests {
         assert!(filter.matches("npm install lodash"));
 
         // installが最初の引数でない場合はマッチしないべき
-        // (--silent is not in args, so this is checking first arg is not "install")
+        // --silent は対象引数ではないため、最初の引数が install でないことを確認する
         assert!(!filter.matches("npm --silent install"));
     }
 
@@ -388,7 +388,7 @@ mod tests {
         // 直接のnpmコマンドはマッチする
         assert!(filter.matches("npm install"));
 
-        // env with VAR=value prefix: npm is still the command
+        // env の VAR=value 接頭辞があっても npm をコマンドとして扱う
         // extract_command_stringsがenv接頭辞を処理するため動作する
         assert!(filter.matches("NODE_ENV=prod npm install"));
 
@@ -409,7 +409,7 @@ mod tests {
         assert!(filter.matches("sh -c \"npm install\""));
     }
 
-    // === strip_quoted_content edge cases ===
+    // === strip_quoted_content のエッジケース ===
 
     #[test]
     fn test_strip_quoted_content_nested_quotes() {
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_strip_quoted_content_escaped_chars() {
-        // \" is an escaped quote, not a real quote, so "hello" remains visible
+        // \" は実際の引用符ではなくエスケープ表現なので、hello は残る
         let result = CustomCommandFilter::strip_quoted_content(r#"echo \"hello\""#);
         assert_eq!(result, "echo hello");
     }
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_strip_quoted_content_backslash_at_end() {
-        // Backslash at end of string (no char to escape)
+        // 文字列末尾のバックスラッシュにはエスケープ対象がない
         let result = CustomCommandFilter::strip_quoted_content("echo \\");
         assert_eq!(result, "echo ");
     }
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(result, "echo ");
     }
 
-    // === Priority and Filter trait tests ===
+    // === 優先度と Filter トレイトのテスト ===
 
     #[test]
     fn test_custom_filter_priority() {

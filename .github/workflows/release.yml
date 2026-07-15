@@ -35,7 +35,7 @@ jobs:
       - name: Bump version
         id: bump
         run: |
-          # Use 2-digit year (YY) for Windows MSI compatibility (major version must be <= 255)
+          # Windows MSI のメジャーバージョン上限（255）に合わせて年を2桁（YY）にする
           YEAR=$(date +%y)
           MONTH=$(date +%-m)
 
@@ -46,7 +46,7 @@ jobs:
             OLD_YEAR=$(echo "${CURRENT}" | cut -d. -f1)
             OLD_MONTH=$(echo "${CURRENT}" | cut -d. -f2)
             OLD_COUNTER=$(echo "${CURRENT}" | cut -d. -f3)
-            # Handle both 2-digit and 4-digit year formats
+            # 2桁と4桁の年表記をどちらも扱う
             OLD_YEAR_2DIGIT=$(echo "${OLD_YEAR}" | sed 's/^20//')
             if [ "${OLD_YEAR_2DIGIT}" = "${YEAR}" ] && [ "${OLD_MONTH}" = "${MONTH}" ]; then
               NEW_COUNTER=$((OLD_COUNTER + 1))
@@ -60,7 +60,7 @@ jobs:
           NEW_VERSION="${YEAR}.${MONTH}.${NEW_COUNTER}"
           echo "New version: ${NEW_VERSION}"
 
-          # Only replace the first occurrence (package version, not dependency versions)
+          # 依存関係のバージョンを変えず、パッケージバージョンの最初の1件だけ置換する
           sed -i "0,/^version = \"[^\"]*\"/s//version = \"${NEW_VERSION}\"/" Cargo.toml
 
           if [ -f "Cargo.lock" ]; then
@@ -279,17 +279,17 @@ jobs:
           VERSION="${{ needs.prepare-release.outputs.version }}"
           TAG="${{ needs.prepare-release.outputs.tag }}"
 
-          # Source archive SHA256
+          # ソースアーカイブの SHA256
           curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz" -o source.tar.gz
           SHA256_SOURCE=$(sha256sum source.tar.gz | cut -d' ' -f1)
           echo "sha256_source=${SHA256_SOURCE}" >> $GITHUB_OUTPUT
 
-          # Download release binaries
+          # リリースバイナリをダウンロードする
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-aarch64-apple-darwin.tar.gz" -o mac_arm64.tar.gz
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-apple-darwin.tar.gz" -o mac_x86_64.tar.gz
           curl -sL "https://github.com/${{ github.repository }}/releases/download/${TAG}/claw-hooks-x86_64-unknown-linux-gnu.tar.gz" -o linux_x86_64.tar.gz
 
-          # Create bottle tarball function
+          # Bottle の tarball を作る関数
           create_bottle() {
             local src_tarball=$1
             local bottle_tag=$2
@@ -334,14 +334,14 @@ jobs:
           SHA256_BOTTLE_SONOMA="${{ steps.bottles.outputs.sha256_bottle_sonoma }}"
           SHA256_BOTTLE_X86_64_LINUX="${{ steps.bottles.outputs.sha256_bottle_x86_64_linux }}"
 
-          # Clone homebrew tap
+          # Homebrew tap をクローンする
           git clone "https://x-access-token:${GH_TOKEN}@github.com/owayo/homebrew-claw-hooks.git"
           cd homebrew-claw-hooks
 
-          # Create Formula directory if not exists
+          # Formula ディレクトリがなければ作成する
           mkdir -p Formula
 
-          # Create/update formula
+          # Formula を作成または更新する
           cat > Formula/claw-hooks.rb << 'FORMULA'
           class ClawHooks < Formula
             desc "Hooks CLI for AI coding agents (Claude Code, Cursor, Windsurf)"
@@ -369,7 +369,7 @@ jobs:
           end
           FORMULA
 
-          # Replace placeholders with actual values
+          # プレースホルダーを実際の値に置換する
           sed -i "s|URL_SOURCE_PLACEHOLDER|https://github.com/owayo/claw-hooks/archive/refs/tags/${TAG}.tar.gz|g" Formula/claw-hooks.rb
           sed -i "s|SHA256_SOURCE_PLACEHOLDER|${SHA256_SOURCE}|g" Formula/claw-hooks.rb
           sed -i "s|ROOT_URL_PLACEHOLDER|https://github.com/owayo/claw-hooks/releases/download/${TAG}|g" Formula/claw-hooks.rb
@@ -377,10 +377,10 @@ jobs:
           sed -i "s|SHA256_BOTTLE_SONOMA_PLACEHOLDER|${SHA256_BOTTLE_SONOMA}|g" Formula/claw-hooks.rb
           sed -i "s|SHA256_BOTTLE_X86_64_LINUX_PLACEHOLDER|${SHA256_BOTTLE_X86_64_LINUX}|g" Formula/claw-hooks.rb
 
-          # Remove leading spaces from heredoc
+          # ヒアドキュメント先頭の空白を除去する
           sed -i 's/^          //' Formula/claw-hooks.rb
 
-          # Commit and push
+          # コミットしてプッシュする
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/claw-hooks.rb

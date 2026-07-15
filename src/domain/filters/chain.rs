@@ -305,11 +305,11 @@ mod tests {
         });
         let chain = FilterChain::new(&config);
 
-        // npm install should be blocked
+        // npm install はブロックする
         let input = make_bash_input("npm install lodash");
         assert!(matches!(chain.execute(&input), Decision::Block { .. }));
 
-        // npm run should be allowed
+        // npm run は許可する
         let input = make_bash_input("npm run build");
         assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
     }

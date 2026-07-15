@@ -450,6 +450,66 @@ fn is_lint_ruleset_incompatibility_warning(line: &str) -> bool {
     line.starts_with("warning:") && line.contains("are incompatible. Ignoring")
 }
 
+/// フォーマッター/リンターが成功時に出す「何もすることがなかった」定型メッセージ
+/// だけで構成された出力かどうかを判定する。
+///
+/// `ruff format --check` の `1 file already formatted`、`ruff format` の
+/// `1 file left unchanged`、`ruff check` の `All checks passed!`、biome の
+/// `Checked 1 file in 53ms. No fixes applied.` は、編集のたびに毎回出力される
+/// コード非依存の完了通知で、エージェントに返しても行動につながらない純粋な
+/// ノイズのため、出力ごと破棄する対象とする。
+///
+/// 「ファイルが書き換えられた」ことを示すメッセージ（`1 file reformatted` /
+/// biome の `Fixed 1 file.`）は、エージェントが編集内容を再読すべきシグナル
+/// なので対象外。失敗時（exit code 非 0）は診断本文の一部であり得るため、
+/// 呼び出し側でコマンド成功時に限って適用すること。
+pub fn is_noop_success_output(output: &str) -> bool {
+    let mut has_line = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        has_line = true;
+        if !is_noop_success_line(trimmed) {
+            return false;
+        }
+    }
+    has_line
+}
+
+/// 1 行が no-op 完了メッセージかどうかを判定する。
+fn is_noop_success_line(line: &str) -> bool {
+    // ruff check: 問題なし
+    if line == "All checks passed!" {
+        return true;
+    }
+    // biome check: `Checked N file(s) in <時間>. No fixes applied.` に限定する。
+    // 任意の `Checked ... No fixes applied.` を受理すると、利用者向けメッセージまで消えてしまう。
+    let is_biome_noop = line
+        .strip_prefix("Checked ")
+        .and_then(counted_file_message_tail)
+        .and_then(|tail| tail.strip_prefix("in "))
+        .and_then(|tail| tail.strip_suffix(". No fixes applied."))
+        .is_some_and(|duration| !duration.is_empty());
+    if is_biome_noop {
+        return true;
+    }
+    // ruff format / ruff format --check: 整形済み・変更なしを示す定型メッセージ
+    counted_file_message_tail(line)
+        .is_some_and(|tail| tail == "already formatted" || tail == "left unchanged")
+}
+
+/// `<数> file(s) ` で始まる定型メッセージから後続部分を取り出す。
+fn counted_file_message_tail(line: &str) -> Option<&str> {
+    let (count, rest) = line.split_once(' ')?;
+    if count.is_empty() || !count.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    rest.strip_prefix("files ")
+        .or_else(|| rest.strip_prefix("file "))
+}
+
 /// キャリッジリターン（`\r`）で上書きされた進捗表示を、端末で実際に表示される
 /// 「最後の状態」だけに圧縮する。
 ///
@@ -672,6 +732,41 @@ mod tests {
     #[test]
     fn test_normalize_empty_input() {
         assert_eq!(normalize_lint_output(""), "");
+    }
+
+    #[test]
+    fn test_is_noop_success_output_recognizes_known_formatter_messages() {
+        for output in [
+            "All checks passed!",
+            "1 file already formatted",
+            "2 files already formatted",
+            "1 file left unchanged",
+            "3 files left unchanged",
+            "Checked 1 file in 53ms. No fixes applied.",
+        ] {
+            assert!(is_noop_success_output(output), "未認識の出力: {output}");
+        }
+    }
+
+    #[test]
+    fn test_is_noop_success_output_rejects_empty_output() {
+        assert!(!is_noop_success_output(""));
+        assert!(!is_noop_success_output("\n  \n"));
+    }
+
+    #[test]
+    fn test_is_noop_success_output_preserves_actionable_output() {
+        for output in [
+            "1 file reformatted",
+            "Fixed 1 file.",
+            "All checks passed!\nwarning: generated file changed",
+            "Checked configuration. No fixes applied.",
+        ] {
+            assert!(
+                !is_noop_success_output(output),
+                "誤って抑制する出力: {output}"
+            );
+        }
     }
 
     #[test]

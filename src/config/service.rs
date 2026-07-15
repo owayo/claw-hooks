@@ -295,7 +295,7 @@ mod tests {
         assert!(config.rm_block_message.is_some());
     }
 
-    // === Project config tests ===
+    // === プロジェクト設定のテスト ===
 
     #[test]
     fn test_find_project_config_from_with_file() {
@@ -464,7 +464,7 @@ commands = ["echo project"]
         )
         .unwrap();
 
-        // Use load_inner with explicit project search dir (avoids set_current_dir)
+        // カレントディレクトリを変更せず、明示した検索先で load_inner を使う
         let config = ConfigService::load_inner(Some(&global_path), Some(&project_dir)).unwrap();
 
         assert!(!config.rm_block); // overridden by project

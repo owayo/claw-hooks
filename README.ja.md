@@ -40,7 +40,7 @@
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf はベストエフォート）
 - ⏱️ **フックタイムアウト** - フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
-- 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。本来の診断情報には触れない
+- 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持
 - 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッションとバイト数サマリーのみ。生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
 - 🛑 **入力サイズ上限** - stdin は 4 MiB 上限。巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで止める（空 stdout 異常終了は Antigravity/Codex に「判定スキップ＝フェイルオープン」と誤解されるため、その挙動を回避）
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
@@ -109,6 +109,7 @@ sys.exit(0)
 - 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`。Antigravity の `PostToolUse` も発火するが、ペイロードに元の `toolCall` が含まれず編集ファイルパスを復元できないため、プロジェクト全体の lint/typecheck を Stop hooks で回します。
 - Codex の `PostToolUse` + `Bash` はパススルー。`apply_patch` は変更ファイルパスを抽出して拡張子フックに渡します（削除のみの patch はスキップ）。
 - パスに `../`、リダイレクトメタ文字（`<`、`>`）、タブ、改行、NUL バイトを含むものは拒否。必須フィールドを欠くペイロードはフェイルクローズドで拒否。
+- 成功時の no-op 定型通知はエージェントへ返しません。ファイル書き換え、警告、失敗を示す出力は保持し、コマンドラベルには展開済みファイルパスや引数要約ではなく設定上のプログラム名だけを表示します。
 
 ### 比較
 
@@ -771,6 +772,8 @@ Shell 以外の `preToolUse` を含む未対応の Cursor イベントは `allow
 
 `stop` では Cursor の `loop_count` フィールド（stop hook が自動フォローアップを発火した回数、0 始まり）をループ防止に使用します。1 以上の場合は全 stop hook をスキップします — Claude Code の `stop_hook_active` と同じ役割で、lint 失敗のフィードバックは Cursor の `loop_limit` までループせず 1 回だけエージェントに返ります。
 
+不正な `stop` ペイロードは、そのイベント固有の `followup_message` 形式でフェイルクローズドにします。コマンドフック専用の `permission` フィールドはこの経路では返しません。
+
 ### Windsurf (`--format windsurf`)
 
 `agent_action_name`フィールドを使用:
@@ -802,7 +805,7 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 }
 ```
 
-`Stop` は `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` を持ちます。
+`PreToolUse` では `stepIdx` が必須です。`Stop` は `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` を必須フィールドとして持ちます。欠落や型不正は、イベント固有の deny/continue 応答でフェイルクローズドにします。
 
 | hook_event_name | toolCall.name | 内部マッピング |
 |---|---|---|
@@ -900,7 +903,8 @@ Stdin はエージェント固有のフック JSON（イベント別のペイロ
 |---|---|---|---|
 | Claude Code | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `2` + **stderr** プレーンテキスト |
 | Cursor / Windsurf | `0` | `2`（Windsurf BeforeCommand は stderr に書き込み、Cursor Stop は `followup_message` 付きで `0`） | `2` |
-| Antigravity / Codex CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + deny JSON（非ゼロはフックインフラ失敗扱いで判定が無視される） |
+| Antigravity CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有 JSON（PreToolUse は `deny`、Stop は `continue`） |
+| Codex CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有の deny/block JSON（非ゼロはフックインフラ失敗扱いで判定が無視される） |
 
 ## パフォーマンス
 

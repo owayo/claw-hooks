@@ -97,7 +97,7 @@ mod tests {
         }
     }
 
-    // === Edge Case Tests ===
+    // === エッジケースのテスト ===
 
     #[test]
     fn test_contains_dd_command_with_sudo_wrapper() {

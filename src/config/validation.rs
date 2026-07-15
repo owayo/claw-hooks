@@ -475,7 +475,7 @@ mod tests {
         assert!(validate(&config).is_ok());
     }
 
-    // === Helper function tests ===
+    // === ヘルパー関数のテスト ===
 
     #[test]
     fn test_validate_custom_filters_valid() {

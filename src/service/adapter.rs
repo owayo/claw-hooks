@@ -150,11 +150,9 @@ impl FormatAdapter {
                 .to_string()
             }
             Format::Agy => {
-                // Antigravity CLI: PreToolUse 仕様の {"decision":"deny","reason":...} を返す。
-                // PostToolUse / Stop でも余分なフィールドは仕様上無害（PostToolUse の output は
-                // {} 固定だが、追加フィールドは無視される）。Stop も Block と同じ JSON で
-                // フェイルクローズドを成立させる。
-                // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）。
+                // Antigravity CLI: イベントを特定できない汎用エラーでは PreToolUse 仕様の
+                // {"decision":"deny","reason":...} を返す。Stop は deny で停止を阻止できないため、
+                // 入力を参照できる経路では format_error_for_input が continue を返す。
                 serde_json::json!({
                     "decision": "deny",
                     "reason": error_message
@@ -174,11 +172,34 @@ impl FormatAdapter {
 
     /// 入力のイベント名を考慮してエラー出力をフォーマットする。
     ///
-    /// Codex の PermissionRequest は通常の block 形式ではなく専用の deny schema を要求する。
-    /// PreToolUse も推奨形式（hookSpecificOutput.permissionDecision="deny"）で返す。
-    /// イベント名が判別できない場合は legacy block 形式（全イベントで受理される）に
-    /// フォールバックし、フェイルクローズドを維持する。
+    /// Codex の PermissionRequest/PreToolUse、Cursor の stop 系イベント、Antigravity の
+    /// Stop はそれぞれ異なる拒否形式を要求する。イベント名を判別できる場合は専用形式を
+    /// 使い、判別できない場合は各フォーマットの汎用エラー形式へフォールバックする。
     pub fn format_error_for_input(&self, message: &str, input: &str) -> String {
+        if self.format == Format::Cursor
+            && matches!(
+                Self::raw_hook_event_name(input).as_deref(),
+                Some("stop" | "subagentStop")
+            )
+        {
+            // stop 系イベントでは permission は無効であり、followup_message だけが
+            // エージェントを継続させる。入力不正時も停止を許可しないよう専用形式を返す。
+            let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+            return serde_json::json!({ "followup_message": error_message }).to_string();
+        }
+
+        if self.format == Format::Agy
+            && matches!(Self::raw_hook_event_name(input).as_deref(), Some("Stop"))
+        {
+            // Antigravity の Stop は deny ではなく continue だけが停止を阻止する。
+            let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+            return serde_json::json!({
+                "decision": "continue",
+                "reason": error_message
+            })
+            .to_string();
+        }
+
         if self.format == Format::Codex {
             if let Some(raw_event) = Self::raw_hook_event_name(input) {
                 if matches!(
@@ -1388,7 +1409,7 @@ impl FormatAdapter {
 
         match raw_event.as_str() {
             "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
-            "Stop" => Ok(Self::parse_agy_stop(&raw, session_id)),
+            "Stop" => Self::parse_agy_stop(&raw, session_id),
             // PostToolUse は発火するが、ペイロードに toolCall が含まれない（stepIdx と error のみ）
             // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
             // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
@@ -1430,6 +1451,10 @@ impl FormatAdapter {
         raw: &serde_json::Value,
         session_id: Option<String>,
     ) -> Result<HookInput> {
+        let _step_idx = raw
+            .get("stepIdx")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("Missing stepIdx field"))?;
         let tool_call = raw
             .get("toolCall")
             .ok_or_else(|| anyhow!("Missing toolCall field"))?;
@@ -1495,11 +1520,24 @@ impl FormatAdapter {
     }
 
     /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
-    fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+    fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> Result<HookInput> {
+        let _execution_num = raw
+            .get("executionNum")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow!("Missing executionNum field"))?;
         let termination_reason = raw
             .get("terminationReason")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("Missing terminationReason field"))?
+            .to_string();
+
+        // fullyIdle は Stop 固有の必須フィールド。値自体はフィルター判定に使わないが、
+        // 欠落や型不正を受理すると壊れたペイロードで stop hook を実行してしまう。
+        let _fully_idle = raw
+            .get("fullyIdle")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| anyhow!("Missing fullyIdle field"))?;
 
         // terminationReason が "error" のとき、Antigravity は別途 error フィールドに詳細メッセージを入れる。
         // 互換性のため、agent_message は error → terminationReason の順で取り出す。
@@ -1508,20 +1546,20 @@ impl FormatAdapter {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .or_else(|| termination_reason.clone());
+            .or_else(|| Some(termination_reason.clone()));
 
-        HookInput {
+        Ok(HookInput {
             event: HookEvent::Stop,
             tool_name: "Stop".to_string(),
             tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                status: termination_reason,
+                status: Some(termination_reason),
                 loop_count: None,
                 response: None,
                 agent_message,
                 stop_hook_active: false,
             }),
             session_id,
-        }
+        })
     }
 
     fn format_agy_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
@@ -4177,8 +4215,7 @@ mod tests {
     fn test_agy_input_parsing_pre_tool_use_run_command_missing_command_line_is_error() {
         // CommandLine 空または欠落 → フェイルクローズド
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input =
-            r#"{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command","args":{}}}"#;
+        let input = r#"{"hook_event_name":"PreToolUse","stepIdx":0,"toolCall":{"name":"run_command","args":{}}}"#;
         let err = adapter.parse_input(input).unwrap_err().to_string();
         assert!(err.contains("CommandLine"));
     }
@@ -4186,7 +4223,7 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_pre_tool_use_empty_command_line_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input = r#"{"hook_event_name":"PreToolUse","toolCall":{"name":"run_command","args":{"CommandLine":""}}}"#;
+        let input = r#"{"hook_event_name":"PreToolUse","stepIdx":0,"toolCall":{"name":"run_command","args":{"CommandLine":""}}}"#;
         let err = adapter.parse_input(input).unwrap_err().to_string();
         assert!(err.contains("CommandLine"));
     }
@@ -4198,6 +4235,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"PreToolUse",
+            "stepIdx":0,
             "toolCall":{"name":"write_to_file","args":{"TargetFile":"/workspace/foo.rs","Overwrite":false,"CodeContent":"fn main(){}"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
@@ -4210,6 +4248,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"PreToolUse",
+            "stepIdx":0,
             "toolCall":{"name":"replace_file_content","args":{"TargetFile":"/workspace/foo.rs"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
@@ -4220,7 +4259,7 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_pre_tool_use_missing_tool_call_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input = r#"{"hook_event_name":"PreToolUse"}"#;
+        let input = r#"{"hook_event_name":"PreToolUse","stepIdx":0}"#;
         let err = adapter.parse_input(input).unwrap_err().to_string();
         assert!(err.contains("toolCall"));
     }
@@ -4228,7 +4267,7 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_pre_tool_use_missing_name_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input = r#"{"hook_event_name":"PreToolUse","toolCall":{"args":{}}}"#;
+        let input = r#"{"hook_event_name":"PreToolUse","stepIdx":0,"toolCall":{"args":{}}}"#;
         let err = adapter.parse_input(input).unwrap_err().to_string();
         assert!(err.contains("toolCall.name"));
     }
@@ -4298,6 +4337,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"Stop",
+            "executionNum":1,
             "terminationReason":"error",
             "error":"oom killed",
             "fullyIdle":false
@@ -4333,6 +4373,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "event":"PreToolUse",
+            "stepIdx":0,
             "toolCall":{"name":"run_command","args":{"CommandLine":"ls"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
@@ -4458,6 +4499,85 @@ mod tests {
         assert!(reason.contains("error: unused variable"));
         assert!(reason.contains("expected `u32`"));
         assert!(!reason.starts_with(' '));
+    }
+
+    #[test]
+    fn test_cursor_stop_parse_errors_use_followup_message() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let inputs = [
+            r#"{"hook_event_name":"stop","loop_count":0}"#,
+            r#"{"hook_event_name":"subagentStop","status":"completed"}"#,
+        ];
+
+        for input in inputs {
+            let error = adapter.parse_input(input).unwrap_err().to_string();
+            let output = adapter.format_error_for_input(&error, input);
+            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+            assert!(
+                value["followup_message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("fail-closed")
+            );
+            assert!(value.get("permission").is_none());
+        }
+    }
+
+    #[test]
+    fn test_agy_pre_tool_use_missing_step_idx_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"PreToolUse",
+            "toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}
+        }"#;
+
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("stepIdx"));
+    }
+
+    #[test]
+    fn test_agy_stop_missing_execution_num_fails_closed() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"Stop",
+            "terminationReason":"model_stop",
+            "fullyIdle":true
+        }"#;
+
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("executionNum"));
+
+        let output = adapter.format_error_for_input(&error, input);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["decision"], "continue");
+    }
+
+    #[test]
+    fn test_agy_stop_missing_fully_idle_fails_closed() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"Stop",
+            "executionNum":1,
+            "terminationReason":"model_stop"
+        }"#;
+
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("fullyIdle"));
+
+        let output = adapter.format_error_for_input(&error, input);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["decision"], "continue");
+        assert!(value["reason"].as_str().unwrap().contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_agy_stop_missing_termination_reason_is_error() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{"hook_event_name":"Stop","executionNum":1,"fullyIdle":true}"#;
+
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("terminationReason"));
     }
 
     #[test]

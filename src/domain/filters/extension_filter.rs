@@ -24,8 +24,11 @@ pub(crate) struct ParsedCommand {
 
 /// 単一コマンドの実行結果。
 struct CommandResult {
-    /// 実行されたコマンド
-    command: String,
+    /// エージェント向け表示ラベル（プログラム名のみ）。
+    /// ログ用のサニタイズ要約（args_before= 等）はエージェントには意味がなく
+    /// トークンの無駄になるため、表示にはプログラム名だけを使う。
+    /// ファイルパスは含まれない（プログラム名は設定テンプレート由来のため）。
+    display_label: String,
     /// コマンドが成功したかどうか
     success: bool,
     /// 結合された stdout と stderr の出力
@@ -273,7 +276,7 @@ impl ExtensionHookFilter {
         }
 
         Ok(CommandResult {
-            command: sanitized_command,
+            display_label: parsed.program,
             success: output.status.success(),
             output: combined_output,
         })
@@ -291,9 +294,14 @@ impl ExtensionHookFilter {
                     if !result.success {
                         all_success = false;
                     }
+                    // 成功時の no-op 完了メッセージ（`1 file already formatted` /
+                    // `All checks passed!` 等）は編集のたびに毎回出る定型通知で、
+                    // エージェントに返しても行動につながらないため破棄する。
+                    let noop_success =
+                        result.success && crate::domain::is_noop_success_output(&result.output);
                     // 空でない出力を収集（警告、エラー、lint メッセージ）
-                    if !result.output.is_empty() {
-                        outputs.push(format!("[{}] {}", result.command, result.output));
+                    if !result.output.is_empty() && !noop_success {
+                        outputs.push(format!("[{}] {}", result.display_label, result.output));
                     }
                 }
                 Err(e) => {
@@ -839,13 +847,18 @@ mod tests {
                 let ctx = additional_context.expect("失敗時はエラーコンテキストが付くべき");
                 assert!(ctx.contains("failed"), "stderr は保持されるべき: {}", ctx);
                 assert!(
-                    ctx.contains("path_bytes="),
-                    "コマンドラベルはファイルパスではなくサイズ要約にすべき: {}",
+                    ctx.starts_with("[sh]"),
+                    "コマンドラベルはプログラム名だけにすべき: {}",
                     ctx
                 );
                 assert!(
                     !ctx.contains("/tmp/secret-path.txt"),
                     "コマンドラベルにファイルパスを含めるべきではない: {}",
+                    ctx
+                );
+                assert!(
+                    !ctx.contains("path_bytes=") && !ctx.contains("args_before="),
+                    "エージェント向け出力にログ用の引数要約を含めるべきではない: {}",
                     ctx
                 );
             }
@@ -929,6 +942,61 @@ mod tests {
     }
 
     // === extract_ext のテスト ===
+
+    #[test]
+    fn test_execute_suppresses_noop_success_output() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'printf \"All checks passed!\" #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: None,
+            } => {}
+            other => panic!("no-op 成功出力は抑制されるべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_preserves_noop_text_when_command_fails() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'printf \"All checks passed!\"; exit 1 #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: Some(context),
+            } => {
+                assert!(context.contains("All checks passed!"));
+                assert!(context.starts_with("[sh]"));
+            }
+            other => panic!("失敗出力が保持されるべき: {other:?}"),
+        }
+    }
 
     #[test]
     fn test_extract_ext_simple() {

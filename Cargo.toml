@@ -1,6 +1,6 @@
 [package]
 name = "claw-hooks"
-version = "26.7.100"
+version = "26.7.101"
 edition = "2024"
 rust-version = "1.85"
 authors = ["owayo <yoheiowa@gmail.com>"]

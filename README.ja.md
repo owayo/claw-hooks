@@ -614,6 +614,7 @@ condition = { file_exists = "tsconfig.json" }
 | `condition` | `object` | (なし) | 実行条件（AND条件: `file_exists`, `file_not_exists`, `command_exists`, `command_not_exists`） |
 | `stage` | `1-5` | `5` | 実行順序。小さいstageが先に実行される。同じstage内のフックは並列実行。 |
 | `report` | `bool` | (自動) | 結果をAIエージェントに返すかどうか。デフォルト: `condition`ありなら`true`、なしなら`false`。 |
+| `session_scope` | `"primary"` \| `"delegated"` \| `"all"` | `"primary"` | このフックを実行するセッション種別。`primary` = メインセッションのみ、`delegated` = 委譲エージェントセッション（Claude Code の teammate 等）のみ、`all` = 両方。 |
 
 **conditionフィールド**（AND条件 — 指定されたすべての条件が真である必要があります）:
 
@@ -651,6 +652,21 @@ commands = ["git-sc --all --yes --quiet"]
 **ステージの実行順序:** ステージは1から5の順に逐次実行されます。同じステージ内のすべてのフックは並列実行されます。あるステージの全フックが完了してから次のステージに進みます。
 
 **レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、コマンドは fire-and-forget 方式で起動され、Hook応答をブロックしません。デタッチコマンドは stdin/stdout/stderr が null になるため、spawn 失敗はログに残りますが、コマンド出力と終了ステータスは収集されません。Windsurf の Stop フックだけは基盤側が非同期のため、常にベストエフォートです。
+
+**セッションスコープ（エージェントセッションの抑止）:** Claude Code のチーム機能は委譲エージェント（teammate）を別プロセスとして起動し、それぞれが自分の `Stop` イベントを発火します — 1 タスクで数十回になることもあります。claw-hooks はこの 2 つを自動で判別します: 委譲エージェントの Stop ペイロードには `agent_type` フィールドが含まれ、メインセッションの Stop には含まれません。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。従来どおり常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity）は常にメインセッションとして扱われます。
+
+```toml
+# メインセッションの停止時のみ実行（デフォルト — フィールド指定不要）
+[[stop_hooks]]
+commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
+condition = { file_exists = "Cargo.toml" }
+
+# メインセッションと委譲エージェントセッションの両方で実行
+[[stop_hooks]]
+commands = ["collect-metrics"]
+report = false
+session_scope = "all"
+```
 
 ```toml
 # その他の例:

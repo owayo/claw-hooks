@@ -68,6 +68,12 @@ debug = false
 # stage: 1-5 (default: 5) — lower stages run first
 # report: true/false (default: true if condition is set, false otherwise)
 # report=false starts commands detached; stdout/stderr are discarded.
+# session_scope: "primary" (default) / "delegated" / "all"
+#   primary   = run only when the main session stops
+#   delegated = run only for delegated agent sessions (e.g. Claude Code teammates)
+#   all       = run for both
+# Delegated agents fire their own Stop events; the default "primary" keeps
+# teammate fleets from causing notification spam or racing git auto-commits.
 # [[stop_hooks]]
 # commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
 

@@ -345,12 +345,28 @@ impl FormatAdapter {
     /// Claude の Stop イベントを内部 Stop HookInput に変換する（tool_name/tool_input は持たない）。
     fn parse_claude_stop(&self, claude_input: ClaudeInput) -> HookInput {
         let tool_name = "Stop".to_string();
+        // teammate（別プロセスのエージェントセッション）の Stop には agent_type が入り、
+        // メインセッションの Stop には入らない（Claude Code 2.1 系で実機確認済み）。
+        // 欠落・空・空白のみは Primary 扱い（誤判定時の危険度が非対称: Delegated を
+        // Primary と誤認しても余計なフックが走るだけだが、逆は最終 lint / コミットが
+        // 走らなくなるため、非空文字列が存在するときだけ Delegated と判定する）。
+        let session_kind = if claude_input
+            .agent_type
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            crate::domain::StopSessionKind::Delegated
+        } else {
+            crate::domain::StopSessionKind::Primary
+        };
         let tool_input = crate::domain::ToolInput::Stop(crate::domain::StopInput {
             status: None,
             loop_count: None,
             response: None,
             agent_message: claude_input.last_assistant_message.clone(),
             stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
+            session_kind,
         });
 
         debug!(
@@ -656,6 +672,8 @@ impl FormatAdapter {
                 response: None,
                 agent_message: None,
                 stop_hook_active: false,
+                // Cursor にはセッション種別を判別する入力フィールドが無いため常にメイン扱い
+                session_kind: crate::domain::StopSessionKind::Primary,
             }),
             session_id: None,
         })
@@ -816,6 +834,8 @@ impl FormatAdapter {
                         agent_message: response.clone(),
                         response,
                         stop_hook_active: false,
+                        // Windsurf にはセッション種別を判別する入力フィールドが無いため常にメイン扱い
+                        session_kind: crate::domain::StopSessionKind::Primary,
                     }),
                 )
             }
@@ -910,6 +930,14 @@ struct ClaudeInput {
     /// エージェントの最後のメッセージ（Stop イベント）
     #[serde(default)]
     last_assistant_message: Option<String>,
+
+    /// エージェント種別（例: "general-purpose"）。
+    /// teammate（別プロセスのエージェントセッション）の Stop / SubagentStop にのみ含まれ、
+    /// メインセッションの Stop には含まれない。Stop のセッション種別判定に使う。
+    /// 補助フィールドのため型不一致でパース全体を落とさないよう Value で受け、
+    /// 文字列以外は「判別不能 = メインセッション扱い」に倒す。
+    #[serde(default)]
+    agent_type: Option<serde_json::Value>,
 }
 
 /// Claude Code の Stop イベント出力フォーマット。
@@ -1128,6 +1156,8 @@ impl FormatAdapter {
                 response: None,
                 agent_message,
                 stop_hook_active,
+                // Codex にはセッション種別を判別する入力フィールドが無いため常にメイン扱い
+                session_kind: crate::domain::StopSessionKind::Primary,
             }),
             session_id,
         }
@@ -1557,6 +1587,8 @@ impl FormatAdapter {
                 response: None,
                 agent_message,
                 stop_hook_active: false,
+                // Antigravity にはセッション種別を判別する入力フィールドが無いため常にメイン扱い
+                session_kind: crate::domain::StopSessionKind::Primary,
             }),
             session_id,
         })
@@ -1966,6 +1998,71 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert!(stop.agent_message.is_none());
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_with_agent_type_is_delegated() {
+        // teammate（別プロセスのエージェントセッション）の Stop には agent_type が入る
+        // （Claude Code 2.1 系の実ペイロードで確認済みの形式）
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"session_id":"62beaa88-5cdf-445c-b114-172ef29c3af0","hook_event_name":"Stop","stop_hook_active":false,"agent_type":"general-purpose","last_assistant_message":"done"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.session_kind, crate::domain::StopSessionKind::Delegated);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_without_agent_type_is_primary() {
+        // メインセッションの Stop には agent_type が入らない
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"session_id":"1391e2cc-95c3-4a73-ad1a-51fd588e20be","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"done"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.session_kind, crate::domain::StopSessionKind::Primary);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_with_blank_agent_type_is_primary() {
+        // 空文字・空白のみの agent_type はメイン扱い（誤って Delegated と判定すると
+        // 最終 lint / コミットが走らなくなるため、非空文字列のみ Delegated とする）
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        for agent_type in ["", "  "] {
+            let input = format!(
+                r#"{{"hook_event_name":"Stop","stop_hook_active":false,"agent_type":"{}"}}"#,
+                agent_type
+            );
+            let result = adapter.parse_input(&input).unwrap();
+            if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+                assert_eq!(
+                    stop.session_kind,
+                    crate::domain::StopSessionKind::Primary,
+                    "agent_type={:?} should be Primary",
+                    agent_type
+                );
+            } else {
+                panic!("Expected Stop tool input");
+            }
+        }
+    }
+
+    #[test]
+    fn test_claude_input_parsing_stop_with_non_string_agent_type_is_primary() {
+        // 非文字列の agent_type は無視してメイン扱い（パースは失敗させない）
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"Stop","stop_hook_active":false,"agent_type":123}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.session_kind, crate::domain::StopSessionKind::Primary);
         } else {
             panic!("Expected Stop tool input");
         }

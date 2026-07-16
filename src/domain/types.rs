@@ -161,6 +161,21 @@ pub struct SubagentInput {
     pub duration: Option<u64>,
 }
 
+/// Stop イベントを発火したセッションの種別。
+///
+/// Claude Code のチーム開発機能では teammate（別プロセスの claude インスタンス）が
+/// それぞれ自分の Stop フックを発火する。teammate の Stop ペイロードには
+/// `agent_type` フィールド（例: "general-purpose"）が含まれ、メインセッションの
+/// Stop には含まれないことで判別できる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StopSessionKind {
+    /// ユーザーと対話しているメインセッション。
+    #[default]
+    Primary,
+    /// teammate 等、委譲された別プロセスのエージェントセッション。
+    Delegated,
+}
+
 /// Stop イベント入力。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
@@ -185,6 +200,12 @@ pub struct StopInput {
     /// Stop フックが既にアクティブかどうか（無限ループ防止）
     #[serde(default)]
     pub stop_hook_active: bool,
+
+    /// Stop を発火したセッションの種別（メイン / 委譲エージェント）。
+    /// エージェント JSON には直接対応するフィールドが無いためデシリアライズ対象外。
+    /// 各アダプターが判別して設定する（判別できないエージェントは Primary のまま）。
+    #[serde(skip)]
+    pub session_kind: StopSessionKind,
 }
 
 /// AI エージェントに返されるフック出力。

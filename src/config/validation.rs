@@ -272,6 +272,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -327,6 +328,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
     }
@@ -344,6 +346,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -361,6 +364,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
     }
@@ -380,6 +384,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -395,6 +400,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -410,6 +416,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -427,6 +434,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
     }
@@ -439,6 +447,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
     }
@@ -451,6 +460,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
     }
@@ -471,6 +481,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
     }
@@ -535,6 +546,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
     }
@@ -546,6 +558,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_err());
     }
@@ -632,6 +645,7 @@ mod tests {
                 }),
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }]),
             ..Default::default()
         };
@@ -646,6 +660,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }]),
             ..Default::default()
         };
@@ -662,6 +677,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }]),
             ..Default::default()
         };
@@ -678,6 +694,7 @@ mod tests {
                 condition: None,
                 stage: Some(stage),
                 report: None,
+                session_scope: Default::default(),
             }];
             assert!(
                 validate_stop_hooks(&hooks).is_ok(),
@@ -694,6 +711,7 @@ mod tests {
             condition: None,
             stage: Some(0),
             report: None,
+            session_scope: Default::default(),
         }];
         let err = validate_stop_hooks(&hooks).unwrap_err();
         assert!(
@@ -710,6 +728,7 @@ mod tests {
             condition: None,
             stage: Some(6),
             report: None,
+            session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_err());
     }
@@ -721,6 +740,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
     }

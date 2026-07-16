@@ -11,5 +11,5 @@ pub use types::Config;
 // 他モジュールから利用するための再エクスポート
 pub use service::ConfigService;
 #[allow(unused_imports)]
-pub(crate) use types::{CustomFilter, HookCondition, ProjectConfig, StopHook};
+pub(crate) use types::{CustomFilter, HookCondition, ProjectConfig, StopHook, StopSessionScope};
 pub use validation::validate;

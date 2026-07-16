@@ -614,6 +614,7 @@ Windsurf is the main exception here: its `post_cascade_response` hook is an asyn
 | `condition` | `object` | (none) | Execution condition (AND logic: `file_exists`, `file_not_exists`, `command_exists`, `command_not_exists`) |
 | `stage` | `1-5` | `5` | Execution order. Lower stages run first. Hooks in the same stage run in parallel. |
 | `report` | `bool` | (auto) | Whether to report results to the AI agent. Default: `true` if `condition` is set, `false` otherwise. |
+| `session_scope` | `"primary"` \| `"delegated"` \| `"all"` | `"primary"` | Which session kind runs this hook. `primary` = main session only, `delegated` = delegated agent sessions (e.g. Claude Code teammates) only, `all` = both. |
 
 **Condition fields** (AND logic — all specified conditions must be true):
 
@@ -651,6 +652,21 @@ commands = ["git-sc --all --yes --quiet"]
 **Stage execution order:** Stages are executed sequentially from 1 to 5. All hooks in the same stage run in parallel. A stage completes before the next one begins.
 
 **Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf stop hooks, failures are always best-effort because the underlying hook is asynchronous.
+
+**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries an `agent_type` field, while the main session's Stop does not. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity) are always treated as the main session.
+
+```toml
+# Runs only when the main session stops (default — no field needed)
+[[stop_hooks]]
+commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
+condition = { file_exists = "Cargo.toml" }
+
+# Runs for both the main session and delegated agent sessions
+[[stop_hooks]]
+commands = ["collect-metrics"]
+report = false
+session_scope = "all"
+```
 
 ```toml
 # More examples:

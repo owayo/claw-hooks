@@ -19,7 +19,9 @@ pub use filters::FilterChain;
 pub use types::{Decision, HookEvent, HookInput, ToolInput};
 
 #[allow(unused)]
-pub use types::{BashInput, FileOperationInput, HookOutput, StopInput, SubagentInput};
+pub use types::{
+    BashInput, FileOperationInput, HookOutput, StopInput, StopSessionKind, SubagentInput,
+};
 
 pub use normalize::{is_noop_success_output, normalize_lint_output, truncate_output};
 pub use parser::parse_shell_tokens;

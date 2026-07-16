@@ -9,7 +9,7 @@ use crate::config::StopHook;
 use crate::domain::command::{
     TimedOutput, run_with_timeout_tracked, spawn_detached_with_env, spawn_piped_with_env,
 };
-use crate::domain::{Decision, HookEvent, HookInput};
+use crate::domain::{Decision, HookEvent, HookInput, StopSessionKind};
 
 /// プロセス間の再帰的な Stop フック実行を防止する環境変数。
 /// claw-hooks が Stop フックを実行する際、子プロセスにこの環境変数を設定する。
@@ -194,12 +194,25 @@ impl StopHookFilter {
     }
 
     /// 条件チェックを通過したフックをステージ別にグループ化して収集する。
-    fn collect_qualified_commands(&self) -> std::collections::BTreeMap<u8, Vec<QualifiedCommand>> {
+    fn collect_qualified_commands(
+        &self,
+        session_kind: StopSessionKind,
+    ) -> std::collections::BTreeMap<u8, Vec<QualifiedCommand>> {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut stage_map: std::collections::BTreeMap<u8, Vec<QualifiedCommand>> =
             std::collections::BTreeMap::new();
 
         for hook in &self.hooks {
+            // セッション種別によるフィルタ: teammate 等の委譲エージェントセッションでは
+            // session_scope が delegated / all のフックだけを実行する（デフォルト primary は
+            // メインセッション専用 — 通知スパム・重複 lint・並列 git コミットのレース防止）。
+            if !hook.session_scope.includes(session_kind) {
+                debug!(
+                    "Stop hook session_scope {:?} excludes {:?} session, skipping: {:?}",
+                    hook.session_scope, session_kind, hook.commands
+                );
+                continue;
+            }
             if let Some(ref condition) = hook.condition {
                 if !condition.is_satisfied(&cwd) {
                     debug!("Stop hook condition not met, skipping: {:?}", hook.commands);
@@ -305,14 +318,22 @@ impl Filter for StopHookFilter {
             LoopCheck::Continue(msg) => msg,
         };
 
-        // NanoBuddy 通知（全ストップフックの前に実行し、最初に到着させる）
-        if self.nano_buddy {
+        // Stop を発火したセッションの種別（メイン / 委譲エージェント）
+        let session_kind = match &input.tool_input {
+            crate::domain::ToolInput::Stop(stop) => stop.session_kind,
+            _ => StopSessionKind::Primary,
+        };
+
+        // NanoBuddy 通知（全ストップフックの前に実行し、最初に到着させる）。
+        // teammate 等のエージェントセッションの Stop では通知しない（通知スパム防止。
+        // エージェントの完了通知は SubagentStop 経由で別途行われる）。
+        if self.nano_buddy && session_kind == StopSessionKind::Primary {
             debug!("🐱 NanoBuddy stop notification");
             crate::notify::nano_buddy::notify_stop_hook();
         }
 
         // 条件チェックを通過したコマンドをステージ別に収集
-        let stage_map = self.collect_qualified_commands();
+        let stage_map = self.collect_qualified_commands(session_kind);
 
         // ステージを順番に実行（1 → 5）、各ステージ内のコマンドは並列実行
         let mut failures: Vec<String> = Vec::new();
@@ -352,6 +373,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -372,6 +394,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -395,6 +418,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -429,6 +453,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -458,6 +483,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -485,6 +511,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -529,7 +556,125 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(true),
+            session_scope: Default::default(),
         }]
+    }
+
+    // === セッション種別（メイン / 委譲エージェント）のテスト ===
+
+    /// 指定したセッション種別の Stop 入力を作るテストヘルパー。
+    fn make_stop_input_with_session_kind(kind: StopSessionKind) -> HookInput {
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: ToolInput::Stop(crate::domain::StopInput {
+                session_kind: kind,
+                ..Default::default()
+            }),
+            session_id: None,
+        }
+    }
+
+    /// 指定した session_scope で失敗する report=true フックを作るテストヘルパー。
+    /// 実行されれば Block、スキップされれば Allow になる。
+    fn make_failing_report_hook_with_scope(
+        scope: crate::config::StopSessionScope,
+    ) -> Vec<StopHook> {
+        vec![StopHook {
+            commands: vec!["sh -c 'echo scope-test-error >&2; exit 1'".to_string()],
+            condition: None,
+            stage: None,
+            report: Some(true),
+            session_scope: scope,
+        }]
+    }
+
+    #[test]
+    fn test_delegated_session_skips_primary_scope_hooks() {
+        // teammate 等のエージェントセッションでは、デフォルト（primary）のフックは
+        // 実行されない（失敗するフックでも Allow = スキップの証拠）
+        use crate::config::StopSessionScope;
+        let filter = StopHookFilter::new(
+            make_failing_report_hook_with_scope(StopSessionScope::Primary),
+            false,
+            10,
+        );
+        let decision = filter.execute(&make_stop_input_with_session_kind(
+            StopSessionKind::Delegated,
+        ));
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "delegated session should skip primary-scope hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_delegated_session_runs_all_scope_hooks() {
+        use crate::config::StopSessionScope;
+        let filter = StopHookFilter::new(
+            make_failing_report_hook_with_scope(StopSessionScope::All),
+            false,
+            10,
+        );
+        let decision = filter.execute(&make_stop_input_with_session_kind(
+            StopSessionKind::Delegated,
+        ));
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "delegated session should run all-scope hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_delegated_session_runs_delegated_scope_hooks() {
+        use crate::config::StopSessionScope;
+        let filter = StopHookFilter::new(
+            make_failing_report_hook_with_scope(StopSessionScope::Delegated),
+            false,
+            10,
+        );
+        let decision = filter.execute(&make_stop_input_with_session_kind(
+            StopSessionKind::Delegated,
+        ));
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "delegated session should run delegated-scope hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_primary_session_skips_delegated_scope_hooks() {
+        use crate::config::StopSessionScope;
+        let filter = StopHookFilter::new(
+            make_failing_report_hook_with_scope(StopSessionScope::Delegated),
+            false,
+            10,
+        );
+        let decision = filter.execute(&make_stop_input_with_session_kind(StopSessionKind::Primary));
+        assert!(
+            matches!(decision, Decision::Allow { .. }),
+            "primary session should skip delegated-scope hooks, got: {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn test_primary_session_runs_primary_scope_hooks() {
+        use crate::config::StopSessionScope;
+        let filter = StopHookFilter::new(
+            make_failing_report_hook_with_scope(StopSessionScope::Primary),
+            false,
+            10,
+        );
+        let decision = filter.execute(&make_stop_input_with_session_kind(StopSessionKind::Primary));
+        assert!(
+            matches!(decision, Decision::Block { .. }),
+            "primary session should run primary-scope hooks (default behavior), got: {:?}",
+            decision
+        );
     }
 
     #[test]
@@ -587,6 +732,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -650,6 +796,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -671,6 +818,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -692,6 +840,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -724,6 +873,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
         let decision = filter.execute(&make_stop_input());
@@ -754,6 +904,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -777,6 +928,7 @@ mod tests {
                 stage: None,
 
                 report: None,
+                session_scope: Default::default(),
             },
             StopHook {
                 commands: vec!["sh -c 'echo second-error >&2; exit 1'".to_string()],
@@ -790,6 +942,7 @@ mod tests {
                 stage: None,
 
                 report: None,
+                session_scope: Default::default(),
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -820,6 +973,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             },
             StopHook {
                 commands: vec!["true".to_string()],
@@ -833,6 +987,7 @@ mod tests {
                 stage: None,
 
                 report: None,
+                session_scope: Default::default(),
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -857,6 +1012,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -887,6 +1043,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -911,6 +1068,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -945,6 +1103,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -976,6 +1135,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -991,6 +1151,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -1007,6 +1168,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1063,6 +1225,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1094,6 +1257,7 @@ mod tests {
             stage: None,
 
             report: None, // condition あり → should_report() = true
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1163,6 +1327,7 @@ mod tests {
             stage: None,
 
             report: None, // condition あり → should_report() = true
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1197,6 +1362,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 2);
 
@@ -1248,6 +1414,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 3);
 
@@ -1271,6 +1438,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 5);
         let decision = filter.execute(&make_stop_input());
@@ -1296,6 +1464,7 @@ mod tests {
                 }),
                 stage: Some(1),
                 report: Some(true),
+                session_scope: Default::default(),
             },
             StopHook {
                 commands: vec!["sh -c 'echo stage5-error >&2; exit 1'".to_string()],
@@ -1307,6 +1476,7 @@ mod tests {
                 }),
                 stage: Some(5),
                 report: Some(true),
+                session_scope: Default::default(),
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 10);
@@ -1381,6 +1551,7 @@ mod tests {
             stage: None,
 
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -1425,6 +1596,7 @@ mod tests {
                 }),
                 stage: Some(1),
                 report: None,
+                session_scope: Default::default(),
             },
             StopHook {
                 commands: vec![format!(
@@ -1439,6 +1611,7 @@ mod tests {
                 }),
                 stage: Some(3),
                 report: Some(true),
+                session_scope: Default::default(),
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -1467,6 +1640,7 @@ mod tests {
             }),
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -1485,6 +1659,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(true),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -1508,6 +1683,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -1532,6 +1708,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -1563,6 +1740,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -1593,6 +1771,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
 
@@ -1623,6 +1802,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());
@@ -1648,6 +1828,7 @@ mod tests {
                 }),
                 stage: Some(1),
                 report: Some(false),
+                session_scope: Default::default(),
             },
             StopHook {
                 commands: vec!["sh -c 'echo stage3-error >&2; exit 1'".to_string()],
@@ -1659,6 +1840,7 @@ mod tests {
                 }),
                 stage: Some(3),
                 report: Some(true),
+                session_scope: Default::default(),
             },
         ];
         let filter = StopHookFilter::new(hooks, false, 60);
@@ -1700,6 +1882,7 @@ mod tests {
             }),
             stage: None,
             report: Some(true),
+            session_scope: Default::default(),
         }];
         let filter = StopHookFilter::new(hooks, false, 60);
         let decision = filter.execute(&make_stop_input());

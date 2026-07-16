@@ -347,6 +347,36 @@ impl HookCondition {
     }
 }
 
+/// Stop フックを実行するセッション種別の範囲。
+///
+/// Claude Code のチーム開発機能では teammate（別プロセスのエージェント）ごとに
+/// Stop イベントが発火するため、デフォルトではメインセッションのみで実行し、
+/// 通知スパム・重複 lint・並列 git コミットのレースを防ぐ。
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopSessionScope {
+    /// メインセッションのみ実行（デフォルト）。
+    #[default]
+    Primary,
+    /// teammate 等の委譲エージェントセッションのみ実行。
+    Delegated,
+    /// 両方で実行（セッション種別導入前の従来動作）。
+    All,
+}
+
+impl StopSessionScope {
+    /// このスコープが指定されたセッション種別で実行対象になるかを判定する。
+    pub fn includes(self, kind: crate::domain::StopSessionKind) -> bool {
+        use crate::domain::StopSessionKind;
+        matches!(
+            (self, kind),
+            (Self::All, _)
+                | (Self::Primary, StopSessionKind::Primary)
+                | (Self::Delegated, StopSessionKind::Delegated)
+        )
+    }
+}
+
 /// Stop イベントフック設定。
 ///
 /// ```toml
@@ -355,6 +385,7 @@ impl HookCondition {
 /// condition = { file_exists = "Cargo.toml" }
 /// stage = 3
 /// report = true
+/// session_scope = "primary"
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopHook {
@@ -375,6 +406,12 @@ pub struct StopHook {
     /// 未指定の場合: `condition` が設定されていれば true、そうでなければ false。
     #[serde(default)]
     pub report: Option<bool>,
+
+    /// 実行対象のセッション種別（デフォルト: primary = メインセッションのみ）。
+    /// teammate 等のエージェントセッションでも実行したい場合は
+    /// "delegated"（エージェントのみ）または "all"（両方）を指定する。
+    #[serde(default)]
+    pub session_scope: StopSessionScope,
 }
 
 impl StopHook {
@@ -641,6 +678,84 @@ mod tests {
         );
         let condition = wrapper.stop_hooks[0].condition.as_ref().unwrap();
         assert_eq!(condition.file_exists, Some("Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn test_stop_hook_session_scope_defaults_to_primary() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["cargo fmt --check"]
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            wrapper.stop_hooks[0].session_scope,
+            StopSessionScope::Primary
+        );
+    }
+
+    #[test]
+    fn test_stop_hook_session_scope_deserializes_all_variants() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        for (value, expected) in [
+            ("primary", StopSessionScope::Primary),
+            ("delegated", StopSessionScope::Delegated),
+            ("all", StopSessionScope::All),
+        ] {
+            let toml_str = format!(
+                r#"
+                [[stop_hooks]]
+                commands = ["echo done"]
+                session_scope = "{}"
+            "#,
+                value
+            );
+            let wrapper: Wrapper = toml::from_str(&toml_str).unwrap();
+            assert_eq!(
+                wrapper.stop_hooks[0].session_scope, expected,
+                "session_scope = {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_hook_session_scope_rejects_unknown_value() {
+        let toml_str = r#"
+            [[stop_hooks]]
+            commands = ["echo done"]
+            session_scope = "sometimes"
+        "#;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[allow(dead_code)]
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let result: Result<Wrapper, toml::de::Error> = toml::from_str(toml_str);
+        assert!(result.is_err(), "unknown session_scope value should fail");
+    }
+
+    #[test]
+    fn test_stop_session_scope_includes() {
+        use crate::domain::StopSessionKind;
+        // (scope, kind) の全組み合わせを網羅
+        assert!(StopSessionScope::Primary.includes(StopSessionKind::Primary));
+        assert!(!StopSessionScope::Primary.includes(StopSessionKind::Delegated));
+        assert!(!StopSessionScope::Delegated.includes(StopSessionKind::Primary));
+        assert!(StopSessionScope::Delegated.includes(StopSessionKind::Delegated));
+        assert!(StopSessionScope::All.includes(StopSessionKind::Primary));
+        assert!(StopSessionScope::All.includes(StopSessionKind::Delegated));
     }
 
     #[test]
@@ -927,6 +1042,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         });
 
         let project = ProjectConfig {
@@ -935,6 +1051,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }]),
             ..Default::default()
         };
@@ -1013,6 +1130,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         };
         assert_eq!(hook.stage_value(), 5);
     }
@@ -1024,6 +1142,7 @@ mod tests {
             condition: None,
             stage: Some(1),
             report: None,
+            session_scope: Default::default(),
         };
         assert_eq!(hook.stage_value(), 1);
     }
@@ -1040,6 +1159,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            session_scope: Default::default(),
         };
         assert!(hook.should_report());
     }
@@ -1051,6 +1171,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            session_scope: Default::default(),
         };
         assert!(!hook.should_report());
     }
@@ -1062,6 +1183,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(true),
+            session_scope: Default::default(),
         };
         assert!(hook.should_report());
     }
@@ -1078,6 +1200,7 @@ mod tests {
             }),
             stage: None,
             report: Some(false),
+            session_scope: Default::default(),
         };
         assert!(!hook.should_report());
     }
@@ -1345,6 +1468,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }],
             ..Default::default()
         };
@@ -1355,6 +1479,7 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                session_scope: Default::default(),
             }]),
             ..Default::default()
         };

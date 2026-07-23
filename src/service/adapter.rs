@@ -85,8 +85,10 @@ impl FormatAdapter {
                 // 非0終了コードだとフック失敗として扱われ、判定が無視される。
                 0
             }
-            Format::Cursor if event == HookEvent::Stop => {
-                // Cursor Stop: 判定はJSON内のfollowup_messageで伝達される。
+            Format::Cursor if matches!(event, HookEvent::Stop | HookEvent::SubagentStop) => {
+                // Cursor Stop / SubagentStop: 判定はJSON内のfollowup_messageで伝達される。
+                // Cursor が stdout JSON を解釈するのは exit code 0 のときだけのため、
+                // Block でも 0 を返す（exit 2 は permission: deny 相当で stop 系には無効）。
                 0
             }
             Format::Windsurf if event == HookEvent::Stop => {
@@ -98,14 +100,16 @@ impl FormatAdapter {
     }
 
     /// 出力を stdout ではなく stderr に書き込むべきかどうか。
-    /// Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る。
-    /// ただし Stop は post_cascade_response に対応する事後フックのため対象外。
+    /// Windsurf は exit code 2 でブロック時、stderr からエラーメッセージを読み取る
+    /// （pre_run_command / post_write_code とも「exit 2 のエラーメッセージは stderr から」
+    /// が公式仕様）。ただし Stop は post_cascade_response に対応する事後フックで
+    /// ブロック不可のため対象外。
     pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
         matches!(
             (&self.format, event, decision),
             (
                 &Format::Windsurf,
-                HookEvent::BeforeCommand,
+                HookEvent::BeforeCommand | HookEvent::AfterFileEdit,
                 Decision::Block { .. }
             )
         )
@@ -1101,8 +1105,11 @@ impl FormatAdapter {
             "SubagentStop" | "subagent_stop" => HookEvent::SubagentStop,
             // claw-hooks の処理対象外イベント: ライフサイクル/プロンプト/コンパクション系は
             // 危険コマンドブロック・保存後フック・Stop フックの責務外なので Allow で素通しする。
-            "SessionStart" | "session_start" | "UserPromptSubmit" | "user_prompt_submit"
-            | "PreCompact" | "pre_compact" | "PostCompact" | "post_compact" => {
+            // SessionEnd は advisory（出力がエージェントに影響しない）なメイン
+            // スレッド終了イベントのため、同様にスコープ外として素通しする。
+            "SessionStart" | "session_start" | "SessionEnd" | "session_end"
+            | "UserPromptSubmit" | "user_prompt_submit" | "PreCompact" | "pre_compact"
+            | "PostCompact" | "post_compact" => {
                 return Ok(HookInput {
                     event: HookEvent::Passthrough, // パススルー用
                     tool_name: raw_event,
@@ -2880,6 +2887,25 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_input_parsing_session_end_passthrough() {
+        // SessionEnd は advisory なメインスレッド終了イベント（出力はエージェントに
+        // 影響しない）。claw-hooks のスコープ外として明示的にパススルーする。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{
+            "session_id": "thr_123",
+            "transcript_path": "/workspace/.codex/rollout.jsonl",
+            "cwd": "/workspace",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+        }"#;
+
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Passthrough);
+        assert_eq!(result.tool_name, "SessionEnd");
+        assert_eq!(result.session_id, Some("thr_123".to_string()));
+    }
+
+    #[test]
     fn test_codex_input_parsing_pre_tool_use() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{
@@ -3319,13 +3345,23 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_use_stderr_after_file_edit_block_false() {
-        // Windsurf + AfterFileEdit + Block → stderr を使用しない（pre_run_command のみ）
+    fn test_windsurf_use_stderr_after_file_edit_block_true() {
+        // Windsurf + AfterFileEdit + Block → stderr を使用する。
+        // 公式仕様では exit 2 のエラーメッセージは post_write_code でも stderr から
+        // 読まれる（post-hook はブロック不可だがメッセージはエージェントに見える）。
+        // stdout に書くと exit 2 時に読まれず lint 結果が失われる。
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
         let decision = Decision::Block {
             message: "error".to_string(),
         };
-        assert!(!adapter.use_stderr(&decision, HookEvent::AfterFileEdit));
+        assert!(adapter.use_stderr(&decision, HookEvent::AfterFileEdit));
+    }
+
+    #[test]
+    fn test_windsurf_use_stderr_after_file_edit_allow_false() {
+        // Windsurf + AfterFileEdit + Allow → stderr を使用しない
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert!(!adapter.use_stderr(&Decision::allow(), HookEvent::AfterFileEdit));
     }
 
     #[test]

@@ -3,6 +3,8 @@
 //! lint/typecheck出力をトークン効率のために最適化し、
 //! エラー情報は維持する。
 
+use std::collections::HashSet;
+
 /// デフォルトの出力最大長（文字数）。
 pub const DEFAULT_OUTPUT_MAX_LENGTH: usize = 1000;
 
@@ -107,6 +109,9 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - lint ルールセットの非互換設定警告（ruff の `... are incompatible. Ignoring ...`）を除去
 ///   - 編集ごとに毎回同じ内容が出るコード非依存のノイズ
 ///   - コード診断の `warning:`（`warning: unused variable` 等）は保持する
+/// - 逐語一致で繰り返される説明行（biome の `i ...`、ruff の `help: ...`、
+///   rustc/clippy の `= help:` / `= note:` 等）の2回目以降を除去
+///   - 同一ルールの違反が複数あると出現ごとに同じ説明文が繰り返されるため
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -151,9 +156,56 @@ pub fn normalize_lint_output(output: &str) -> String {
         lines.pop();
     }
 
+    let lines = dedup_repeated_explanation_lines(lines);
     let lines = collapse_repeated_prefix_lines(lines);
 
     lines.join("\n")
+}
+
+/// 逐語一致で繰り返される説明行の2回目以降を除去する。
+///
+/// 同一ルールの違反が複数あると、biome / ruff / rustc / clippy は違反ごとに
+/// まったく同じ説明文を繰り返す（biome の `i any disables many type checking
+/// rules. ...`、ruff の `help: Add missing whitespace`、clippy の
+/// `= help: for further information visit https://rust-lang.github.io/...` 等）。
+/// 説明は1度伝われば十分で、2回目以降は情報量ゼロのままトークンを消費するため
+/// 除去する。`file:line:col` ヘッダやソース行は説明行の形式ではないため対象外
+/// （位置情報・コード断片は出現ごとに保持される）。
+///
+/// biome は説明行の前後を空行で挟むため、除去すると空行が連続し得る。
+/// 連続空行はここで1行に再圧縮し、末尾に残った空行も落とす。
+fn dedup_repeated_explanation_lines(lines: Vec<String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if is_explanation_line(&line) && !seen.insert(line.clone()) {
+            continue;
+        }
+        if line.is_empty() && result.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        result.push(line);
+    }
+    while result.last().is_some_and(|l| l.is_empty()) {
+        result.pop();
+    }
+    result
+}
+
+/// 診断の補足説明・ヘルプを表す行かどうかを判定する。
+///
+/// biome は `i <説明>`、ruff は `help: <説明>`、rustc/clippy は
+/// `= help: <説明>` / `= note: <説明>` / `note: <説明>` の形式で補足説明を
+/// 出力する（`collapse_whitespace` 適用後の行頭を前提とする）。これらは
+/// 診断位置に依存しない一般説明のため、逐語一致すれば重複除去して安全。
+/// ソース行（`3 │ code` / `3 | code`）や `file:line:col` ヘッダは
+/// この形式に一致しないため対象にならない。
+fn is_explanation_line(line: &str) -> bool {
+    line.starts_with("i ")
+        || line.starts_with("help: ")
+        || line.starts_with("= help: ")
+        || line.starts_with("= note: ")
+        || line.starts_with("note: ")
 }
 
 /// 進捗系の単語で始まる行が連続する場合、4行目以降を集約する。
@@ -2485,5 +2537,137 @@ undocumented-public-module: Missing docstring in public module\n\
         assert!(result.contains("10 | let x = foo("));
         // ラベル付きキャレット行（英数字を含む）は保持
         assert!(result.contains("expected u32"));
+    }
+
+    #[test]
+    fn test_dedup_explanation_lines_biome_info() {
+        // biome は同一ルールの違反ごとに同じ `i` 説明文を繰り返す。
+        // 2回目以降は除去され、除去で生じた連続空行は1行に再圧縮される。
+        let lines: Vec<String> = [
+            "src/a.ts:1:18 lint/suspicious/noExplicitAny",
+            "! Unexpected any. Specify a different type.",
+            "",
+            "i any disables many type checking rules. Its use should be avoided.",
+            "",
+            "src/a.ts:3:32 lint/suspicious/noExplicitAny",
+            "! Unexpected any. Specify a different type.",
+            "",
+            "i any disables many type checking rules. Its use should be avoided.",
+            "",
+            "Found 2 warnings.",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let result = dedup_repeated_explanation_lines(lines);
+        let joined = result.join("\n");
+        assert_eq!(
+            joined.matches("i any disables").count(),
+            1,
+            "duplicate biome info line should be removed: {joined}"
+        );
+        assert!(!joined.contains("\n\n\n"), "no double blank: {joined}");
+        // 診断ヘッダと本文行は出現ごとに保持される
+        assert_eq!(joined.matches("lint/suspicious/noExplicitAny").count(), 2);
+        assert_eq!(joined.matches("! Unexpected any").count(), 2);
+    }
+
+    #[test]
+    fn test_dedup_explanation_lines_ruff_help() {
+        // ruff は同種違反ごとに同じ `help:` 行を繰り返す。逐語一致のみ除去し、
+        // 内容が異なる help 行は保持する。
+        let lines: Vec<String> = [
+            "missing-whitespace-around-operator: [*] Missing whitespace around operator",
+            "-> src/a.py:7:10",
+            "help: Add missing whitespace",
+            "missing-whitespace-around-operator: [*] Missing whitespace around operator",
+            "-> src/a.py:9:10",
+            "help: Add missing whitespace",
+            "docstring-missing-returns: `return` is not documented in docstring",
+            "-> src/a.py:2:5",
+            "help: Add a \"Returns\" section to the docstring",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let result = dedup_repeated_explanation_lines(lines);
+        let joined = result.join("\n");
+        assert_eq!(joined.matches("help: Add missing whitespace").count(), 1);
+        assert_eq!(joined.matches("help: Add a \"Returns\"").count(), 1);
+        // 位置ヘッダは出現ごとに保持される
+        assert!(joined.contains("-> src/a.py:7:10"));
+        assert!(joined.contains("-> src/a.py:9:10"));
+    }
+
+    #[test]
+    fn test_dedup_explanation_lines_clippy_help_url() {
+        // clippy は lint 出現ごとに同じ `= help: for further information...` を繰り返す
+        let lines: Vec<String> = [
+            "warning: this expression creates a reference which is immediately dereferenced",
+            "= help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow",
+            "warning: this expression creates a reference which is immediately dereferenced",
+            "= help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_borrow",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let result = dedup_repeated_explanation_lines(lines);
+        let joined = result.join("\n");
+        assert_eq!(joined.matches("= help: for further information").count(), 1);
+        // 診断見出し行は説明行ではないため重複していても保持される
+        assert_eq!(joined.matches("warning: this expression").count(), 2);
+    }
+
+    #[test]
+    fn test_dedup_explanation_lines_preserves_identical_source_lines() {
+        // ソース行や位置ヘッダは説明行の形式ではないため、同一でも除去しない
+        let lines: Vec<String> = [
+            "> 1 │ var legacyValue: any = 42;",
+            "3 │ export function compute(input: any): number {",
+            "> 1 │ var legacyValue: any = 42;",
+            "3 │ export function compute(input: any): number {",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let result = dedup_repeated_explanation_lines(lines);
+        assert_eq!(result.len(), 4, "source lines must not be deduped");
+    }
+
+    #[test]
+    fn test_dedup_explanation_lines_trailing_blank_removed() {
+        // 末尾の説明行を除去した結果、末尾に空行が残る場合は落とす
+        let lines: Vec<String> = [
+            "i See MDN web docs for more details.",
+            "body",
+            "",
+            "i See MDN web docs for more details.",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let result = dedup_repeated_explanation_lines(lines);
+        assert_eq!(
+            result,
+            vec!["i See MDN web docs for more details.", "body"],
+            "trailing blank after dedup should be removed"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dedups_biome_repeated_info_e2e() {
+        // E2E: biome check の実出力形状で、同じルールの `i` 説明が1回に集約される
+        let input = "src/sample.ts:1:1 lint/suspicious/noVar  FIXABLE  ━━━━━━━━\n\n  ! Use let or const instead of var.\n\n  i A variable declared with var is accessible in the whole module.\n\n  i See MDN web docs for more details.\n\nsrc/sample.ts:4:3 lint/suspicious/noVar  FIXABLE  ━━━━━━━━\n\n  ! Use let or const instead of var.\n\n  i A variable declared with var is accessible in the whole module.\n\n  i See MDN web docs for more details.\n\nFound 2 warnings.";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result.matches("i A variable declared with var").count(),
+            1,
+            "repeated biome info should be deduped: {result}"
+        );
+        assert_eq!(result.matches("i See MDN web docs").count(), 1);
+        // 診断ヘッダは位置情報を持つため出現ごとに保持される
+        assert_eq!(result.matches("lint/suspicious/noVar").count(), 2);
+        assert!(result.contains("Found 2 warnings."));
+        assert!(!result.contains("\n\n\n"), "no double blanks: {result}");
     }
 }

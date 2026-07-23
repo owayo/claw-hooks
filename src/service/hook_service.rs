@@ -151,7 +151,8 @@ impl HookService {
         // （stderr へ出力、ディスク非永続）を使う。
         info!("Output {} ({} bytes)", emoji, output.len());
 
-        // Windsurf は pre_run_command のブロック時のみ stderr を使う。
+        // Windsurf は pre_run_command / post_write_code のブロック時に stderr を使う
+        // （exit 2 のエラーメッセージは stderr から読まれるのが公式仕様）。
         // post_cascade_response は事後フックのため、Stop の失敗も stdout 側の許可応答に丸める。
         if self.adapter.use_stderr(&decision, hook_input.event) {
             let stderr = io::stderr();

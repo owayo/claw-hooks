@@ -836,6 +836,8 @@ camelCase schema. A representative PreToolUse payload:
 
 Standard `hook_event_name` + `tool_name` + `tool_input` schema. `apply_patch`'s `tool_input.command` is parsed for the `*** Add/Update/Move to File:` headers to drive extension hooks (delete-only patches are skipped).
 
+Every Codex event is validated against the official required metadata before it is mapped: `session_id`, `cwd`, and `model` must be non-empty strings, while `transcript_path` must be present as a string or `null`. Event-specific fields such as `turn_id`, `permission_mode`, tool identifiers/payloads, and Stop state are also type-checked. Missing or invalid fields fail closed with the event's native deny/block response; known out-of-scope events pass through only after this validation succeeds.
+
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
 | `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | pass-through allow |

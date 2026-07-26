@@ -25,6 +25,58 @@ fn run_hook_with_format(json_input: &str, format: &str) -> (String, String, i32)
     run_hook_with_config_and_format(json_input, format, empty_config.path())
 }
 
+/// 統合テスト用の Codex 入力に、公式仕様の必須メタデータを補完する。
+fn complete_codex_input(input: &str) -> String {
+    fn insert_default(
+        object: &mut serde_json::Map<String, serde_json::Value>,
+        field: &str,
+        value: serde_json::Value,
+    ) {
+        object.entry(field.to_string()).or_insert(value);
+    }
+
+    let mut value: serde_json::Value = serde_json::from_str(input).unwrap();
+    let object = value.as_object_mut().unwrap();
+    let event = object
+        .get("hook_event_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    insert_default(object, "session_id", serde_json::json!("test-session"));
+    insert_default(object, "transcript_path", serde_json::Value::Null);
+    insert_default(object, "cwd", serde_json::json!("/tmp/project"));
+    insert_default(object, "model", serde_json::json!("gpt-5.4"));
+
+    match event.as_str() {
+        "SessionStart" => {
+            insert_default(object, "permission_mode", serde_json::json!("default"));
+        }
+        "PreToolUse" => {
+            insert_default(object, "turn_id", serde_json::json!("turn-1"));
+            insert_default(object, "permission_mode", serde_json::json!("default"));
+            insert_default(object, "tool_use_id", serde_json::json!("tool-1"));
+        }
+        "PermissionRequest" => {
+            insert_default(object, "turn_id", serde_json::json!("turn-1"));
+            insert_default(object, "permission_mode", serde_json::json!("default"));
+        }
+        "PostToolUse" => {
+            insert_default(object, "turn_id", serde_json::json!("turn-1"));
+            insert_default(object, "permission_mode", serde_json::json!("default"));
+            insert_default(object, "tool_use_id", serde_json::json!("tool-1"));
+            insert_default(object, "tool_response", serde_json::Value::Null);
+        }
+        "UserPromptSubmit" | "SubagentStart" | "SubagentStop" | "Stop" => {
+            insert_default(object, "turn_id", serde_json::json!("turn-1"));
+            insert_default(object, "permission_mode", serde_json::json!("default"));
+        }
+        _ => {}
+    }
+
+    serde_json::to_string(&value).unwrap()
+}
+
 #[test]
 fn test_allow_safe_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#;
@@ -1098,8 +1150,8 @@ fn test_codex_missing_hook_event_name_is_fail_closed() {
 
 #[test]
 fn test_codex_missing_tool_input_is_fail_closed() {
-    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#);
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(
         exit_code, 0,
@@ -1111,6 +1163,37 @@ fn test_codex_missing_tool_input_is_fail_closed() {
         stdout
     );
     // PreToolUse のパースエラーは推奨形式 hookSpecificOutput.permissionDecision="deny" で返す
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse",
+        "Output should use PreToolUse hookSpecificOutput: {}",
+        stdout
+    );
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "Output should indicate deny: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_codex_missing_common_field_is_fail_closed() {
+    let complete = complete_codex_input(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#,
+    );
+    let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
+    input.as_object_mut().unwrap().remove("model");
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input.to_string(), "codex");
+
+    assert_eq!(
+        exit_code, 0,
+        "Codex missing common field should exit 0 with block in JSON"
+    );
+    assert!(
+        stdout.contains("Missing model field"),
+        "Output should mention the missing common field: {}",
+        stdout
+    );
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(
         parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse",
@@ -1346,8 +1429,10 @@ fn test_block_rm_in_find_exec() {
 
 #[test]
 fn test_codex_format_allow_safe_command() {
-    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"},"session_id":"test-session","cwd":"/tmp"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"},"session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
     // Codex Allow は空 JSON {} を返す
@@ -1361,8 +1446,10 @@ fn test_codex_format_allow_safe_command() {
 
 #[test]
 fn test_codex_format_block_rm_command() {
-    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"session_id":"test-session","cwd":"/tmp"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     // Codex: 非0終了コードはフック失敗扱いのため exit 0 + JSON で block を伝達
     assert_eq!(exit_code, 0, "Codex block should still exit 0");
@@ -1389,8 +1476,10 @@ fn test_codex_format_block_rm_command() {
 
 #[test]
 fn test_codex_format_permission_request_allows_safe_command() {
-    let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git status","description":"inspect repository"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git status","description":"inspect repository"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex PermissionRequest allow should exit 0");
     // 安全な PermissionRequest では承認を代行せず、通常の承認フローへ委ねる。
@@ -1414,9 +1503,11 @@ fn test_codex_format_permission_request_blocks_rm_command() {
     )
     .expect("Failed to write config");
 
-    let input = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /","description":"cleanup"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#;
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /","description":"cleanup"},"session_id":"test-session","cwd":"/tmp","model":"gpt-5.4"}"#,
+    );
     let (stdout, _stderr, exit_code) =
-        run_hook_with_config_and_format(input, "codex", &config_path);
+        run_hook_with_config_and_format(&input, "codex", &config_path);
 
     assert_eq!(exit_code, 0, "Codex PermissionRequest block should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
@@ -1437,8 +1528,10 @@ fn test_codex_format_permission_request_blocks_rm_command() {
 
 #[test]
 fn test_codex_format_block_kill_command() {
-    let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"},"session_id":"test-session","cwd":"/tmp"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"},"session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex block should still exit 0");
     // PreToolUse の Block は推奨形式 hookSpecificOutput.permissionDecision="deny"
@@ -1500,8 +1593,10 @@ fn test_codex_format_missing_required_fields_is_fail_closed() {
 
 #[test]
 fn test_codex_format_stop_event() {
-    let input = r#"{"hook_event_name":"Stop","session_id":"test-session","cwd":"/tmp","stop_hook_active":false}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"Stop","session_id":"test-session","cwd":"/tmp","stop_hook_active":false,"last_assistant_message":null}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex Stop should exit 0");
     // Stop Allow は空 JSON {} を返す
@@ -1515,8 +1610,10 @@ fn test_codex_format_stop_event() {
 
 #[test]
 fn test_codex_format_post_tool_use_bash_passthrough() {
-    let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"echo done"},"session_id":"test-session","cwd":"/tmp"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"echo done"},"session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     // Codex PostToolUse + Bash はコマンド出力確認用のパススルーとして扱う
     assert_eq!(exit_code, 0, "Codex PostToolUse should exit 0");
@@ -1530,8 +1627,10 @@ fn test_codex_format_post_tool_use_bash_passthrough() {
 
 #[test]
 fn test_codex_format_post_tool_use_apply_patch_allows() {
-    let input = r#"{"hook_event_name":"PostToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"},"session_id":"test-session","cwd":"/tmp"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PostToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch\n"},"session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex apply_patch PostToolUse should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
@@ -1544,8 +1643,10 @@ fn test_codex_format_post_tool_use_apply_patch_allows() {
 
 #[test]
 fn test_codex_format_subagent_start_allows() {
-    let input = r#"{"hook_event_name":"SubagentStart","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Explore","permission_mode":"default"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"SubagentStart","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Explore","permission_mode":"default"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex SubagentStart should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
@@ -1558,8 +1659,10 @@ fn test_codex_format_subagent_start_allows() {
 
 #[test]
 fn test_codex_format_subagent_stop_allows() {
-    let input = r#"{"hook_event_name":"SubagentStop","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Plan","agent_transcript_path":"/tmp/subagent.jsonl","stop_hook_active":false,"last_assistant_message":"Done"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"SubagentStop","session_id":"test-session","turn_id":"turn-1","agent_id":"agent-1","agent_type":"Plan","agent_transcript_path":"/tmp/subagent.jsonl","stop_hook_active":false,"last_assistant_message":"Done"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(exit_code, 0, "Codex SubagentStop should exit 0");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
@@ -1636,8 +1739,10 @@ fn test_stop_hook_active_false_processes_normally() {
 
 #[test]
 fn test_codex_session_start_passthrough() {
-    let input = r#"{"hook_event_name":"SessionStart","session_id":"test-session","cwd":"/tmp","source":"startup"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"SessionStart","session_id":"test-session","cwd":"/tmp","source":"startup"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(
         exit_code, 0,
@@ -1653,8 +1758,10 @@ fn test_codex_session_start_passthrough() {
 
 #[test]
 fn test_codex_user_prompt_submit_passthrough() {
-    let input = r#"{"hook_event_name":"UserPromptSubmit","session_id":"test-session","cwd":"/tmp","prompt":"hello"}"#;
-    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "codex");
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"test-session","cwd":"/tmp","prompt":"hello"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
 
     assert_eq!(
         exit_code, 0,

@@ -1091,10 +1091,9 @@ impl FormatAdapter {
             .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
             .to_string();
 
-        let session_id = raw
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // Codex はイベントごとに必須フィールドを定義している。判定に直接使わない
+        // メタデータも検証し、不完全な入力を許可扱いにしない。
+        let session_id = Some(Self::validate_codex_required_fields(&raw, &raw_event)?);
 
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
@@ -1137,6 +1136,118 @@ impl FormatAdapter {
         }
 
         self.parse_codex_tool(&raw, event, raw_event, session_id)
+    }
+
+    /// Codex の共通・イベント固有必須フィールドを検証し、セッション ID を返す。
+    fn validate_codex_required_fields(raw: &serde_json::Value, raw_event: &str) -> Result<String> {
+        let session_id = Self::require_codex_string(raw, "session_id")?.to_string();
+        Self::require_codex_nullable_string(raw, "transcript_path")?;
+        Self::require_codex_string(raw, "cwd")?;
+        Self::require_codex_string(raw, "model")?;
+
+        match raw_event {
+            "SessionStart" | "session_start" => {
+                Self::require_codex_string(raw, "permission_mode")?;
+                Self::require_codex_string(raw, "source")?;
+            }
+            "SessionEnd" | "session_end" => {
+                Self::require_codex_string(raw, "reason")?;
+            }
+            "PreToolUse" | "pre_tool_use" | "BeforeTool" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_string(raw, "tool_use_id")?;
+                Self::require_codex_tool_fields(raw)?;
+            }
+            "PermissionRequest" | "permission_request" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_tool_fields(raw)?;
+            }
+            "PostToolUse" | "post_tool_use" | "AfterTool" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_string(raw, "tool_use_id")?;
+                Self::require_codex_tool_fields(raw)?;
+                Self::require_codex_field(raw, "tool_response")?;
+            }
+            "PreCompact" | "pre_compact" | "PostCompact" | "post_compact" => {
+                Self::require_codex_turn_fields(raw, false)?;
+                Self::require_codex_string(raw, "trigger")?;
+            }
+            "UserPromptSubmit" | "user_prompt_submit" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_string(raw, "prompt")?;
+            }
+            "SubagentStart" | "subagent_start" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_string(raw, "agent_id")?;
+                Self::require_codex_string(raw, "agent_type")?;
+            }
+            "SubagentStop" | "subagent_stop" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_string(raw, "agent_id")?;
+                Self::require_codex_string(raw, "agent_type")?;
+                Self::require_codex_nullable_string(raw, "agent_transcript_path")?;
+                Self::require_codex_bool(raw, "stop_hook_active")?;
+                Self::require_codex_nullable_string(raw, "last_assistant_message")?;
+            }
+            "Stop" | "stop" => {
+                Self::require_codex_turn_fields(raw, true)?;
+                Self::require_codex_bool(raw, "stop_hook_active")?;
+                Self::require_codex_nullable_string(raw, "last_assistant_message")?;
+            }
+            _ => {}
+        }
+
+        Ok(session_id)
+    }
+
+    /// Codex のターン識別子と、対象イベントで必要な権限モードを検証する。
+    fn require_codex_turn_fields(raw: &serde_json::Value, permission_mode: bool) -> Result<()> {
+        Self::require_codex_string(raw, "turn_id")?;
+        if permission_mode {
+            Self::require_codex_string(raw, "permission_mode")?;
+        }
+        Ok(())
+    }
+
+    /// Codex のツールイベントに共通する必須フィールドを検証する。
+    fn require_codex_tool_fields(raw: &serde_json::Value) -> Result<()> {
+        Self::require_codex_string(raw, "tool_name")?;
+        Self::require_codex_field(raw, "tool_input")?;
+        Ok(())
+    }
+
+    /// 必須フィールドが存在することを検証する。
+    fn require_codex_field<'a>(
+        raw: &'a serde_json::Value,
+        field: &str,
+    ) -> Result<&'a serde_json::Value> {
+        raw.get(field)
+            .ok_or_else(|| anyhow!("Missing {} field", field))
+    }
+
+    /// 必須の非空文字列フィールドを検証する。
+    fn require_codex_string<'a>(raw: &'a serde_json::Value, field: &str) -> Result<&'a str> {
+        Self::require_codex_field(raw, field)?
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Missing or invalid {} field", field))
+    }
+
+    /// `string | null` の必須フィールドを検証する。
+    fn require_codex_nullable_string(raw: &serde_json::Value, field: &str) -> Result<()> {
+        let value = Self::require_codex_field(raw, field)?;
+        if value.is_null() || value.is_string() {
+            Ok(())
+        } else {
+            Err(anyhow!("Invalid {} field", field))
+        }
+    }
+
+    /// 必須の真偽値フィールドを検証する。
+    fn require_codex_bool(raw: &serde_json::Value, field: &str) -> Result<bool> {
+        Self::require_codex_field(raw, field)?
+            .as_bool()
+            .ok_or_else(|| anyhow!("Missing or invalid {} field", field))
     }
 
     /// Codex の Stop イベントを内部 Stop HookInput に変換する。
@@ -1640,6 +1751,61 @@ impl FormatAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト用の Codex 入力に、各イベントで必須のメタデータを補完する。
+    fn complete_codex_input(input: &str) -> String {
+        fn insert_default(
+            object: &mut serde_json::Map<String, serde_json::Value>,
+            field: &str,
+            value: serde_json::Value,
+        ) {
+            object.entry(field.to_string()).or_insert(value);
+        }
+
+        let mut value: serde_json::Value = serde_json::from_str(input).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let event = object
+            .get("hook_event_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        insert_default(object, "session_id", serde_json::json!("test-session"));
+        insert_default(object, "transcript_path", serde_json::Value::Null);
+        insert_default(object, "cwd", serde_json::json!("/tmp/project"));
+        insert_default(object, "model", serde_json::json!("gpt-5.4"));
+
+        match event.as_str() {
+            "SessionStart" => {
+                insert_default(object, "permission_mode", serde_json::json!("default"));
+            }
+            "PreToolUse" => {
+                insert_default(object, "turn_id", serde_json::json!("turn-1"));
+                insert_default(object, "permission_mode", serde_json::json!("default"));
+                insert_default(object, "tool_use_id", serde_json::json!("tool-1"));
+            }
+            "PermissionRequest" => {
+                insert_default(object, "turn_id", serde_json::json!("turn-1"));
+                insert_default(object, "permission_mode", serde_json::json!("default"));
+            }
+            "PostToolUse" => {
+                insert_default(object, "turn_id", serde_json::json!("turn-1"));
+                insert_default(object, "permission_mode", serde_json::json!("default"));
+                insert_default(object, "tool_use_id", serde_json::json!("tool-1"));
+                insert_default(object, "tool_response", serde_json::Value::Null);
+            }
+            "PreCompact" | "PostCompact" => {
+                insert_default(object, "turn_id", serde_json::json!("turn-1"));
+            }
+            "UserPromptSubmit" | "SubagentStart" | "SubagentStop" | "Stop" => {
+                insert_default(object, "turn_id", serde_json::json!("turn-1"));
+                insert_default(object, "permission_mode", serde_json::json!("default"));
+            }
+            _ => {}
+        }
+
+        serde_json::to_string(&value).unwrap()
+    }
 
     #[test]
     fn test_claude_input_parsing() {
@@ -2584,7 +2750,7 @@ mod tests {
     fn test_codex_input_parsing_stop() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"session_id":"019d193e-b16a-70e2-bd83-dc692a870e9a","transcript_path":"/tmp/rollout.jsonl","cwd":"/home/user/claw-hooks","hook_event_name":"Stop","model":"gpt-5.4","permission_mode":"bypassPermissions","stop_hook_active":false,"last_assistant_message":"OK"}"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
 
         assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
@@ -2612,7 +2778,7 @@ mod tests {
             "permission_mode": "default"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStart);
         assert_eq!(result.tool_name, "SubagentStart");
         assert_eq!(result.session_id, Some("abc-123".to_string()));
@@ -2637,7 +2803,7 @@ mod tests {
             "last_assistant_message": "Done"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::SubagentStop);
         assert_eq!(result.tool_name, "SubagentStop");
         assert_eq!(result.session_id, Some("abc-123".to_string()));
@@ -2830,7 +2996,7 @@ mod tests {
             "model": "gpt-5.4"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         // SessionStart は処理対象外 → Passthrough（パススルー）にマッピング
         assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionStart");
@@ -2846,7 +3012,7 @@ mod tests {
             "prompt": "fix the bug"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         // UserPromptSubmit は処理対象外 → Passthrough（パススルー）にマッピング
         assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "UserPromptSubmit");
@@ -2866,7 +3032,7 @@ mod tests {
                 }}"#
             );
 
-            let result = adapter.parse_input(&input).unwrap();
+            let result = adapter.parse_input(&complete_codex_input(&input)).unwrap();
             // Codex のコンパクションイベントは claw-hooks の責務外なのでパススルーする。
             assert_eq!(result.event, HookEvent::Passthrough);
             assert_eq!(result.tool_name, event);
@@ -2882,7 +3048,7 @@ mod tests {
         }"#;
 
         // 未知イベントは Stop にフォールバックせず、パススルーになること
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::Passthrough);
     }
 
@@ -2899,7 +3065,7 @@ mod tests {
             "reason": "other"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "SessionEnd");
         assert_eq!(result.session_id, Some("thr_123".to_string()));
@@ -2915,7 +3081,7 @@ mod tests {
             "session_id": "abc-123"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
     }
@@ -2934,7 +3100,7 @@ mod tests {
             "tool_input": {"command": "rm -rf /tmp/build", "description": "cleanup"}
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::PermissionRequest);
         assert_eq!(result.tool_name, "Bash");
         if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
@@ -2954,7 +3120,7 @@ mod tests {
             "tool_response": "file1.txt\nfile2.txt"
         }"#;
 
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Bash");
     }
@@ -2978,7 +3144,7 @@ mod tests {
             "tool_input": {"command": "ls"}
         }"#;
 
-        assert!(adapter.parse_input(input).is_err());
+        assert!(adapter.parse_input(&complete_codex_input(input)).is_err());
     }
 
     #[test]
@@ -2989,7 +3155,7 @@ mod tests {
             "tool_name": "Bash"
         }"#;
 
-        assert!(adapter.parse_input(input).is_err());
+        assert!(adapter.parse_input(&complete_codex_input(input)).is_err());
     }
 
     #[test]
@@ -3001,7 +3167,7 @@ mod tests {
             "tool_input": {}
         }"#;
 
-        assert!(adapter.parse_input(input).is_err());
+        assert!(adapter.parse_input(&complete_codex_input(input)).is_err());
     }
 
     #[test]
@@ -3504,7 +3670,7 @@ mod tests {
             "tool_input": {"command": "echo hello"},
             "session_id": "test-session"
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
         if let crate::domain::ToolInput::Bash(bash) = &result.tool_input {
@@ -3524,7 +3690,7 @@ mod tests {
             "tool_input": {"command": "cat file.txt"},
             "tool_response": "file contents"
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Bash");
     }
@@ -3539,7 +3705,7 @@ mod tests {
                 "command": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n old\n new\n*** Add File: tests/new_test.rs\n+test\n*** End Patch\n"
             }
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "MultiEdit");
         if let crate::domain::ToolInput::Files(files) = &result.tool_input {
@@ -3560,7 +3726,7 @@ mod tests {
                 "command": "*** Begin Patch\n*** Delete File: src/removed.rs\n*** End Patch\n"
             }
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "MultiEdit");
         if let crate::domain::ToolInput::Files(files) = &result.tool_input {
@@ -3583,7 +3749,7 @@ mod tests {
                 "command": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n old\n new\n*** End Patch\n"
             }
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "MultiEdit");
         assert!(matches!(
@@ -3601,7 +3767,9 @@ mod tests {
             "tool_name": "apply_patch",
             "tool_input": { "command": "" }
         }"#;
-        let err = adapter.parse_input(input).unwrap_err();
+        let err = adapter
+            .parse_input(&complete_codex_input(input))
+            .unwrap_err();
         assert!(
             err.to_string().contains("command"),
             "空コマンドは command 関連のエラーになるべき: {}",
@@ -3627,7 +3795,7 @@ mod tests {
             "stop_hook_active": true,
             "last_assistant_message": "Done"
         }"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         assert_eq!(result.tool_name, "Stop");
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
@@ -4062,7 +4230,7 @@ mod tests {
             assert_eq!(
                 result.event,
                 HookEvent::Passthrough,
-                "パススル���イベント {} は Passthrough にマッピングされるべき",
+                "パススルーイベント {} は Passthrough にマッピングされるべき",
                 event_name
             );
             assert_eq!(result.tool_name, event_name);
@@ -4112,7 +4280,9 @@ mod tests {
     fn test_codex_input_missing_tool_name_for_tool_event_is_error() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
+        let err = adapter
+            .parse_input(&complete_codex_input(input))
+            .unwrap_err();
         assert!(err.to_string().contains("tool_name"));
     }
 
@@ -4120,7 +4290,9 @@ mod tests {
     fn test_codex_input_missing_command_in_bash_tool_is_error() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}"#;
-        let err = adapter.parse_input(input).unwrap_err();
+        let err = adapter
+            .parse_input(&complete_codex_input(input))
+            .unwrap_err();
         assert!(err.to_string().contains("command"));
     }
 
@@ -4129,7 +4301,7 @@ mod tests {
         // 未知のイベントはパススルーとして処理される
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"FutureEvent","data":"test"}"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::Passthrough);
         assert_eq!(result.tool_name, "FutureEvent");
     }
@@ -4139,13 +4311,136 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input =
             r#"{"hook_event_name":"Stop","stop_hook_active":true,"last_assistant_message":"done"}"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
             assert!(stop.stop_hook_active);
             assert_eq!(stop.agent_message, Some("done".to_string()));
         } else {
             panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
+    fn test_codex_missing_common_fields_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let complete = complete_codex_input(
+            r#"{
+                "hook_event_name": "Stop",
+                "stop_hook_active": false,
+                "last_assistant_message": null
+            }"#,
+        );
+
+        for field in ["session_id", "transcript_path", "cwd", "model"] {
+            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
+            input.as_object_mut().unwrap().remove(field);
+            let err = adapter.parse_input(&input.to_string()).unwrap_err();
+            assert!(
+                err.to_string().contains(field),
+                "{field} 欠落時のエラーが不適切: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_missing_event_fields_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let cases = [
+            (
+                complete_codex_input(r#"{"hook_event_name":"SessionStart","source":"startup"}"#),
+                "source",
+            ),
+            (
+                complete_codex_input(r#"{"hook_event_name":"SessionEnd","reason":"other"}"#),
+                "reason",
+            ),
+            (
+                complete_codex_input(
+                    r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+                ),
+                "tool_use_id",
+            ),
+            (
+                complete_codex_input(
+                    r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+                ),
+                "tool_response",
+            ),
+            (
+                complete_codex_input(r#"{"hook_event_name":"UserPromptSubmit","prompt":"確認"}"#),
+                "prompt",
+            ),
+            (
+                complete_codex_input(r#"{"hook_event_name":"PreCompact","trigger":"manual"}"#),
+                "trigger",
+            ),
+            (
+                complete_codex_input(
+                    r#"{"hook_event_name":"SubagentStart","agent_id":"agent-1","agent_type":"Explore"}"#,
+                ),
+                "agent_id",
+            ),
+            (
+                complete_codex_input(
+                    r#"{
+                        "hook_event_name":"SubagentStop",
+                        "agent_id":"agent-1",
+                        "agent_type":"Explore",
+                        "agent_transcript_path":null,
+                        "stop_hook_active":false,
+                        "last_assistant_message":null
+                    }"#,
+                ),
+                "agent_transcript_path",
+            ),
+            (
+                complete_codex_input(
+                    r#"{
+                        "hook_event_name":"Stop",
+                        "stop_hook_active":false,
+                        "last_assistant_message":null
+                    }"#,
+                ),
+                "stop_hook_active",
+            ),
+        ];
+
+        for (complete, field) in cases {
+            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
+            input.as_object_mut().unwrap().remove(field);
+            let err = adapter.parse_input(&input.to_string()).unwrap_err();
+            assert!(
+                err.to_string().contains(field),
+                "{field} 欠落時のエラーが不適切: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_invalid_required_field_types_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let cases = [
+            ("transcript_path", serde_json::json!(42)),
+            ("stop_hook_active", serde_json::json!("false")),
+            ("turn_id", serde_json::json!(false)),
+        ];
+
+        for (field, invalid_value) in cases {
+            let complete = complete_codex_input(
+                r#"{
+                    "hook_event_name":"Stop",
+                    "stop_hook_active":false,
+                    "last_assistant_message":null
+                }"#,
+            );
+            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
+            input[field] = invalid_value;
+            let err = adapter.parse_input(&input.to_string()).unwrap_err();
+            assert!(
+                err.to_string().contains(field),
+                "{field} 型不一致時のエラーが不適切: {err}"
+            );
         }
     }
 
@@ -4271,7 +4566,7 @@ mod tests {
         // Codex の Write ツールが FileOperationInput に正しくデシリアライズされる
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/test.rs","content":"fn main() {}"}}"#;
-        let result = adapter.parse_input(input).unwrap();
+        let result = adapter.parse_input(&complete_codex_input(input)).unwrap();
         assert_eq!(result.event, HookEvent::AfterFileEdit);
         assert_eq!(result.tool_name, "Write");
         if let crate::domain::ToolInput::File(file) = &result.tool_input {
@@ -4288,7 +4583,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{}}"#;
         assert!(
-            adapter.parse_input(input).is_err(),
+            adapter.parse_input(&complete_codex_input(input)).is_err(),
             "空の tool_input は FileOperationInput へのデシリアライズに失敗すべき"
         );
     }

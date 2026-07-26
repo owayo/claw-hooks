@@ -836,6 +836,8 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 
 `hook_event_name` + `tool_name` + `tool_input` の標準スキーマ。`apply_patch` の `tool_input.command` から `*** Add/Update/Move to File:` ヘッダを抽出して拡張子フックを駆動します（削除のみの patch はスキップ）。
 
+すべての Codex イベントは、内部イベントへ変換する前に公式仕様の必須メタデータを検証します。`session_id` / `cwd` / `model` は空でない文字列、`transcript_path` は文字列または `null` として存在する必要があります。`turn_id`、`permission_mode`、ツール識別子・ペイロード、Stop 状態などのイベント固有フィールドも型まで検証します。欠落・型不正はイベント固有の deny/block 応答でフェイルクローズドにし、既知のスコープ外イベントも検証成功後にだけパススルーします。
+
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
 | `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | パススルー allow |

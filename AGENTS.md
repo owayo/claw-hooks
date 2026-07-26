@@ -164,7 +164,7 @@ cargo run -- version     # Show version
 - PreToolUse Block output: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式。legacy の `{"decision":"block"}` も受理されるが使用しない）
 - PostToolUse / Stop Block output: `{"decision":"block","reason":"..."}`（これらのイベントではこれが正式形式。Stop では reason が継続プロンプトになる）
 - PermissionRequest Block output: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"..."}}}`
-- Missing required Codex fields must be treated as fail-closed parse errors
+- Codex の全イベントで共通必須フィールド（非空文字列の `session_id` / `cwd` / `model`、文字列または `null` の `transcript_path`）を検証し、イベント固有の `turn_id` / `permission_mode` / ツール情報 / Stop 状態等も型まで検証する。欠落・型不正はフェイルクローズドのパースエラーとして扱う
 - PermissionRequest の parse error も PermissionRequest 専用 deny schema で返す
 - PreToolUse の parse error も PreToolUse 推奨形式（`hookSpecificOutput.permissionDecision="deny"`）で返す。イベント名が判別できない入力は legacy block 形式（全イベント共通で受理される）にフォールバック
 - PostToolUse の追加コンテキストは `hookSpecificOutput.additionalContext` で返す

@@ -350,6 +350,33 @@ fn test_init_command_creates_config() {
 }
 
 #[test]
+fn test_init_command_does_not_load_invalid_config() {
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let invalid_config = temp_dir.path().join("invalid.toml");
+    let generated_config = temp_dir.path().join("generated.toml");
+    std::fs::write(&invalid_config, "invalid = [").expect("Failed to create invalid config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&invalid_config)
+        .arg("init")
+        .arg("--path")
+        .arg(&generated_config)
+        .output()
+        .expect("Failed to run init command");
+
+    assert!(
+        output.status.success(),
+        "init should work even when the existing config is invalid: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        generated_config.exists(),
+        "init should create the requested config"
+    );
+}
+
+#[test]
 fn test_help_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
         .arg("--help")
@@ -379,6 +406,27 @@ fn test_version_command() {
         stdout.contains("claw-hooks"),
         "Version should mention program name"
     );
+}
+
+#[test]
+fn test_version_subcommand_does_not_load_invalid_config() {
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let invalid_config = temp_dir.path().join("invalid.toml");
+    std::fs::write(&invalid_config, "invalid = [").expect("Failed to create invalid config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&invalid_config)
+        .arg("version")
+        .output()
+        .expect("Failed to run version subcommand");
+
+    assert!(
+        output.status.success(),
+        "version should work even when the config is invalid: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("claw-hooks"));
 }
 
 #[test]

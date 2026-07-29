@@ -42,7 +42,7 @@
 - 📏 **出力長制限** - エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
 - 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持
 - 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッションとバイト数サマリーのみ。生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
-- 🛑 **入力サイズ上限** - stdin は 4 MiB 上限。巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで止める（空 stdout 異常終了は Antigravity/Codex に「判定スキップ＝フェイルオープン」と誤解されるため、その挙動を回避）
+- 🛑 **入出力サイズ上限** - stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLIに対応
 
@@ -653,7 +653,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、コマンドは fire-and-forget 方式で起動され、Hook応答をブロックしません。デタッチコマンドは stdin/stdout/stderr が null になるため、spawn 失敗はログに残りますが、コマンド出力と終了ステータスは収集されません。Windsurf の Stop フックだけは基盤側が非同期のため、常にベストエフォートです。
 
-**セッションスコープ（エージェントセッションの抑止）:** Claude Code のチーム機能は委譲エージェント（teammate）を別プロセスとして起動し、それぞれが自分の `Stop` イベントを発火します — 1 タスクで数十回になることもあります。claw-hooks はこの 2 つを自動で判別します: 委譲エージェントの Stop ペイロードには `agent_type` フィールドが含まれ、メインセッションの Stop には含まれません。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。従来どおり常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity）は常にメインセッションとして扱われます。
+**セッションスコープ（エージェントセッションの抑止）:** Claude Code のチーム機能は委譲エージェント（teammate）を別プロセスとして起動し、それぞれが自分の `Stop` イベントを発火します — 1 タスクで数十回になることもあります。claw-hooks はこの 2 つを自動で判別します: 委譲エージェントの Stop ペイロードには空白でない `agent_id` と `agent_type` の両方が含まれます。`--agent` で起動したメインセッションにも `agent_type` は入り得ますが、サブエージェント固有の `agent_id` は無いためメイン扱いを維持します。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。従来どおり常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。判別フィールドが欠落・空白・非文字列の場合と、セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity）はメインセッションとして扱われます。
 
 ```toml
 # メインセッションの停止時のみ実行（デフォルト — フィールド指定不要）
@@ -808,7 +808,6 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 
 ```jsonc
 {
-  "hook_event_name": "PreToolUse",
   "toolCall": {
     "name": "run_command",
     "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace" }
@@ -821,16 +820,16 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 }
 ```
 
-`PreToolUse` では `stepIdx` が必須です。`Stop` は `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` を必須フィールドとして持ちます。欠落や型不正は、イベント固有の deny/continue 応答でフェイルクローズドにします。
+Antigravity の公式ペイロードにはイベント名フィールドがありません。claw-hooks は公式のイベント固有フィールドから判別します: `toolCall` は PreToolUse、Stop 固有フィールドは Stop、`toolCall` のない `stepIdx` + `error` は PostToolUse、invocation 固有フィールドは Pre/PostInvocation です。後方互換のため、空白でない `hook_event_name` / `event` も引き続き受理します。`PreToolUse` では `stepIdx`、`Stop` では `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` が必須です。必須フィールドの欠落・空白・型不正は、判別したイベント固有の deny/continue 応答でフェイルクローズドになります。
 
-| hook_event_name | toolCall.name | 内部マッピング |
+| 判別に使うイベント形状 | toolCall.name | 内部マッピング |
 |---|---|---|
-| `PreToolUse` | `run_command` | BeforeCommand（`toolCall.args.CommandLine` → Bash） |
-| `PreToolUse` | その他（`write_to_file`、`replace_file_content`、…） | パススルー allow |
-| `PostToolUse` / `PreInvocation` / `PostInvocation` | n/a | パススルー allow（claw-hooks のスコープ外） |
-| `Stop` | n/a | Stop |
+| `toolCall` + `stepIdx`（PreToolUse） | `run_command` | BeforeCommand（`toolCall.args.CommandLine` → Bash） |
+| `toolCall` + `stepIdx`（PreToolUse） | その他（`write_to_file`、`replace_file_content`、…） | パススルー allow |
+| `stepIdx` + `error`、または invocation 固有フィールド | n/a | PostToolUse / invocation のパススルー allow（claw-hooks のスコープ外） |
+| `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
 
-> **拡張子フック**: Antigravity の `PostToolUse` は発火しますが、ペイロードは `stepIdx` と `error` のみ（`toolCall` 無し）で、公式仕様の出力は `{}` 固定のため、ファイル単位の post-edit フックを再構築できません。`--format agy` では `PostToolUse` をパススルー扱いとし、プロジェクト全体の lint/typecheck は Stop hooks で回して `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。未対応イベントはすべて allow でパススルーされます。
+> **拡張子フック**: Antigravity の `PostToolUse` は発火しますが、ペイロードは `stepIdx` と `error` のみ（`toolCall` 無し）で、公式仕様の出力は `{}` 固定のため、ファイル単位の post-edit フックを再構築できません。`--format agy` では `PostToolUse` をパススルー扱いとし、プロジェクト全体の lint/typecheck は Stop hooks で回して `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。明示名を持つ未対応イベントは allow でパススルーし、イベントを判別できない名前なしペイロードは安全な応答形式を選べないためフェイルクローズドになります。
 
 ### Codex CLI (`--format codex`)
 

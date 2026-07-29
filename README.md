@@ -42,7 +42,7 @@
 - 📏 **Output Truncation** - Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
 - 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved
 - 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata and byte-size summaries. Raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
-- 🛑 **Bounded Input** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process — an empty-stdout death would otherwise look like "skipped decision = fail-open" to Antigravity/Codex
+- 🛑 **Bounded I/O** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Antigravity CLI, and Codex CLI
 
@@ -653,7 +653,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf stop hooks, failures are always best-effort because the underlying hook is asynchronous.
 
-**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries an `agent_type` field, while the main session's Stop does not. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity) are always treated as the main session.
+**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries both non-blank `agent_id` and `agent_type` fields. A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity) are also treated as the main session.
 
 ```toml
 # Runs only when the main session stops (default — no field needed)
@@ -808,7 +808,6 @@ camelCase schema. A representative PreToolUse payload:
 
 ```jsonc
 {
-  "hook_event_name": "PreToolUse",
   "toolCall": {
     "name": "run_command",
     "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace" }
@@ -821,16 +820,16 @@ camelCase schema. A representative PreToolUse payload:
 }
 ```
 
-`PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`. Missing or incorrectly typed required fields fail closed using the event's native deny/continue response.
+Official Antigravity payloads do not include an event-name field. claw-hooks infers the event from its official event-specific fields: `toolCall` identifies PreToolUse, the Stop fields identify Stop, `stepIdx` plus `error` without `toolCall` identifies PostToolUse, and invocation fields identify Pre/PostInvocation. Legacy non-blank `hook_event_name` / `event` fields remain accepted for compatibility. `PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native deny/continue response.
 
-| hook_event_name | toolCall.name | Internal Mapping |
+| Inferred event shape | toolCall.name | Internal Mapping |
 |---|---|---|
-| `PreToolUse` | `run_command` | BeforeCommand (`toolCall.args.CommandLine` → Bash) |
-| `PreToolUse` | other (`write_to_file`, `replace_file_content`, …) | pass-through allow |
-| `PostToolUse` / `PreInvocation` / `PostInvocation` | n/a | pass-through allow (out of claw-hooks scope) |
-| `Stop` | n/a | Stop |
+| `toolCall` + `stepIdx` (PreToolUse) | `run_command` | BeforeCommand (`toolCall.args.CommandLine` → Bash) |
+| `toolCall` + `stepIdx` (PreToolUse) | other (`write_to_file`, `replace_file_content`, …) | pass-through allow |
+| `stepIdx` + `error`, or invocation fields | n/a | PostToolUse / invocation pass-through allow (out of claw-hooks scope) |
+| `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
 
-> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload only has `stepIdx` and `error` (no `toolCall`), and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Future Antigravity events pass through as allow.
+> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload only has `stepIdx` and `error` (no `toolCall`), and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
 
 ### Codex CLI (`--format codex`)
 

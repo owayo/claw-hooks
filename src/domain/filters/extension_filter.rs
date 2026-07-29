@@ -293,6 +293,14 @@ impl ExtensionHookFilter {
                 Ok(result) => {
                     if !result.success {
                         all_success = false;
+                        // 終了コードだけで失敗したコマンドも、エージェントが認識できるようにする。
+                        if result.output.is_empty() {
+                            outputs.push(format!(
+                                "[{}] command failed without output",
+                                result.display_label
+                            ));
+                            continue;
+                        }
                     }
                     // 成功時の no-op 完了メッセージ（`1 file already formatted` /
                     // `All checks passed!` 等）は編集のたびに毎回出る定型通知で、
@@ -863,6 +871,35 @@ mod tests {
                 );
             }
             _ => panic!("Expected Allow decision"),
+        }
+    }
+
+    #[test]
+    fn test_extension_hook_failure_without_output_returns_context() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'exit 1 #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: Some(context),
+            } => {
+                assert_eq!(context, "[sh] command failed without output");
+            }
+            other => panic!("無出力の失敗にもコンテキストが付くべき: {other:?}"),
         }
     }
 

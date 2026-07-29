@@ -164,9 +164,9 @@ pub struct SubagentInput {
 /// Stop イベントを発火したセッションの種別。
 ///
 /// Claude Code のチーム開発機能では teammate（別プロセスの claude インスタンス）が
-/// それぞれ自分の Stop フックを発火する。teammate の Stop ペイロードには
-/// `agent_type` フィールド（例: "general-purpose"）が含まれ、メインセッションの
-/// Stop には含まれないことで判別できる。
+/// それぞれ自分の Stop フックを発火する。teammate の Stop ペイロードに含まれる
+/// `agent_id` と `agent_type` の組で判別する。`--agent` で起動したメインセッションも
+/// `agent_type` を持ち得るが、サブエージェント固有の `agent_id` は持たない。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StopSessionKind {
     /// ユーザーと対話しているメインセッション。

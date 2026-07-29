@@ -1,6 +1,6 @@
 //! タイムアウト対応のコマンド実行ユーティリティ。
 
-use std::io::Read as _;
+use std::io::Read;
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,15 @@ const TIMEOUT_STDERR_PREFIX: &str = "[Command timed out after";
 /// 続けるケースでは EOF が来ないため、この猶予で打ち切ってプロセスグループを
 /// kill する（孫プロセスによる timeout 回避の防止を維持する）。
 const OUTPUT_DRAIN_GRACE_SECS: u64 = 5;
+
+/// stdout/stderr ごとにメモリへ保持する最大バイト数。
+///
+/// 子プロセスのパイプ自体は最後まで読み続けてデッドロックを防ぐが、保持量を制限して
+/// 大量出力する formatter/linter が claw-hooks を OOM 終了させるのを防ぐ。
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+/// 出力が保持上限を超えた場合に末尾へ付けるマーカー。
+const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[output truncated by claw-hooks]\n";
 
 /// Unix で子プロセスを新しいプロセスグループに配置する。
 /// `Command::process_group(0)` 相当の挙動を `pre_exec` 経由で安定 API のみで実現する。
@@ -112,6 +121,32 @@ fn join_reader_before_deadline(
     ReaderJoin::Finished(handle.join().unwrap_or_default())
 }
 
+/// リーダーを EOF まで排出しつつ、メモリへ保持する出力を上限内に収める。
+fn read_output_bounded(mut reader: impl Read) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(output.len());
+        let retained = read.min(remaining);
+        output.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+
+    if truncated {
+        let content_limit = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
+        output.truncate(content_limit);
+        output.extend_from_slice(OUTPUT_TRUNCATED_MARKER);
+    }
+
+    output
+}
+
 fn timeout_output(timeout_secs: u64, command_desc: &str) -> Output {
     let msg = format!(
         "{} {}s: {}]\n",
@@ -152,20 +187,20 @@ pub fn run_with_timeout_tracked(
 
     // スレッドでstdoutを読み取る（パイプバッファのデッドロックを防止）
     let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut stdout) = stdout_handle {
-            stdout.read_to_end(&mut buf).ok();
+        if let Some(stdout) = stdout_handle {
+            read_output_bounded(stdout)
+        } else {
+            Vec::new()
         }
-        buf
     });
 
     // スレッドでstderrを読み取る
     let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut stderr) = stderr_handle {
-            stderr.read_to_end(&mut buf).ok();
+        if let Some(stderr) = stderr_handle {
+            read_output_bounded(stderr)
+        } else {
+            Vec::new()
         }
-        buf
     });
 
     // try_waitポーリングでタイムアウト付きの子プロセス待機
@@ -367,6 +402,7 @@ pub fn configure_process_group(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     /// テストヘルパー：追加の環境変数なしでspawnする。
     fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child, String> {
@@ -382,6 +418,21 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         path.exists()
+    }
+
+    #[test]
+    fn test_read_output_bounded_preserves_small_output() {
+        let input = b"small output".to_vec();
+        assert_eq!(read_output_bounded(Cursor::new(&input)), input);
+    }
+
+    #[test]
+    fn test_read_output_bounded_truncates_large_output() {
+        let input = vec![b'x'; MAX_CAPTURED_OUTPUT_BYTES + 1];
+        let output = read_output_bounded(Cursor::new(input));
+
+        assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_BYTES);
+        assert!(output.ends_with(OUTPUT_TRUNCATED_MARKER));
     }
 
     // === spawn_piped テスト ===

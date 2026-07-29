@@ -1,6 +1,6 @@
 //! claw-hooks: AIコーディングエージェント用フックシステム
 //!
-//! AIコーディングエージェント (Claude Code, Cursor, Windsurf) と連携し、
+//! AIコーディングエージェント (Claude Code, Cursor, Windsurf, Antigravity, Codex) と連携し、
 //! 危険なコマンドのフィルタリング、安全な代替手段の提案、拡張子ベースのフック実行を行うCLIツール。
 
 mod cli;
@@ -19,6 +19,29 @@ use service::HookService;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // 設定を使用しないコマンドは先に処理する。設定ファイルが壊れていても
+    // `init` で再生成でき、`version` で実行ファイルの情報を確認できるようにする。
+    match &cli.command {
+        Commands::Init { path } => {
+            let config_path = if let Some(path) = path {
+                ConfigService::generate_at(path)?;
+                path.clone()
+            } else {
+                ConfigService::generate_default()?;
+                ConfigService::default_path()
+            };
+            if !cli.quiet {
+                eprintln!("Configuration file created at: {}", config_path.display());
+            }
+            return Ok(());
+        }
+        Commands::Version => {
+            println!("claw-hooks {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Commands::Hook { .. } | Commands::Check => {}
+    }
+
     // 設定ファイルの読み込み
     let config = ConfigService::load(cli.config.as_deref())?;
 
@@ -35,19 +58,6 @@ fn main() -> Result<()> {
             let service = HookService::new(config, format, trace);
             service.run()?
         }
-        Commands::Init { path } => {
-            let config_path = if let Some(p) = path {
-                ConfigService::generate_at(&p)?;
-                p
-            } else {
-                ConfigService::generate_default()?;
-                ConfigService::default_path()
-            };
-            if !cli.quiet {
-                eprintln!("Configuration file created at: {}", config_path.display());
-            }
-            0
-        }
         Commands::Check => {
             config::validate(&config)?;
             if !cli.quiet {
@@ -63,10 +73,7 @@ fn main() -> Result<()> {
             }
             0
         }
-        Commands::Version => {
-            println!("claw-hooks {}", env!("CARGO_PKG_VERSION"));
-            0
-        }
+        Commands::Init { .. } | Commands::Version => 0,
     };
 
     // process::exit はデストラクタを実行しないため、ローテーション worker を先に完了させる。

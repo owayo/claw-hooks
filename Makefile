@@ -33,8 +33,8 @@ check: ## clippy と cargo check を実行
 	cargo check
 
 msrv: ## MSRV(Rust 1.85)でビルド確認
-	cargo +1.85.0 check --locked --all-features
-	cargo +1.85.0 check --locked --no-default-features
+	rustup run 1.85.0 cargo check --locked --all-features
+	rustup run 1.85.0 cargo check --locked --no-default-features
 
 clean: ## ビルド成果物を削除
 	cargo clean

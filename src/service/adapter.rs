@@ -193,7 +193,10 @@ impl FormatAdapter {
         }
 
         if self.format == Format::Agy
-            && matches!(Self::raw_hook_event_name(input).as_deref(), Some("Stop"))
+            && matches!(
+                Self::agy_hook_event_name_from_input(input).as_deref(),
+                Some("Stop")
+            )
         {
             // Antigravity の Stop は deny ではなく continue だけが停止を阻止する。
             let error_message = format!("🚫 Hook error (fail-closed): {}", message);
@@ -243,10 +246,57 @@ impl FormatAdapter {
     fn raw_hook_event_name(input: &str) -> Option<String> {
         let raw: serde_json::Value = serde_json::from_str(input).ok()?;
         raw.get("hook_event_name")
-            .or_else(|| raw.get("event"))
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                raw.get("event")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            })
             .map(String::from)
+    }
+
+    /// Antigravity のイベント名を明示フィールドまたは公式のイベント固有フィールドから得る。
+    ///
+    /// 公式ペイロードには `hook_event_name` が含まれないため、PreToolUse と Stop は
+    /// 必須フィールドの形から判別する。従来の明示フィールドも後方互換で優先する。
+    fn agy_hook_event_name(raw: &serde_json::Value) -> Option<String> {
+        if let Some(explicit) = raw
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                raw.get("event")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            })
+        {
+            return Some(explicit.to_string());
+        }
+
+        if raw.get("toolCall").is_some() {
+            return Some("PreToolUse".to_string());
+        }
+        if raw.get("executionNum").is_some()
+            || raw.get("terminationReason").is_some()
+            || raw.get("fullyIdle").is_some()
+        {
+            return Some("Stop".to_string());
+        }
+        if raw.get("stepIdx").is_some() && raw.get("error").is_some() {
+            return Some("PostToolUse".to_string());
+        }
+        if raw.get("invocationNum").is_some() || raw.get("initialNumSteps").is_some() {
+            return Some("Invocation".to_string());
+        }
+
+        None
+    }
+
+    /// 生 JSON から Antigravity のイベント名を取得する。
+    fn agy_hook_event_name_from_input(input: &str) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
+        Self::agy_hook_event_name(&raw)
     }
 
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
@@ -274,7 +324,7 @@ impl FormatAdapter {
                 let command = raw_tool_input
                     .get("command")
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
                 Ok(crate::domain::ToolInput::Bash(crate::domain::BashInput {
                     command: command.to_string(),
@@ -286,7 +336,7 @@ impl FormatAdapter {
                     raw_tool_input.clone(),
                 )
                 .map_err(|e| anyhow!("Failed to parse {} tool_input: {}", agent, e))?;
-                if file.file_path.is_empty() {
+                if file.file_path.trim().is_empty() {
                     return Err(anyhow!("Missing tool_input.file_path field"));
                 }
                 Ok(crate::domain::ToolInput::File(file))
@@ -306,6 +356,9 @@ impl FormatAdapter {
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
 
         let raw_event = claude_input.hook_event_name.clone();
+        if raw_event.trim().is_empty() {
+            return Err(anyhow!("Missing hook_event_name field"));
+        }
 
         // Claude Codeのイベント名をHookEventにマッピング。
         // 未対応イベント（StopFailure, PreCompact, PermissionRequest 等）は claw-hooks の
@@ -349,17 +402,20 @@ impl FormatAdapter {
     /// Claude の Stop イベントを内部 Stop HookInput に変換する（tool_name/tool_input は持たない）。
     fn parse_claude_stop(&self, claude_input: ClaudeInput) -> HookInput {
         let tool_name = "Stop".to_string();
-        // teammate（別プロセスのエージェントセッション）の Stop には agent_type が入り、
-        // メインセッションの Stop には入らない（Claude Code 2.1 系で実機確認済み）。
-        // 欠落・空・空白のみは Primary 扱い（誤判定時の危険度が非対称: Delegated を
-        // Primary と誤認しても余計なフックが走るだけだが、逆は最終 lint / コミットが
-        // 走らなくなるため、非空文字列が存在するときだけ Delegated と判定する）。
-        let session_kind = if claude_input
+        // `--agent` で起動したメインセッションにも agent_type は入るため、
+        // サブエージェント固有の agent_id と agent_type が両方ある場合だけ委譲扱いにする。
+        // 欠落・空・型不一致は最終 lint / コミットを落とさないよう Primary に倒す。
+        let has_agent_id = claude_input
+            .agent_id
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_agent_type = claude_input
             .agent_type
             .as_ref()
             .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.trim().is_empty())
-        {
+            .is_some_and(|s| !s.trim().is_empty());
+        let session_kind = if has_agent_id && has_agent_type {
             crate::domain::StopSessionKind::Delegated
         } else {
             crate::domain::StopSessionKind::Primary
@@ -451,6 +507,7 @@ impl FormatAdapter {
     fn parse_claude_tool(&self, event: HookEvent, claude_input: ClaudeInput) -> Result<HookInput> {
         let tool_name = claude_input
             .tool_name
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing tool_name field"))?;
         let raw_tool_input = claude_input
             .tool_input
@@ -512,7 +569,8 @@ impl FormatAdapter {
         let event_name = raw
             .get("hook_event_name")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
             .to_string();
 
         match event_name.as_str() {
@@ -548,6 +606,9 @@ impl FormatAdapter {
     fn parse_cursor_before_shell(&self, raw: serde_json::Value) -> Result<HookInput> {
         let parsed: CursorShellInput = serde_json::from_value(raw)
             .map_err(|e| anyhow!("Failed to parse Cursor beforeShellExecution: {}", e))?;
+        if parsed.command.trim().is_empty() {
+            return Err(anyhow!("Missing command for Cursor beforeShellExecution"));
+        }
 
         debug!(
             agent = self.format.label(),
@@ -575,7 +636,7 @@ impl FormatAdapter {
         let tool_name = raw
             .get("tool_name")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing tool_name for Cursor preToolUse"))?
             .to_string();
 
@@ -632,6 +693,9 @@ impl FormatAdapter {
     ) -> Result<HookInput> {
         let parsed: CursorFileEditInput = serde_json::from_value(raw)
             .map_err(|e| anyhow!("Failed to parse Cursor afterFileEdit: {}", e))?;
+        if parsed.file_path.trim().is_empty() {
+            return Err(anyhow!("Missing file_path for Cursor afterFileEdit"));
+        }
 
         debug!(
             agent = self.format.label(),
@@ -779,6 +843,9 @@ impl FormatAdapter {
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
         let windsurf_input: WindsurfInput = serde_json::from_value(raw.clone())
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
+        if windsurf_input.agent_action_name.trim().is_empty() {
+            return Err(anyhow!("Missing agent_action_name field"));
+        }
 
         // Windsurf の agent_action_name を内部イベント型にマッピング
         let (event, tool_name, tool_input) = match windsurf_input.agent_action_name.as_str() {
@@ -936,12 +1003,16 @@ struct ClaudeInput {
     last_assistant_message: Option<String>,
 
     /// エージェント種別（例: "general-purpose"）。
-    /// teammate（別プロセスのエージェントセッション）の Stop / SubagentStop にのみ含まれ、
-    /// メインセッションの Stop には含まれない。Stop のセッション種別判定に使う。
+    /// `--agent` のメインセッションにも含まれるため、agent_id と組み合わせて
+    /// Stop のセッション種別判定に使う。
     /// 補助フィールドのため型不一致でパース全体を落とさないよう Value で受け、
     /// 文字列以外は「判別不能 = メインセッション扱い」に倒す。
     #[serde(default)]
     agent_type: Option<serde_json::Value>,
+
+    /// サブエージェント固有の識別子。メインセッションの `--agent` には付かない。
+    #[serde(default)]
+    agent_id: Option<serde_json::Value>,
 }
 
 /// Claude Code の Stop イベント出力フォーマット。
@@ -1085,9 +1156,13 @@ impl FormatAdapter {
         // イベント名は必須。互換性のため "event" エイリアスも受け付ける。
         let raw_event = raw
             .get("hook_event_name")
-            .or_else(|| raw.get("event"))
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                raw.get("event")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            })
             .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
             .to_string();
 
@@ -1229,7 +1304,7 @@ impl FormatAdapter {
     fn require_codex_string<'a>(raw: &'a serde_json::Value, field: &str) -> Result<&'a str> {
         Self::require_codex_field(raw, field)?
             .as_str()
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing or invalid {} field", field))
     }
 
@@ -1327,7 +1402,7 @@ impl FormatAdapter {
         let raw_tool_name = raw
             .get("tool_name")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing tool_name field"))?
             .to_string();
 
@@ -1348,7 +1423,7 @@ impl FormatAdapter {
             let command = raw_tool_input
                 .get("command")
                 .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
             crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
         } else {
@@ -1538,14 +1613,10 @@ impl FormatAdapter {
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Antigravity input: {}", e))?;
 
-        // hook_event_name が正規フィールド。event エイリアスも受ける。
-        let raw_event = raw
-            .get("hook_event_name")
-            .or_else(|| raw.get("event"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
-            .to_string();
+        // 公式ペイロードにイベント名は含まれないため、イベント固有フィールドから判定する。
+        // 旧版との互換性のため hook_event_name / event があればそちらを優先する。
+        let raw_event = Self::agy_hook_event_name(&raw)
+            .ok_or_else(|| anyhow!("Unable to infer Antigravity hook event"))?;
 
         // Antigravity は conversationId を会話 ID として渡す。
         // session_id エイリアスでも受ける（ローカルテストや他エージェントからの転送向け）。
@@ -1562,7 +1633,7 @@ impl FormatAdapter {
             // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
             // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
             // いずれもパススルーで Allow を返す。
-            "PostToolUse" | "PreInvocation" | "PostInvocation" => {
+            "PostToolUse" | "PreInvocation" | "PostInvocation" | "Invocation" => {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = %raw_event,
@@ -1609,7 +1680,7 @@ impl FormatAdapter {
         let raw_tool_name = tool_call
             .get("name")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing toolCall.name field"))?
             .to_string();
         let raw_args = tool_call
@@ -1622,7 +1693,7 @@ impl FormatAdapter {
                 let command = raw_args
                     .get("CommandLine")
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| anyhow!("Missing toolCall.args.CommandLine field"))?;
 
                 debug!(
@@ -2177,11 +2248,10 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_input_parsing_stop_with_agent_type_is_delegated() {
-        // teammate（別プロセスのエージェントセッション）の Stop には agent_type が入る
-        // （Claude Code 2.1 系の実ペイロードで確認済みの形式）
+    fn test_claude_input_parsing_stop_with_agent_id_and_type_is_delegated() {
+        // サブエージェントの Stop には agent_id と agent_type の両方が入る。
         let adapter = FormatAdapter::new(Format::Claude, 0);
-        let input = r#"{"session_id":"62beaa88-5cdf-445c-b114-172ef29c3af0","hook_event_name":"Stop","stop_hook_active":false,"agent_type":"general-purpose","last_assistant_message":"done"}"#;
+        let input = r#"{"session_id":"62beaa88-5cdf-445c-b114-172ef29c3af0","hook_event_name":"Stop","stop_hook_active":false,"agent_id":"agent-123","agent_type":"general-purpose","last_assistant_message":"done"}"#;
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::Stop);
         if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
@@ -2192,8 +2262,21 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_input_parsing_main_agent_type_without_agent_id_is_primary() {
+        // `--agent` で起動したメインセッションは agent_type のみを持つ。
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"session_id":"1391e2cc-95c3-4a73-ad1a-51fd588e20be","hook_event_name":"Stop","stop_hook_active":false,"agent_type":"security-reviewer","last_assistant_message":"done"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
+            assert_eq!(stop.session_kind, crate::domain::StopSessionKind::Primary);
+        } else {
+            panic!("Expected Stop tool input");
+        }
+    }
+
+    #[test]
     fn test_claude_input_parsing_stop_without_agent_type_is_primary() {
-        // メインセッションの Stop には agent_type が入らない
+        // 通常のメインセッションの Stop には agent_type が入らない。
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"session_id":"1391e2cc-95c3-4a73-ad1a-51fd588e20be","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"done"}"#;
         let result = adapter.parse_input(input).unwrap();
@@ -3248,6 +3331,14 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_parse_blank_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input =
+            r#"{"hook_event_name":"   ","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#;
+        assert!(adapter.parse_input(input).is_err());
+    }
+
+    #[test]
     fn test_claude_parse_invalid_json_is_error() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
         assert!(adapter.parse_input("{").is_err());
@@ -3255,12 +3346,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_parse_empty_object_is_passthrough() {
+    fn test_cursor_parse_empty_object_is_error() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        // hook_event_name がない空オブジェクトは未対応イベントとしてパススルー
-        let input = r#"{}"#;
-        let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::Passthrough);
+        assert!(adapter.parse_input(r#"{}"#).is_err());
+    }
+
+    #[test]
+    fn test_cursor_parse_blank_event_is_error() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let input = r#"{"hook_event_name":"   ","command":"rm -rf /"}"#;
+        assert!(adapter.parse_input(input).is_err());
     }
 
     #[test]
@@ -4159,6 +4254,14 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_input_blank_tool_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"   ","tool_input":{"command":"rm -rf /"}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("tool_name"));
+    }
+
+    #[test]
     fn test_claude_input_missing_tool_input_is_error() {
         // PreToolUse で tool_input が無い場合はエラー
         let adapter = FormatAdapter::new(Format::Claude, 0);
@@ -4258,6 +4361,23 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_before_shell_blank_command_is_error() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let input = r#"{"hook_event_name":"beforeShellExecution","command":"   "}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn test_windsurf_input_blank_action_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let input =
+            r#"{"agent_action_name":"   ","tool_info":{"command_line":"rm -rf /tmp/test"}}"#;
+        let err = adapter.parse_input(input).unwrap_err();
+        assert!(err.to_string().contains("agent_action_name"));
+    }
+
+    #[test]
     fn test_windsurf_input_post_cascade_response_without_response() {
         // response フィールドがなくても Stop として処理できること
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
@@ -4274,6 +4394,32 @@ mod tests {
         let input = r#"{"hook_event_name":""}"#;
         let err = adapter.parse_input(input).unwrap_err();
         assert!(err.to_string().contains("hook_event_name"));
+    }
+
+    #[test]
+    fn test_codex_input_blank_event_name_is_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = complete_codex_input(r#"{"hook_event_name":"   "}"#);
+        let err = adapter.parse_input(&input).unwrap_err();
+        assert!(err.to_string().contains("hook_event_name"));
+    }
+
+    #[test]
+    fn test_codex_event_alias_used_when_primary_field_is_invalid() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = complete_codex_input(
+            r#"{
+                "hook_event_name":42,
+                "event":"PreToolUse",
+                "turn_id":"turn-1",
+                "permission_mode":"default",
+                "tool_use_id":"tool-1",
+                "tool_name":"Bash",
+                "tool_input":{"command":"ls"}
+            }"#,
+        );
+        let result = adapter.parse_input(&input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
     }
 
     #[test]
@@ -4620,7 +4766,6 @@ mod tests {
     fn test_agy_input_parsing_pre_tool_use_run_command() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"PreToolUse",
             "toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/test","Cwd":"/workspace","WaitMsBeforeAsync":5000}},
             "stepIdx":3,
             "conversationId":"ec33ebf9-0cba-4100-8142-c61503f6c587"
@@ -4651,9 +4796,13 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_pre_tool_use_empty_command_line_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input = r#"{"hook_event_name":"PreToolUse","stepIdx":0,"toolCall":{"name":"run_command","args":{"CommandLine":""}}}"#;
-        let err = adapter.parse_input(input).unwrap_err().to_string();
-        assert!(err.contains("CommandLine"));
+        for command in ["", "   "] {
+            let input = format!(
+                r#"{{"hook_event_name":"PreToolUse","stepIdx":0,"toolCall":{{"name":"run_command","args":{{"CommandLine":"{command}"}}}}}}"#
+            );
+            let err = adapter.parse_input(&input).unwrap_err().to_string();
+            assert!(err.contains("CommandLine"));
+        }
     }
 
     #[test]
@@ -4703,10 +4852,9 @@ mod tests {
     #[test]
     fn test_agy_input_parsing_post_tool_use_passthrough() {
         // PostToolUse には toolCall が無いため、claw-hooks の拡張子フック対象外。
-        // パススルーで Allow を返す。
+        // 公式ペイロードにイベント名がなくてもパススルーで Allow を返す。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"PostToolUse",
             "stepIdx":5,
             "error":"exit status 1",
             "conversationId":"abc-123"
@@ -4740,7 +4888,6 @@ mod tests {
     fn test_agy_input_parsing_stop() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"Stop",
             "executionNum":1,
             "terminationReason":"model_stop",
             "error":"",
@@ -4793,7 +4940,7 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{"conversationId":"abc-123"}"#;
         let err = adapter.parse_input(input).unwrap_err().to_string();
-        assert!(err.contains("hook_event_name"));
+        assert!(err.contains("hook event"));
     }
 
     #[test]
@@ -4807,6 +4954,32 @@ mod tests {
         let result = adapter.parse_input(input).unwrap();
         assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_event_alias_used_when_primary_field_is_invalid() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":42,
+            "event":"PreToolUse",
+            "stepIdx":0,
+            "toolCall":{"name":"run_command","args":{"CommandLine":"ls"}}
+        }"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::BeforeCommand);
+        assert_eq!(result.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_agy_input_parsing_blank_explicit_event_still_validates_command() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let input = r#"{
+            "hook_event_name":"   ",
+            "stepIdx":0,
+            "toolCall":{"name":"run_command","args":{}}
+        }"#;
+        let error = adapter.parse_input(input).unwrap_err().to_string();
+        assert!(error.contains("CommandLine"));
     }
 
     #[test]
@@ -4956,7 +5129,6 @@ mod tests {
     fn test_agy_pre_tool_use_missing_step_idx_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"PreToolUse",
             "toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}
         }"#;
 
@@ -4968,7 +5140,6 @@ mod tests {
     fn test_agy_stop_missing_execution_num_fails_closed() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"Stop",
             "terminationReason":"model_stop",
             "fullyIdle":true
         }"#;
@@ -4985,7 +5156,6 @@ mod tests {
     fn test_agy_stop_missing_fully_idle_fails_closed() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
-            "hook_event_name":"Stop",
             "executionNum":1,
             "terminationReason":"model_stop"
         }"#;
@@ -5002,7 +5172,7 @@ mod tests {
     #[test]
     fn test_agy_stop_missing_termination_reason_is_error() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        let input = r#"{"hook_event_name":"Stop","executionNum":1,"fullyIdle":true}"#;
+        let input = r#"{"executionNum":1,"fullyIdle":true}"#;
 
         let error = adapter.parse_input(input).unwrap_err().to_string();
         assert!(error.contains("terminationReason"));

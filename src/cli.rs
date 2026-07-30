@@ -3,12 +3,12 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI 向けAIコーディングエージェントフックシステム
+/// Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI 向けAIコーディングエージェントフックシステム
 #[derive(Parser)]
 #[command(
     name = "claw-hooks",
     version,
-    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, and Codex CLI",
+    about = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI",
     long_about = "A CLI tool that filters dangerous commands, suggests safer alternatives, \
                   and executes extension-based hooks for AI coding agents."
 )]
@@ -43,6 +43,8 @@ pub enum Format {
     Agy,
     /// Codex CLI フォーマット
     Codex,
+    /// Grok CLI フォーマット
+    Grok,
 }
 
 impl Format {
@@ -54,6 +56,7 @@ impl Format {
             Format::Windsurf => "🏄",
             Format::Agy => "🪐",
             Format::Codex => "📜",
+            Format::Grok => "🤖",
         }
     }
 
@@ -65,6 +68,7 @@ impl Format {
             Format::Windsurf => "Windsurf",
             Format::Agy => "Antigravity CLI",
             Format::Codex => "Codex CLI",
+            Format::Grok => "Grok CLI",
         }
     }
 }

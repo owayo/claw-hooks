@@ -112,6 +112,12 @@ pub fn strip_ansi_codes(input: &str) -> String {
 /// - 逐語一致で繰り返される説明行（biome の `i ...`、ruff の `help: ...`、
 ///   rustc/clippy の `= help:` / `= note:` 等）の2回目以降を除去
 ///   - 同一ルールの違反が複数あると出現ごとに同じ説明文が繰り返されるため
+/// - 同一診断内で逐語一致するソースコンテキスト行（`3 │ code` / `> 3 | code`）の
+///   2回目以降を除去
+///   - biome は 1 件の診断の中で「`!` メッセージ」「`i` 補足」「`i Safe fix:`」の
+///     ブロックごとに同じソース抜粋を丸ごと再掲する
+///   - ruff は修正差分ブロックでコンテキスト行を再掲する
+///   - `- old` / `+ new` の差分行は修正内容そのものなので対象外
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -157,9 +163,96 @@ pub fn normalize_lint_output(output: &str) -> String {
     }
 
     let lines = dedup_repeated_explanation_lines(lines);
+    let lines = dedup_repeated_source_context_lines(lines);
     let lines = collapse_repeated_prefix_lines(lines);
 
     lines.join("\n")
+}
+
+/// 同一診断の中で逐語一致するソースコンテキスト行の2回目以降を除去する。
+///
+/// biome は 1 件の診断を複数ブロックに分けて出力し、ブロックごとに同じソース抜粋を
+/// 丸ごと再掲する（`! <メッセージ>` → 抜粋、`i <補足>` → 同じ抜粋、
+/// `i Safe fix: ...` → 同じ抜粋 + 差分）。ruff も修正差分ブロックで
+/// コンテキスト行を再掲する。2回目以降の抜粋は情報量ゼロのままトークンを消費する。
+///
+/// 重複判定は診断単位にスコープする。別の診断で同じソース行が出るのは
+/// 「その診断の位置情報」として意味があるため、全体で一意化してはいけない。
+/// 診断の切り替わりは以下のヘッダ行で判定する:
+/// - biome: 行末が `━`（`collapse_repeated_chars` で 1 文字に圧縮済み）
+///   例: `sample.ts:3:1 lint/style/useConst FIXABLE ━` / `sample.ts format ━`
+/// - ruff / rustc / clippy: 行頭が `-> `（`-->` を圧縮済み）
+///   例: `-> sample.py:5:9`
+///
+/// 空行はブロックの区切りでしかなく診断の切り替わりではないため、スコープを維持する。
+///
+/// 対象は「純粋なコンテキスト行」だけに限定する。`- old` / `+ new` の差分行は
+/// 適用すべき修正そのものなので、逐語一致しても除去しない。
+fn dedup_repeated_source_context_lines(lines: Vec<String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if is_diagnostic_header_line(&line) {
+            seen.clear();
+        }
+        if is_source_context_line(&line) && !seen.insert(line.clone()) {
+            continue;
+        }
+        // 抜粋の除去でブロックが空になると空行が連続し得るため1行に圧縮する。
+        if line.is_empty() && result.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        result.push(line);
+    }
+    while result.last().is_some_and(|l| l.is_empty()) {
+        result.pop();
+    }
+    result
+}
+
+/// 診断の開始を示すヘッダ行かどうかを判定する。
+///
+/// biome は `<file>:<line>:<col> <rule> ━...━` のように行末を罫線で埋めるため、
+/// 装飾圧縮後は行末が `━` 1 文字になる。ruff / rustc / clippy は
+/// `--> <file>:<line>:<col>` を出力し、圧縮後は `-> ` で始まる。
+fn is_diagnostic_header_line(line: &str) -> bool {
+    line.ends_with('━') || line.starts_with("-> ")
+}
+
+/// 行番号付きのソースコンテキスト行（差分行を除く）かどうかを判定する。
+///
+/// 受理する形: `3 │ code` / `3 | code` / `> 3 │ code` / `3 │`（空行の抜粋）。
+/// `3 │ - let c = 3;` / `3 │ + const c = 3;` のような差分行は修正内容そのものなので
+/// 対象から除く。行番号を持たない ruff の差分行（`- import os`）も形が一致しない。
+fn is_source_context_line(line: &str) -> bool {
+    let rest = line.strip_prefix("> ").unwrap_or(line);
+    // 先頭の行番号を読み取る（1桁以上の数字 + 半角スペース）。
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return false;
+    }
+    let after_digits = &rest[digits_end..];
+    let Some(after_space) = after_digits.strip_prefix(' ') else {
+        return false;
+    };
+    // 区切りは ASCII の `|` か Box Drawing の `│`。
+    let Some(body) = after_space
+        .strip_prefix('│')
+        .or_else(|| after_space.strip_prefix('|'))
+    else {
+        return false;
+    };
+    // 区切りのみ（`3 │`）はコンテキスト行として扱う。
+    if body.is_empty() {
+        return true;
+    }
+    let Some(code) = body.strip_prefix(' ') else {
+        return false;
+    };
+    // 差分行（`- old` / `+ new`）は修正内容なので除外する。
+    !(code.starts_with("- ") || code.starts_with("+ "))
 }
 
 /// 逐語一致で繰り返される説明行の2回目以降を除去する。

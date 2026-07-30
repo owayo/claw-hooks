@@ -268,7 +268,7 @@ impl HookService {
             None => self.adapter.format_error(emit_message),
         };
         self.write_error_output(stdout, &output_json)?;
-        Ok(self.adapter.error_exit_code())
+        Ok(self.adapter.error_exit_code(raw_input))
     }
 
     /// フェイルクローズ時のエラー出力を適切なストリームに書き込む。

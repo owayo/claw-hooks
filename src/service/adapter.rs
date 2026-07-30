@@ -6,6 +6,7 @@
 //! - Windsurf (Cascade)
 //! - Antigravity CLI
 //! - Codex CLI
+//! - Grok CLI
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,7 @@ impl FormatAdapter {
             Format::Windsurf => self.parse_windsurf_input(input),
             Format::Agy => self.parse_agy_input(input),
             Format::Codex => self.parse_codex_input(input),
+            Format::Grok => self.parse_grok_input(input),
         }
     }
 
@@ -56,6 +58,7 @@ impl FormatAdapter {
             Format::Windsurf => self.format_windsurf_output(decision, event),
             Format::Agy => self.format_agy_output(decision, event),
             Format::Codex => self.format_codex_output(decision, event),
+            Format::Grok => self.format_grok_output(decision, event),
         }
     }
 
@@ -66,6 +69,7 @@ impl FormatAdapter {
     /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
     /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Antigravity CLI: 0 = 成功（判定はJSON内、エラーも 0 + deny JSON）
+    /// - Grok CLI: 0 = 許可, 2 = 拒否（PreToolUse のみ。それ以外の終了コードはフェイルオープン）
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
             Format::Claude => {
@@ -84,6 +88,21 @@ impl FormatAdapter {
                 // Codex CLI: ブロック判定も stdout の JSON で解釈される。
                 // 非0終了コードだとフック失敗として扱われ、判定が無視される。
                 0
+            }
+            Format::Grok if event != HookEvent::BeforeCommand => {
+                // Grok CLI で唯一ブロックできるのは PreToolUse。PostToolUse / Stop /
+                // Subagent 系は「stdout は無視され、成功なら exit 0」の事後フックなので、
+                // 内部判定が Block でも 0 を返して余計なフック失敗記録を残さない。
+                0
+            }
+            Format::Grok => {
+                // Grok CLI の PreToolUse: stdout の deny JSON と exit code 2 を両方返す。
+                // 公式仕様は「exit 0 は許可、exit 2 は拒否」かつ「それ以外（タイムアウト・
+                // クラッシュ・不正出力）はフェイルオープン」なので、Block で exit 0 を返すと
+                // 実装側が終了コードを優先した場合に許可へ倒れる恐れがある。
+                // 一方 exit 2 は明示的に拒否と規定されているため、両方を出すことで
+                // どちらの解釈でもブロックが成立する（フェイルクローズド）。
+                decision.exit_code()
             }
             Format::Cursor if matches!(event, HookEvent::Stop | HookEvent::SubagentStop) => {
                 // Cursor Stop / SubagentStop: 判定はJSON内のfollowup_messageで伝達される。
@@ -167,6 +186,17 @@ impl FormatAdapter {
                 // Codex CLI は "reason" フィールドでブロック理由を受け取る
                 serde_json::json!({
                     "decision": "block",
+                    "reason": error_message
+                })
+                .to_string()
+            }
+            Format::Grok => {
+                // Grok CLI: PreToolUse の拒否は {"decision":"deny","reason":...}。
+                // error_exit_code() が 2（= 拒否）を返すため、stdout JSON と終了コードの
+                // 両方で拒否を表明してフェイルクローズドを維持する。
+                // PreToolUse 以外は事後フックでブロック不可なので、この deny は無害に無視される。
+                serde_json::json!({
+                    "decision": "deny",
                     "reason": error_message
                 })
                 .to_string()
@@ -283,7 +313,12 @@ impl FormatAdapter {
         {
             return Some("Stop".to_string());
         }
-        if raw.get("stepIdx").is_some() && raw.get("error").is_some() {
+        // PostToolUse: `toolCall` を持たず `stepIdx` を持つのは PostToolUse だけなので
+        // `stepIdx` 単独で一意に判別できる。公式仕様の `error` は
+        // 「Optional。ツール呼び出しが失敗した場合の詳細メッセージ。成功時は空」なので、
+        // これを必須条件にすると成功時のペイロードでイベント判別に失敗し、
+        // ブロック不可の事後フックに対してフェイルクローズドの deny を返してしまう。
+        if raw.get("stepIdx").is_some() {
             return Some("PostToolUse".to_string());
         }
         if raw.get("invocationNum").is_some() || raw.get("initialNumSteps").is_some() {
@@ -301,8 +336,29 @@ impl FormatAdapter {
 
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
     /// Codex/Agy: 非0終了コードはフック失敗として扱われ判定が無視されるため0を返す。
-    /// Claude/Cursor/Windsurf: 終了コード2でブロックを表現する。
-    pub fn error_exit_code(&self) -> i32 {
+    /// Claude/Cursor/Windsurf/Grok: 終了コード2でブロックを表現する。
+    /// Grok は「exit 2 = 拒否、それ以外の異常終了はフェイルオープン」なので、
+    /// パースエラーでも 1 ではなく 2 を返す必要がある。
+    ///
+    /// `input` にはパース失敗した元入力を渡す。イベント名によって終了コードの
+    /// セマンティクスが変わるフォーマット（Cursor の stop 系）を判別するために使う。
+    /// イベント名を判別できない場合は各フォーマットの既定値へフォールバックする。
+    pub fn error_exit_code(&self, input: Option<&str>) -> i32 {
+        // Cursor の stop / subagentStop は followup_message だけが有効な出力で、
+        // Cursor が stdout JSON を解釈するのは exit code 0 のときだけ。
+        // exit 2 で返すと format_error_for_input が組み立てた followup_message が
+        // 破棄され、フェイルクローズが実質無効になる（exit_code() 側と同じ扱いに揃える）。
+        if self.format == Format::Cursor
+            && input.is_some_and(|raw| {
+                matches!(
+                    Self::raw_hook_event_name(raw).as_deref(),
+                    Some("stop" | "subagentStop")
+                )
+            })
+        {
+            return 0;
+        }
+
         match self.format {
             Format::Codex | Format::Agy => 0,
             _ => 2,
@@ -1683,14 +1739,18 @@ impl FormatAdapter {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing toolCall.name field"))?
             .to_string();
-        let raw_args = tool_call
-            .get("args")
-            .ok_or_else(|| anyhow!("Missing toolCall.args field"))?;
+        // `args` は run_command 分岐でしか読まないため、ここでは必須にしない。
+        // 公式仕様は matcher `""` / `"*"`（全ツール一致）を認めており、
+        // 引数を持たないツール（`list_permissions` 等）も列挙されている。
+        // 全ツール共通で `args` を必須にすると、スコープ外のツール呼び出しに対して
+        // 「即時ハードブロック」を意味する deny を返してしまう。
+        let raw_args = tool_call.get("args");
 
         match raw_tool_name.as_str() {
             // run_command: Antigravity のシェル実行ツール。args.CommandLine をコマンド本文として扱う。
             "run_command" => {
                 let command = raw_args
+                    .ok_or_else(|| anyhow!("Missing toolCall.args field"))?
                     .get("CommandLine")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
@@ -1731,7 +1791,9 @@ impl FormatAdapter {
                 Ok(HookInput {
                     event: HookEvent::Passthrough,
                     tool_name: other.to_string(),
-                    tool_input: crate::domain::ToolInput::Other(raw_args.clone()),
+                    tool_input: crate::domain::ToolInput::Other(
+                        raw_args.cloned().unwrap_or_else(|| serde_json::json!({})),
+                    ),
                     session_id,
                 })
             }
@@ -1744,10 +1806,14 @@ impl FormatAdapter {
             .get("executionNum")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow!("Missing executionNum field"))?;
+        // terminationReason は文字列であることだけを要求する（空文字も受理する）。
+        // 公式仕様は非空を保証しておらず、この値は status / agent_message の
+        // 情報表示にしか使わない。Antigravity の Stop でフェイルクローズすると
+        // `decision:"continue"` を返してエージェントを再投入するため、
+        // 空文字を拒否すると同じペイロードで Stop が再発火する無限ループになり得る。
         let termination_reason = raw
             .get("terminationReason")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("Missing terminationReason field"))?
             .to_string();
 
@@ -1765,7 +1831,8 @@ impl FormatAdapter {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .or_else(|| Some(termination_reason.clone()));
+            .or_else(|| Some(termination_reason.clone()))
+            .filter(|s| !s.is_empty());
 
         Ok(HookInput {
             event: HookEvent::Stop,
@@ -1816,6 +1883,306 @@ impl FormatAdapter {
         };
         serde_json::to_string(&output)
             .map_err(|e| anyhow!("Failed to serialize Antigravity output: {}", e))
+    }
+}
+
+// === Grok CLI フォーマット ===
+// 公式仕様: docs/hooks/grok/hooks.md
+//
+// 入力（stdin JSON, camelCase）:
+//   - 共通: hookEventName / sessionId / cwd / workspaceRoot
+//   - ツール系イベント: toolName / toolInput
+//
+// 出力:
+//   - PreToolUse だけがブロック可能な唯一のイベント。
+//     拒否は {"decision":"deny","reason":...}、許可は exit 0。
+//   - それ以外（PostToolUse / Stop / Subagent 系）は事後フックで stdout は無視され、
+//     成功時は exit 0 を返す。
+//
+// 終了コード: 0 = 許可、2 = 拒否。それ以外（タイムアウト・クラッシュ・不正出力）は
+// フェイルオープンとして扱われ、ツール呼び出しはそのまま実行される。
+// そのため claw-hooks はフェイルクローズしたい経路で必ず exit 2 を返す。
+impl FormatAdapter {
+    fn parse_grok_input(&self, input: &str) -> Result<HookInput> {
+        debug!(input = %summarize_hook_input(input), "{} raw input", self.log_prefix());
+
+        let raw: serde_json::Value = serde_json::from_str(input)
+            .map_err(|e| anyhow!("Failed to parse Grok input: {}", e))?;
+
+        // 公式仕様のフィールド名は camelCase の hookEventName。
+        // Grok は Claude Code / Cursor のフック設定ファイルも読み込むため、
+        // 後方互換として snake_case の hook_event_name も受理する。
+        let raw_event = raw
+            .get("hookEventName")
+            .or_else(|| raw.get("hook_event_name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("Missing hookEventName field"))?
+            .to_string();
+
+        let session_id = raw
+            .get("sessionId")
+            .or_else(|| raw.get("session_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+
+        match raw_event.as_str() {
+            "PreToolUse" => self.parse_grok_tool(&raw, HookEvent::BeforeCommand, session_id),
+            "PostToolUse" => self.parse_grok_tool(&raw, HookEvent::AfterFileEdit, session_id),
+            "Stop" => Ok(Self::parse_grok_stop(&raw, session_id)),
+            "SubagentStart" => Ok(Self::parse_grok_subagent(
+                &raw,
+                HookEvent::SubagentStart,
+                session_id,
+            )),
+            "SubagentStop" => Ok(Self::parse_grok_subagent(
+                &raw,
+                HookEvent::SubagentStop,
+                session_id,
+            )),
+            // 未対応イベント（SessionStart / SessionEnd / UserPromptSubmit /
+            // PostToolUseFailure / PermissionDenied / StopFailure / Notification /
+            // PreCompact / PostCompact）は claw-hooks のスコープ外なのでパススルーで許可する。
+            other => {
+                debug!(
+                    agent = self.format.label(),
+                    hook_event_name = other,
+                    mapped_event = ?HookEvent::Passthrough,
+                    "{} unsupported event, passing through", self.log_prefix()
+                );
+                Ok(HookInput {
+                    event: HookEvent::Passthrough,
+                    tool_name: other.to_string(),
+                    tool_input: crate::domain::ToolInput::Other(raw),
+                    session_id,
+                })
+            }
+        }
+    }
+
+    /// Grok の PreToolUse / PostToolUse をパースして内部 HookInput に変換する。
+    ///
+    /// Grok は Claude のツール名（`Bash` / `Edit` 等）を自前のツール名へ自動マッピングする
+    /// と明記しているが、マッピング後の実際のツール名は公開仕様に列挙されていない。
+    /// ツール名の文字列一致に頼ると、想定外の名前のシェル実行ツールが素通りして
+    /// 危険コマンドのブロックを回避できてしまう。そのため `toolInput` の形（`command` を
+    /// 持つか、ファイルパスを持つか）で判定し、名前に依存しないフェイルクローズド設計にする。
+    fn parse_grok_tool(
+        &self,
+        raw: &serde_json::Value,
+        event: HookEvent,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
+        let raw_tool_name = raw
+            .get("toolName")
+            .or_else(|| raw.get("tool_name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("Missing toolName field"))?
+            .to_string();
+        let tool_input = raw
+            .get("toolInput")
+            .or_else(|| raw.get("tool_input"))
+            .ok_or_else(|| anyhow!("Missing toolInput field"))?;
+
+        // シェル実行系: toolInput.command を持つツールはコマンドブロックの対象。
+        if let Some(command) = tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            // PostToolUse（実行後）はコマンドをブロックできないため、拡張子フックの
+            // 対象にもならない。素通しする。
+            if event != HookEvent::BeforeCommand {
+                return Ok(Self::grok_passthrough(
+                    raw_tool_name,
+                    tool_input.clone(),
+                    session_id,
+                ));
+            }
+
+            debug!(
+                agent = self.format.label(),
+                raw_event = "PreToolUse",
+                raw_tool_name = %raw_tool_name,
+                mapped_event = ?HookEvent::BeforeCommand,
+                mapped_tool = "Bash",
+                command_bytes = command.len(),
+                "{} parsed input", self.log_prefix()
+            );
+
+            return Ok(HookInput {
+                event: HookEvent::BeforeCommand,
+                tool_name: "Bash".to_string(),
+                tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                    command: command.to_string(),
+                    timeout: tool_input.get("timeout").and_then(|v| v.as_u64()),
+                }),
+                session_id,
+            });
+        }
+
+        // ファイル編集系: PostToolUse のみ保存後フック（フォーマッタ/リンタ）の対象。
+        // Grok は Claude 互換の tool_input を渡すため file_path を主に見るが、
+        // camelCase の filePath でも受理する。
+        if let Some(file_path) = tool_input
+            .get("file_path")
+            .or_else(|| tool_input.get("filePath"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            // PreToolUse（編集前）は claw-hooks の責務外。保存後フックは PostToolUse で実行する。
+            if event != HookEvent::AfterFileEdit {
+                return Ok(Self::grok_passthrough(
+                    raw_tool_name,
+                    tool_input.clone(),
+                    session_id,
+                ));
+            }
+
+            debug!(
+                agent = self.format.label(),
+                raw_event = "PostToolUse",
+                raw_tool_name = %raw_tool_name,
+                mapped_event = ?HookEvent::AfterFileEdit,
+                mapped_tool = "Write",
+                file_path_bytes = file_path.len(),
+                "{} parsed input", self.log_prefix()
+            );
+
+            return Ok(HookInput {
+                event: HookEvent::AfterFileEdit,
+                tool_name: "Write".to_string(),
+                tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
+                    file_path: file_path.to_string(),
+                    content: None,
+                }),
+                session_id,
+            });
+        }
+
+        // command / file_path のどちらも持たないツール（read / search / list 等）は
+        // claw-hooks の対象外なのでパススルーで許可する。
+        debug!(
+            agent = self.format.label(),
+            raw_tool_name = %raw_tool_name,
+            mapped_event = ?HookEvent::Passthrough,
+            "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
+        );
+        Ok(Self::grok_passthrough(
+            raw_tool_name,
+            tool_input.clone(),
+            session_id,
+        ))
+    }
+
+    /// スコープ外ツール用のパススルー HookInput を組み立てる。
+    fn grok_passthrough(
+        tool_name: String,
+        tool_input: serde_json::Value,
+        session_id: Option<String>,
+    ) -> HookInput {
+        HookInput {
+            event: HookEvent::Passthrough,
+            tool_name,
+            tool_input: crate::domain::ToolInput::Other(tool_input),
+            session_id,
+        }
+    }
+
+    /// Grok の Stop イベントを内部 Stop HookInput に変換する。
+    ///
+    /// Grok には `stop_hook_active` / `loop_count` に相当する入力フィールドが無い。
+    /// 無限ループ防止はプロセス間の環境変数フラグ層が担う。
+    /// また API エラー終了は別イベント `StopFailure` に分かれており、こちらには来ない。
+    fn parse_grok_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+        // セッション種別を判別できる入力フィールドが無いため常にメイン扱い。
+        let agent_message = raw
+            .get("lastAssistantMessage")
+            .or_else(|| raw.get("last_assistant_message"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+
+        HookInput {
+            event: HookEvent::Stop,
+            tool_name: "Stop".to_string(),
+            tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
+                status: None,
+                loop_count: None,
+                response: None,
+                agent_message,
+                stop_hook_active: false,
+                session_kind: crate::domain::StopSessionKind::Primary,
+            }),
+            session_id,
+        }
+    }
+
+    /// Grok の SubagentStart / SubagentStop を内部 HookInput に変換する（NanoBuddy 通知用）。
+    fn parse_grok_subagent(
+        raw: &serde_json::Value,
+        event: HookEvent,
+        session_id: Option<String>,
+    ) -> HookInput {
+        let subagent_type = raw
+            .get("subagentType")
+            .or_else(|| raw.get("subagent_type"))
+            .or_else(|| raw.get("agentType"))
+            .or_else(|| raw.get("agent_type"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+        let tool_name = if event == HookEvent::SubagentStart {
+            "SubagentStart"
+        } else {
+            "SubagentStop"
+        }
+        .to_string();
+
+        HookInput {
+            event,
+            tool_name,
+            tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
+                subagent_type,
+                prompt: raw
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string()),
+                status: raw
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string()),
+                duration: raw.get("duration").and_then(|v| v.as_u64()),
+            }),
+            session_id,
+        }
+    }
+
+    fn format_grok_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // PreToolUse 以外は事後フックで stdout が無視されるため、常に空オブジェクトを返す。
+        // Stop フックの lint 失敗も Grok へは伝えられない（ブロック不可）ためベストエフォート。
+        if event != HookEvent::BeforeCommand {
+            return Ok("{}".to_string());
+        }
+
+        match decision {
+            // 許可は exit 0 で伝わる。stdout には無害な空オブジェクトを返す
+            // （公式に文書化されている decision 値は "deny" のみのため、
+            // 未文書の "allow" を返して不正出力扱い＝フェイルオープンになるのを避ける）。
+            Decision::Allow { .. } => Ok("{}".to_string()),
+            Decision::Block { message } => {
+                let truncated = self.normalize_and_truncate(message);
+                serde_json::to_string(&serde_json::json!({
+                    "decision": "deny",
+                    "reason": truncated
+                }))
+                .map_err(|e| anyhow!("Failed to serialize Grok output: {}", e))
+            }
+        }
     }
 }
 
@@ -3267,7 +3634,7 @@ mod tests {
     #[test]
     fn test_codex_error_exit_code_is_zero() {
         let adapter = FormatAdapter::new(Format::Codex, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
+        assert_eq!(adapter.error_exit_code(None), 0);
     }
 
     // === Claude Code パススルーイベントテスト ===
@@ -3454,7 +3821,7 @@ mod tests {
     #[test]
     fn test_error_exit_code() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     #[test]
@@ -3462,19 +3829,19 @@ mod tests {
         // Codex CLI: 非0終了コードはフック失敗として扱われ判定が無視されるため、
         // エラー時も0を返しJSON内のblock判定を有効にする
         let adapter = FormatAdapter::new(Format::Codex, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
+        assert_eq!(adapter.error_exit_code(None), 0);
     }
 
     #[test]
     fn test_error_exit_code_cursor_returns_two() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     #[test]
     fn test_error_exit_code_windsurf_returns_two() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     // === exit_code のテスト ===
@@ -3552,28 +3919,28 @@ mod tests {
     fn test_error_exit_code_codex_zero() {
         // Codex: エラー時も0（JSON内でblock判定を有効にするため）
         let adapter = FormatAdapter::new(Format::Codex, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
+        assert_eq!(adapter.error_exit_code(None), 0);
     }
 
     #[test]
     fn test_error_exit_code_claude_two() {
         // Claude: エラー時は2
         let adapter = FormatAdapter::new(Format::Claude, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     #[test]
     fn test_error_exit_code_cursor_two() {
         // Cursor: エラー時は2
         let adapter = FormatAdapter::new(Format::Cursor, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     #[test]
     fn test_error_exit_code_windsurf_two() {
         // Windsurf: エラー時は2
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
-        assert_eq!(adapter.error_exit_code(), 2);
+        assert_eq!(adapter.error_exit_code(None), 2);
     }
 
     // === use_stderr のテスト ===
@@ -5197,7 +5564,7 @@ mod tests {
     fn test_agy_error_exit_code_is_zero() {
         // Agy: エラー時も 0（JSON 内で deny を有効にするため、Codex と同じ）
         let adapter = FormatAdapter::new(Format::Agy, 0);
-        assert_eq!(adapter.error_exit_code(), 0);
+        assert_eq!(adapter.error_exit_code(None), 0);
     }
 
     #[test]

@@ -300,13 +300,15 @@ impl Decision {
         match self {
             Decision::Allow { additional_context } => {
                 let hook_specific_output = match event {
-                    // PreToolUse: hookSpecificOutput.permissionDecision = "allow"
-                    HookEvent::BeforeCommand => Some(HookSpecificOutput {
-                        hook_event_name: "PreToolUse".to_string(),
-                        additional_context: None,
-                        permission_decision: Some("allow".to_string()),
-                        permission_decision_reason: None,
-                    }),
+                    // PreToolUse: 判定を返さず空オブジェクト（{}）にして、Claude 本来の
+                    // 権限フローに委ねる。公式仕様では permissionDecision "allow" は
+                    // 「権限プロンプトをスキップする」であり、exit 0 かつ判定なしが
+                    // 「異議なし（通常の権限フローが適用される）」を意味する。
+                    // claw-hooks は危険コマンドを拒否するツールであり、
+                    // 拒否しなかったコマンドを自動承認する権限は持たない
+                    // （matcher "Bash" で導入するだけで Bash の承認プロンプトが
+                    // 全て消えてしまうため）。
+                    HookEvent::BeforeCommand => None,
                     // PostToolUse: hookSpecificOutput.additionalContext
                     HookEvent::AfterFileEdit => additional_context.map(|ctx| HookSpecificOutput {
                         hook_event_name: "PostToolUse".to_string(),
@@ -430,17 +432,15 @@ mod tests {
         let decision = Decision::allow();
         let output = decision.into_output(HookEvent::BeforeCommand);
 
-        // PreToolUse Allow: トップレベルに decision/reason を含めない
+        // PreToolUse Allow: 判定を一切返さず空オブジェクト（{}）にする。
+        // permissionDecision "allow" は権限プロンプトをスキップしてしまうため、
+        // claw-hooks がブロックしないコマンドを自動承認しないよう無出力にする。
         assert!(output.decision.is_none());
         assert!(output.reason.is_none());
-        // hookSpecificOutput に permissionDecision = "allow" が含まれる
-        let hook_output = output
-            .hook_specific_output
-            .expect("BeforeCommand Allow には hookSpecificOutput が必要");
-        assert_eq!(hook_output.hook_event_name, "PreToolUse");
-        assert_eq!(hook_output.permission_decision, Some("allow".to_string()));
-        assert!(hook_output.permission_decision_reason.is_none());
-        assert!(hook_output.additional_context.is_none());
+        assert!(
+            output.hook_specific_output.is_none(),
+            "BeforeCommand Allow は hookSpecificOutput を返さない（通常の権限フローに委ねる）"
+        );
     }
 
     #[test]
@@ -476,17 +476,15 @@ mod tests {
 
     #[test]
     fn test_decision_into_output_allow_with_context_before_command() {
-        // BeforeCommand では permissionDecision = "allow" が hookSpecificOutput に含まれる
+        // BeforeCommand の Allow は additional_context があっても無出力（{}）にする。
+        // PreToolUse で additionalContext を返すには permissionDecision が必要になり、
+        // 権限プロンプトのスキップを招くため、コンテキストは付けずに権限フローへ委ねる。
         let decision = Decision::allow_with_context("Some context".to_string());
         let output = decision.into_output(HookEvent::BeforeCommand);
 
-        // PreToolUse: トップレベルに decision を含めない
         assert!(output.decision.is_none());
-        let hook_output = output
-            .hook_specific_output
-            .expect("BeforeCommand Allow には hookSpecificOutput が必要");
-        assert_eq!(hook_output.hook_event_name, "PreToolUse");
-        assert_eq!(hook_output.permission_decision, Some("allow".to_string()));
+        assert!(output.reason.is_none());
+        assert!(output.hook_specific_output.is_none());
     }
 
     #[test]

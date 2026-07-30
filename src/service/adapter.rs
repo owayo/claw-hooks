@@ -66,7 +66,7 @@ impl FormatAdapter {
     /// 注意: エージェントごとに終了コードのセマンティクスが異なる。
     /// - Claude: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Windsurf: 0 = 許可/Stop, 2 = ブロック（pre_run_command のみ）
-    /// - Cursor: 0 = 許可/停止, 2 = ブロック（停止以外）
+    /// - Cursor: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Codex CLI: 0 = 成功（判定は stdout の JSON で伝達される）
     /// - Antigravity CLI: 0 = 成功（判定はJSON内、エラーも 0 + deny JSON）
     /// - Grok CLI: 0 = 許可, 2 = 拒否（PreToolUse のみ。それ以外の終了コードはフェイルオープン）
@@ -104,10 +104,16 @@ impl FormatAdapter {
                 // どちらの解釈でもブロックが成立する（フェイルクローズド）。
                 decision.exit_code()
             }
-            Format::Cursor if matches!(event, HookEvent::Stop | HookEvent::SubagentStop) => {
-                // Cursor Stop / SubagentStop: 判定はJSON内のfollowup_messageで伝達される。
-                // Cursor が stdout JSON を解釈するのは exit code 0 のときだけのため、
-                // Block でも 0 を返す（exit 2 は permission: deny 相当で stop 系には無効）。
+            Format::Cursor => {
+                // Cursor: 判定はすべて stdout の JSON で伝達する。
+                // 公式仕様では「exit 0 = 成功、JSON 出力を使う」「exit 2 = アクションを
+                // ブロック（permission: "deny" と等価。Claude Code の挙動に合わせている）」。
+                // Claude Code は exit 2 のとき stdout の JSON を無視するため、
+                // deny JSON を出しつつ exit 2 で終了すると「safe-rm を使え」という
+                // 代替案の本文がエージェントに届かなくなる（claw-hooks の主機能が失われる）。
+                // 意図的なポリシー拒否は JSON 契約（exit 0 + deny JSON）に統一し、
+                // 判定系自体が壊れたパースエラーだけを exit code 契約（error_exit_code）に回す。
+                // Stop / SubagentStop も同様に followup_message は exit 0 でしか読まれない。
                 0
             }
             Format::Windsurf if event == HookEvent::Stop => {
@@ -204,37 +210,76 @@ impl FormatAdapter {
         }
     }
 
+    /// フェイルクローズのブロックが「継続ループ」または「無視」に終わるイベントか判定する。
+    ///
+    /// Stop 系イベントでは、多くのエージェントで「ブロック」が拒否ではなく
+    /// **継続指示** を意味する:
+    /// - Claude / Codex: `decision:"block"` は停止を阻止し、`reason` を継続プロンプトにする
+    /// - Antigravity: `decision:"continue"` で再投入する
+    /// - Cursor: `followup_message` は次のユーザーメッセージとして自動送信される
+    ///
+    /// 壊れたペイロードや設定エラーに対してこれを返すと、
+    ///   フェイルクローズ → 継続 → Stop 再発火 → 同じ失敗 → …
+    /// という自己維持ループになる。ループ防止層（環境変数フラグ / `stop_hook_active` /
+    /// `loop_count`）はいずれもパース成功後にしか働かないため、この循環を断てない。
+    ///
+    /// Stop は危険操作の実行前ゲートではないので、停止を許可しても新しい副作用は
+    /// 発生しない。むしろ自動継続する方が新しいツール実行を誘発する。
+    /// そのためフェイルクローズドの原則よりループ回避を優先する。
+    ///
+    /// Windsurf の `post_cascade_response` と Grok の PreToolUse 以外は、そもそも
+    /// ブロック不可の事後フックであり、拒否を返しても無視されるだけ（Windsurf では
+    /// エージェントに無用なエラーが注入される）ため同様に扱う。
+    fn blocks_would_loop_or_be_ignored(&self, input: &str) -> bool {
+        match self.format {
+            Format::Claude => matches!(
+                Self::raw_hook_event_name(input).as_deref(),
+                Some("Stop" | "SubagentStop")
+            ),
+            Format::Codex => matches!(
+                Self::raw_hook_event_name(input).as_deref(),
+                Some("Stop" | "stop" | "SubagentStop" | "subagent_stop")
+            ),
+            Format::Cursor => matches!(
+                Self::raw_hook_event_name(input).as_deref(),
+                Some("stop" | "subagentStop")
+            ),
+            Format::Agy => matches!(
+                Self::agy_hook_event_name_from_input(input).as_deref(),
+                Some("Stop")
+            ),
+            Format::Windsurf => {
+                // Windsurf のイベント名フィールドは agent_action_name。
+                serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|raw| {
+                        raw.get("agent_action_name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "post_cascade_response")
+                    })
+                    .unwrap_or(false)
+            }
+            Format::Grok => {
+                // Grok でブロックできるのは PreToolUse だけ。
+                // イベント名が読めない場合はフェイルクローズドを維持する（false）。
+                match Self::grok_hook_event_name_from_input(input) {
+                    Some(event) => event != "PreToolUse",
+                    None => false,
+                }
+            }
+        }
+    }
+
     /// 入力のイベント名を考慮してエラー出力をフォーマットする。
     ///
     /// Codex の PermissionRequest/PreToolUse、Cursor の stop 系イベント、Antigravity の
     /// Stop はそれぞれ異なる拒否形式を要求する。イベント名を判別できる場合は専用形式を
     /// 使い、判別できない場合は各フォーマットの汎用エラー形式へフォールバックする。
     pub fn format_error_for_input(&self, message: &str, input: &str) -> String {
-        if self.format == Format::Cursor
-            && matches!(
-                Self::raw_hook_event_name(input).as_deref(),
-                Some("stop" | "subagentStop")
-            )
-        {
-            // stop 系イベントでは permission は無効であり、followup_message だけが
-            // エージェントを継続させる。入力不正時も停止を許可しないよう専用形式を返す。
-            let error_message = format!("🚫 Hook error (fail-closed): {}", message);
-            return serde_json::json!({ "followup_message": error_message }).to_string();
-        }
-
-        if self.format == Format::Agy
-            && matches!(
-                Self::agy_hook_event_name_from_input(input).as_deref(),
-                Some("Stop")
-            )
-        {
-            // Antigravity の Stop は deny ではなく continue だけが停止を阻止する。
-            let error_message = format!("🚫 Hook error (fail-closed): {}", message);
-            return serde_json::json!({
-                "decision": "continue",
-                "reason": error_message
-            })
-            .to_string();
+        // ブロック不可のイベントではフェイルクローズの拒否を返してはいけない。
+        // 詳細は `blocks_would_loop_or_be_ignored` のドキュメントを参照。
+        if self.blocks_would_loop_or_be_ignored(input) {
+            return "{}".to_string();
         }
 
         if self.format == Format::Codex {
@@ -328,6 +373,16 @@ impl FormatAdapter {
         None
     }
 
+    /// 生 JSON から Grok のイベント名を取得する（camelCase の hookEventName）。
+    fn grok_hook_event_name_from_input(input: &str) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
+        raw.get("hookEventName")
+            .or_else(|| raw.get("hook_event_name"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from)
+    }
+
     /// 生 JSON から Antigravity のイベント名を取得する。
     fn agy_hook_event_name_from_input(input: &str) -> Option<String> {
         let raw: serde_json::Value = serde_json::from_str(input).ok()?;
@@ -344,18 +399,11 @@ impl FormatAdapter {
     /// セマンティクスが変わるフォーマット（Cursor の stop 系）を判別するために使う。
     /// イベント名を判別できない場合は各フォーマットの既定値へフォールバックする。
     pub fn error_exit_code(&self, input: Option<&str>) -> i32 {
-        // Cursor の stop / subagentStop は followup_message だけが有効な出力で、
-        // Cursor が stdout JSON を解釈するのは exit code 0 のときだけ。
-        // exit 2 で返すと format_error_for_input が組み立てた followup_message が
-        // 破棄され、フェイルクローズが実質無効になる（exit_code() 側と同じ扱いに揃える）。
-        if self.format == Format::Cursor
-            && input.is_some_and(|raw| {
-                matches!(
-                    Self::raw_hook_event_name(raw).as_deref(),
-                    Some("stop" | "subagentStop")
-                )
-            })
-        {
+        // ブロック不可のイベント（Stop 系など）では、format_error_for_input が
+        // 空オブジェクトを返して停止を許可する。終了コードもそれに揃えて 0 にする。
+        // exit 2 を返すと、Claude/Windsurf では「ブロック = 停止阻止 + 継続」と
+        // 解釈されて継続ループを招き、それ以外でも無用なフック失敗記録が残る。
+        if input.is_some_and(|raw| self.blocks_would_loop_or_be_ignored(raw)) {
             return 0;
         }
 
@@ -857,6 +905,15 @@ impl FormatAdapter {
     }
 
     fn format_cursor_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
+        // スコープ外イベント（beforeReadFile / beforeMCPExecution / beforeTabFileRead /
+        // sessionStart 等）は中身を一切検査していないため、許可を表明する根拠が無い。
+        // Cursor は「複数ソースのフックの応答が衝突したら優先度の高いソースが勝つ」仕様なので、
+        // 未検査イベントに permission: "allow" を返すと他フックの deny を上書きし得る。
+        // また beforeSubmitPrompt のように permission フィールドを持たないイベントもある。
+        if event == HookEvent::Passthrough {
+            return Ok("{}".to_string());
+        }
+
         // Stop / SubagentStop の出力スキーマは followup_message のみ
         // （公式に permission フィールドは存在しない）。
         // Block は修正を指示する followup_message を返し、Allow は空オブジェクトを返す。
@@ -874,20 +931,20 @@ impl FormatAdapter {
             };
         }
 
-        let output = match &self.truncate_decision(decision) {
-            Decision::Allow { .. } => CursorOutput {
-                permission: "allow".to_string(),
-                user_message: None,
-                agent_message: None,
-            },
-            Decision::Block { message } => CursorOutput {
-                permission: "deny".to_string(),
-                user_message: Some(message.clone()),
-                agent_message: Some("Command blocked by claw-hooks".to_string()),
-            },
-        };
-        serde_json::to_string(&output)
-            .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e))
+        match &self.truncate_decision(decision) {
+            // claw-hooks は deny-only ポリシー。安全と判定した場合も明示 allow ではなく
+            // 空オブジェクトを返し、Cursor 本来の権限設定と他フックの判定を尊重する。
+            Decision::Allow { .. } => Ok("{}".to_string()),
+            Decision::Block { message } => {
+                let output = CursorOutput {
+                    permission: "deny".to_string(),
+                    user_message: Some(message.clone()),
+                    agent_message: Some("Command blocked by claw-hooks".to_string()),
+                };
+                serde_json::to_string(&output)
+                    .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e))
+            }
+        }
     }
 
     // === Windsurf フォーマット ===
@@ -1222,9 +1279,17 @@ impl FormatAdapter {
             .ok_or_else(|| anyhow!("Missing hook_event_name field"))?
             .to_string();
 
-        // Codex はイベントごとに必須フィールドを定義している。判定に直接使わない
-        // メタデータも検証し、不完全な入力を許可扱いにしない。
-        let session_id = Some(Self::validate_codex_required_fields(&raw, &raw_event)?);
+        // session_id はログ・通知の相関用でしかないため、存在すれば取り出すだけにする。
+        // 公式の共通フィールド表は「通常使うフィールド」の一覧であって厳密なスキーマでは
+        // なく（実際に仕様中の SessionEnd 実例ペイロードには model が無い）、
+        // 判定に使わないメタデータを必須にすると、フィールド 1 つの省略で
+        // 全イベントがフェイルクローズドに倒れて claw-hooks 全体が機能しなくなる。
+        // 検証は「claw-hooks が実際に判定に使うフィールド」に絞る（各 parse_* 側で実施）。
+        let session_id = raw
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
 
         let event = match raw_event.as_str() {
             "Stop" | "stop" => HookEvent::Stop,
@@ -1259,130 +1324,28 @@ impl FormatAdapter {
         };
 
         if event == HookEvent::Stop {
-            return Ok(Self::parse_codex_stop(&raw, session_id));
+            return Self::parse_codex_stop(&raw, session_id);
         }
 
         if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
-            return Self::parse_codex_subagent(&raw, event, raw_event, session_id);
+            return Ok(Self::parse_codex_subagent(
+                &raw, event, raw_event, session_id,
+            ));
         }
 
         self.parse_codex_tool(&raw, event, raw_event, session_id)
     }
 
-    /// Codex の共通・イベント固有必須フィールドを検証し、セッション ID を返す。
-    fn validate_codex_required_fields(raw: &serde_json::Value, raw_event: &str) -> Result<String> {
-        let session_id = Self::require_codex_string(raw, "session_id")?.to_string();
-        Self::require_codex_nullable_string(raw, "transcript_path")?;
-        Self::require_codex_string(raw, "cwd")?;
-        Self::require_codex_string(raw, "model")?;
-
-        match raw_event {
-            "SessionStart" | "session_start" => {
-                Self::require_codex_string(raw, "permission_mode")?;
-                Self::require_codex_string(raw, "source")?;
-            }
-            "SessionEnd" | "session_end" => {
-                Self::require_codex_string(raw, "reason")?;
-            }
-            "PreToolUse" | "pre_tool_use" | "BeforeTool" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_string(raw, "tool_use_id")?;
-                Self::require_codex_tool_fields(raw)?;
-            }
-            "PermissionRequest" | "permission_request" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_tool_fields(raw)?;
-            }
-            "PostToolUse" | "post_tool_use" | "AfterTool" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_string(raw, "tool_use_id")?;
-                Self::require_codex_tool_fields(raw)?;
-                Self::require_codex_field(raw, "tool_response")?;
-            }
-            "PreCompact" | "pre_compact" | "PostCompact" | "post_compact" => {
-                Self::require_codex_turn_fields(raw, false)?;
-                Self::require_codex_string(raw, "trigger")?;
-            }
-            "UserPromptSubmit" | "user_prompt_submit" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_string(raw, "prompt")?;
-            }
-            "SubagentStart" | "subagent_start" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_string(raw, "agent_id")?;
-                Self::require_codex_string(raw, "agent_type")?;
-            }
-            "SubagentStop" | "subagent_stop" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_string(raw, "agent_id")?;
-                Self::require_codex_string(raw, "agent_type")?;
-                Self::require_codex_nullable_string(raw, "agent_transcript_path")?;
-                Self::require_codex_bool(raw, "stop_hook_active")?;
-                Self::require_codex_nullable_string(raw, "last_assistant_message")?;
-            }
-            "Stop" | "stop" => {
-                Self::require_codex_turn_fields(raw, true)?;
-                Self::require_codex_bool(raw, "stop_hook_active")?;
-                Self::require_codex_nullable_string(raw, "last_assistant_message")?;
-            }
-            _ => {}
-        }
-
-        Ok(session_id)
-    }
-
-    /// Codex のターン識別子と、対象イベントで必要な権限モードを検証する。
-    fn require_codex_turn_fields(raw: &serde_json::Value, permission_mode: bool) -> Result<()> {
-        Self::require_codex_string(raw, "turn_id")?;
-        if permission_mode {
-            Self::require_codex_string(raw, "permission_mode")?;
-        }
-        Ok(())
-    }
-
-    /// Codex のツールイベントに共通する必須フィールドを検証する。
-    fn require_codex_tool_fields(raw: &serde_json::Value) -> Result<()> {
-        Self::require_codex_string(raw, "tool_name")?;
-        Self::require_codex_field(raw, "tool_input")?;
-        Ok(())
-    }
-
-    /// 必須フィールドが存在することを検証する。
-    fn require_codex_field<'a>(
-        raw: &'a serde_json::Value,
-        field: &str,
-    ) -> Result<&'a serde_json::Value> {
-        raw.get(field)
-            .ok_or_else(|| anyhow!("Missing {} field", field))
-    }
-
-    /// 必須の非空文字列フィールドを検証する。
-    fn require_codex_string<'a>(raw: &'a serde_json::Value, field: &str) -> Result<&'a str> {
-        Self::require_codex_field(raw, field)?
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("Missing or invalid {} field", field))
-    }
-
-    /// `string | null` の必須フィールドを検証する。
-    fn require_codex_nullable_string(raw: &serde_json::Value, field: &str) -> Result<()> {
-        let value = Self::require_codex_field(raw, field)?;
-        if value.is_null() || value.is_string() {
-            Ok(())
-        } else {
-            Err(anyhow!("Invalid {} field", field))
-        }
-    }
-
     /// 必須の真偽値フィールドを検証する。
     fn require_codex_bool(raw: &serde_json::Value, field: &str) -> Result<bool> {
-        Self::require_codex_field(raw, field)?
+        raw.get(field)
+            .ok_or_else(|| anyhow!("Missing {} field", field))?
             .as_bool()
             .ok_or_else(|| anyhow!("Missing or invalid {} field", field))
     }
 
     /// Codex の Stop イベントを内部 Stop HookInput に変換する。
-    fn parse_codex_stop(raw: &serde_json::Value, session_id: Option<String>) -> HookInput {
+    fn parse_codex_stop(raw: &serde_json::Value, session_id: Option<String>) -> Result<HookInput> {
         let agent_message = raw
             .get("last_assistant_message")
             .or_else(|| raw.get("stop_reason"))
@@ -1391,12 +1354,14 @@ impl FormatAdapter {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let stop_hook_active = raw
-            .get("stop_hook_active")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // stop_hook_active は「このターンが Stop により既に継続されたか」を示す
+        // 無限ループ防止の要であり、継続（Codex では decision:"block"）を返す判断に
+        // 直接使う唯一のフィールドなので厳密に検証する。
+        // 検証に失敗しても format_error_for_input が停止許可（{}）を返すため、
+        // ここでフェイルクローズドにしても継続ループにはならない。
+        let stop_hook_active = Self::require_codex_bool(raw, "stop_hook_active")?;
 
-        HookInput {
+        Ok(HookInput {
             event: HookEvent::Stop,
             tool_name: "Stop".to_string(),
             tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
@@ -1409,29 +1374,32 @@ impl FormatAdapter {
                 session_kind: crate::domain::StopSessionKind::Primary,
             }),
             session_id,
-        }
+        })
     }
 
     /// Codex の SubagentStart / SubagentStop を内部 HookInput に変換する。
+    ///
+    /// これらは NanoBuddy 通知専用の内部イベントで、ブロック判定には使わない。
+    /// `agent_type` は通知ラベルにしか使わないため、欠落してもフェイルクローズドに
+    /// せず通知ラベルなしで処理する（通知のためにエージェントを止める理由がない）。
     fn parse_codex_subagent(
         raw: &serde_json::Value,
         event: HookEvent,
         raw_event: String,
         session_id: Option<String>,
-    ) -> Result<HookInput> {
+    ) -> HookInput {
         let subagent_type = raw
             .get("agent_type")
             .or_else(|| raw.get("subagent_type"))
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("Missing agent_type field"))?
-            .to_string();
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
 
-        Ok(HookInput {
+        HookInput {
             event,
             tool_name: raw_event,
             tool_input: crate::domain::ToolInput::Subagent(crate::domain::SubagentInput {
-                subagent_type: Some(subagent_type),
+                subagent_type,
                 prompt: raw
                     .get("prompt")
                     .or_else(|| raw.get("task"))
@@ -1444,7 +1412,7 @@ impl FormatAdapter {
                     .and_then(|v| v.as_u64()),
             }),
             session_id,
-        })
+        }
     }
 
     /// Codex のツールイベント（Bash / Write / apply_patch 等）を内部 HookInput に変換する。
@@ -1462,18 +1430,53 @@ impl FormatAdapter {
             .ok_or_else(|| anyhow!("Missing tool_name field"))?
             .to_string();
 
-        // Codex のツール名を内部のツール名にマッピング
+        // Codex のツール名を内部のツール名にマッピングする。
+        //
+        // 公式仕様が列挙する正規のフックツール名は `Bash`（shell / exec_command 由来）、
+        // `apply_patch`、`mcp__*`、および `update_plan` のような関数ツール名。
+        // `shell` / `execute` / `write_file` などは旧版互換のエイリアスとして残す。
+        //
+        // ただし未知のツール名を `Write` へ寄せてはいけない。`Write` に写すと
+        // `parse_tool_input_for_tool` が `file_path` を必須にするため、引数キーが
+        // `path` / `filename` 等の別名になっている（現在または将来の）関数ツールに対して
+        // PreToolUse の誤 deny が発生する。未知のツール名はそのまま渡し、
+        // `ToolInput::Other` として扱わせる（組み込みフィルターは tool_name == "Bash"
+        // しか見ないため無害に素通しされる）。
         let mapped_tool_name = match raw_tool_name.as_str() {
             "shell" | "run_command" | "execute" => "Bash".to_string(),
-            "write_file" | "create_file" | "edit_file" => "Write".to_string(),
             "apply_patch" => "MultiEdit".to_string(),
-            "read_file" => "Read".to_string(),
             other => other.to_string(),
         };
 
         let raw_tool_input = raw
             .get("tool_input")
             .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+
+        // PostToolUse（実行後）では、claw-hooks は保存後フックのためにファイルパスしか
+        // 使わない。Bash などファイル編集以外のツールに対して tool_input を厳密検証しても
+        // 得るものが無い一方、失敗時のコストが極端に大きい:
+        // Codex の PostToolUse では `decision:"block"` が「実際のツール出力を
+        // フックのメッセージで置き換える」動作になるため、フェイルクローズドすると
+        // モデルは本来のコマンド出力を一切見られなくなる。
+        // そのためファイル編集系ツール以外は検証せず素通しする。
+        let is_file_editing_tool = raw_tool_name == "apply_patch"
+            || matches!(mapped_tool_name.as_str(), "Write" | "Edit" | "MultiEdit");
+        if event == HookEvent::AfterFileEdit && !is_file_editing_tool {
+            debug!(
+                agent = self.format.label(),
+                raw_event = %raw_event,
+                raw_tool_name = %raw_tool_name,
+                mapped_event = ?event,
+                "{} PostToolUse for non-file tool, no post-edit hook applies", self.log_prefix()
+            );
+            return Ok(HookInput {
+                event,
+                tool_name: mapped_tool_name,
+                tool_input: crate::domain::ToolInput::Other(raw_tool_input.clone()),
+                session_id,
+            });
+        }
+
         let tool_input = if raw_tool_name == "apply_patch" {
             // Bash 経路と同様に空文字列の command も fail-closed にする（必須フィールド扱い）。
             let command = raw_tool_input
@@ -2358,7 +2361,9 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
-        assert!(output.contains(r#""permission":"allow""#));
+        // claw-hooks は deny-only ポリシー。安全と判定しても明示 allow は返さず、
+        // Cursor 本来の権限設定と他フックの判定を尊重する。
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -2382,10 +2387,9 @@ mod tests {
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::BeforeCommand)
             .unwrap();
-        // BeforeCommand Allow では hookSpecificOutput に permissionDecision = "allow" が含まれる
-        assert!(output.contains("hookSpecificOutput"));
-        assert!(output.contains(r#""permissionDecision":"allow""#));
-        assert!(output.contains(r#""hookEventName":"PreToolUse""#));
+        // BeforeCommand Allow は空オブジェクト（判定なし = 通常の権限フローに委ねる）。
+        // permissionDecision "allow" を返すと Claude の権限プロンプトがスキップされる。
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -3000,13 +3004,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_exit_code_before_command_block_is_two() {
+    fn test_cursor_exit_code_before_command_block_is_zero() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        // Stop 以外の Block は従来どおり終了コード 2
-        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+        // Cursor は exit 0 のときだけ stdout の JSON を使う。exit 2 だと deny 自体は
+        // 成立しても user_message（safe-rm 等の代替案）がエージェントに届かない。
+        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 0);
     }
 
     #[test]
@@ -3894,13 +3899,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_exit_code_block_before_command_two() {
-        // Cursor: BeforeCommand の Block → 2
+    fn test_cursor_exit_code_block_after_file_edit_zero() {
+        // Cursor: 判定は全イベントで stdout の JSON 契約に統一する（終了コードは常に 0）
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let decision = Decision::Block {
             message: "blocked".to_string(),
         };
-        assert_eq!(adapter.exit_code(&decision, HookEvent::BeforeCommand), 2);
+        assert_eq!(adapter.exit_code(&decision, HookEvent::AfterFileEdit), 0);
     }
 
     #[test]
@@ -4237,6 +4242,147 @@ mod tests {
             "空コマンドは command 関連のエラーになるべき: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_codex_optional_metadata_absence_is_tolerated() {
+        // 公式仕様の共通フィールド表は「通常使うフィールド」の一覧であって厳密なスキーマ
+        // ではない（仕様中の SessionEnd 実例ペイロードには model が無い）。
+        // 判定に使わないメタデータを必須にすると、Codex 側がフィールドを省略した瞬間に
+        // 全イベントがフェイルクローズドに倒れて claw-hooks 全体が停止する。
+        // そのため欠落を許容し、パースを成功させる。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let complete = complete_codex_input(
+            r#"{
+                "hook_event_name": "Stop",
+                "stop_hook_active": false,
+                "last_assistant_message": null
+            }"#,
+        );
+
+        for field in [
+            "session_id",
+            "transcript_path",
+            "cwd",
+            "model",
+            "turn_id",
+            "permission_mode",
+            "last_assistant_message",
+        ] {
+            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
+            input.as_object_mut().unwrap().remove(field);
+            let parsed = adapter
+                .parse_input(&input.to_string())
+                .unwrap_or_else(|e| panic!("{field} 欠落でフェイルクローズドすべきではない: {e}"));
+            assert_eq!(parsed.event, HookEvent::Stop);
+        }
+    }
+
+    #[test]
+    fn test_codex_used_fields_are_still_validated() {
+        // 逆に、claw-hooks が実際に判定に使うフィールドは厳密に検証する。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let cases = [
+            // PreToolUse のツール名・コマンド本文は危険コマンド検出の入力そのもの
+            (
+                complete_codex_input(
+                    r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#,
+                ),
+                "tool_name",
+            ),
+            (
+                complete_codex_input(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#),
+                "tool_input",
+            ),
+            // Stop の継続判断に使う唯一のフィールド
+            (
+                complete_codex_input(r#"{"hook_event_name":"Stop"}"#),
+                "stop_hook_active",
+            ),
+        ];
+
+        for (input, field) in cases {
+            let err = adapter.parse_input(&input).unwrap_err();
+            assert!(
+                err.to_string().contains(field),
+                "{field} 欠落時のエラーが不適切: {err}"
+            );
+        }
+
+        // 型不一致も検出する
+        let mut input: serde_json::Value = serde_json::from_str(&complete_codex_input(
+            r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+        ))
+        .unwrap();
+        input["stop_hook_active"] = serde_json::json!("false");
+        let err = adapter.parse_input(&input.to_string()).unwrap_err();
+        assert!(err.to_string().contains("stop_hook_active"), "{err}");
+
+        // PreToolUse の Bash で command が空文字なら fail-closed
+        let input = complete_codex_input(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"  "}}"#,
+        );
+        let err = adapter.parse_input(&input).unwrap_err();
+        assert!(err.to_string().contains("command"), "{err}");
+    }
+
+    #[test]
+    fn test_codex_passthrough_events_skip_field_validation() {
+        // スコープ外イベントの固有フィールドは一切検証しない。
+        // 検証してフェイルクローズドすると、読んでもいないメタデータのために
+        // UserPromptSubmit ではユーザーのプロンプト自体を拒否してしまう
+        // （UserPromptSubmit では decision:"block" がプロンプト拒否の正式形式）。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let inputs = [
+            r#"{"hook_event_name":"SessionStart"}"#,
+            r#"{"hook_event_name":"SessionEnd"}"#,
+            r#"{"hook_event_name":"UserPromptSubmit"}"#,
+            r#"{"hook_event_name":"PreCompact"}"#,
+            r#"{"hook_event_name":"PostCompact"}"#,
+            r#"{"hook_event_name":"SomeFutureEvent"}"#,
+        ];
+
+        for input in inputs {
+            let parsed = adapter
+                .parse_input(input)
+                .unwrap_or_else(|e| panic!("{input} はパススルーすべき: {e}"));
+            assert_eq!(parsed.event, HookEvent::Passthrough, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_codex_post_tool_use_non_file_tool_is_tolerated() {
+        // Codex の PostToolUse では decision:"block" が「実際のツール出力を
+        // フックのメッセージで置き換える」動作になる。保存後フックはファイルパスしか
+        // 使わないため、Bash など非ファイル系ツールの tool_input を厳密検証して
+        // フェイルクローズドすると、モデルが本来のコマンド出力を失う。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = complete_codex_input(
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{}}"#,
+        );
+
+        let parsed = adapter.parse_input(&input).unwrap();
+        assert_eq!(parsed.event, HookEvent::AfterFileEdit);
+        assert_eq!(parsed.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_codex_unknown_tool_name_is_not_mapped_to_write() {
+        // 未知のツール名を Write に寄せると file_path が必須化され、引数キーが
+        // path / filename 等の関数ツールに対して PreToolUse の誤 deny が起きる。
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = complete_codex_input(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"write_file","tool_input":{"path":"/tmp/a.txt"}}"#,
+        );
+
+        let parsed = adapter
+            .parse_input(&input)
+            .expect("未知のツール名は素通しすべき");
+        assert_eq!(parsed.tool_name, "write_file");
+        assert!(matches!(
+            parsed.tool_input,
+            crate::domain::ToolInput::Other(_)
+        ));
     }
 
     #[test]
@@ -4834,129 +4980,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_codex_missing_common_fields_fail_closed() {
-        let adapter = FormatAdapter::new(Format::Codex, 0);
-        let complete = complete_codex_input(
-            r#"{
-                "hook_event_name": "Stop",
-                "stop_hook_active": false,
-                "last_assistant_message": null
-            }"#,
-        );
-
-        for field in ["session_id", "transcript_path", "cwd", "model"] {
-            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
-            input.as_object_mut().unwrap().remove(field);
-            let err = adapter.parse_input(&input.to_string()).unwrap_err();
-            assert!(
-                err.to_string().contains(field),
-                "{field} 欠落時のエラーが不適切: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_codex_missing_event_fields_fail_closed() {
-        let adapter = FormatAdapter::new(Format::Codex, 0);
-        let cases = [
-            (
-                complete_codex_input(r#"{"hook_event_name":"SessionStart","source":"startup"}"#),
-                "source",
-            ),
-            (
-                complete_codex_input(r#"{"hook_event_name":"SessionEnd","reason":"other"}"#),
-                "reason",
-            ),
-            (
-                complete_codex_input(
-                    r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
-                ),
-                "tool_use_id",
-            ),
-            (
-                complete_codex_input(
-                    r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
-                ),
-                "tool_response",
-            ),
-            (
-                complete_codex_input(r#"{"hook_event_name":"UserPromptSubmit","prompt":"確認"}"#),
-                "prompt",
-            ),
-            (
-                complete_codex_input(r#"{"hook_event_name":"PreCompact","trigger":"manual"}"#),
-                "trigger",
-            ),
-            (
-                complete_codex_input(
-                    r#"{"hook_event_name":"SubagentStart","agent_id":"agent-1","agent_type":"Explore"}"#,
-                ),
-                "agent_id",
-            ),
-            (
-                complete_codex_input(
-                    r#"{
-                        "hook_event_name":"SubagentStop",
-                        "agent_id":"agent-1",
-                        "agent_type":"Explore",
-                        "agent_transcript_path":null,
-                        "stop_hook_active":false,
-                        "last_assistant_message":null
-                    }"#,
-                ),
-                "agent_transcript_path",
-            ),
-            (
-                complete_codex_input(
-                    r#"{
-                        "hook_event_name":"Stop",
-                        "stop_hook_active":false,
-                        "last_assistant_message":null
-                    }"#,
-                ),
-                "stop_hook_active",
-            ),
-        ];
-
-        for (complete, field) in cases {
-            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
-            input.as_object_mut().unwrap().remove(field);
-            let err = adapter.parse_input(&input.to_string()).unwrap_err();
-            assert!(
-                err.to_string().contains(field),
-                "{field} 欠落時のエラーが不適切: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_codex_invalid_required_field_types_fail_closed() {
-        let adapter = FormatAdapter::new(Format::Codex, 0);
-        let cases = [
-            ("transcript_path", serde_json::json!(42)),
-            ("stop_hook_active", serde_json::json!("false")),
-            ("turn_id", serde_json::json!(false)),
-        ];
-
-        for (field, invalid_value) in cases {
-            let complete = complete_codex_input(
-                r#"{
-                    "hook_event_name":"Stop",
-                    "stop_hook_active":false,
-                    "last_assistant_message":null
-                }"#,
-            );
-            let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
-            input[field] = invalid_value;
-            let err = adapter.parse_input(&input.to_string()).unwrap_err();
-            assert!(
-                err.to_string().contains(field),
-                "{field} 型不一致時のエラーが不適切: {err}"
-            );
-        }
-    }
-
     // === format_error の各フォーマット出力テスト ===
 
     #[test]
@@ -5470,7 +5493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_stop_parse_errors_use_followup_message() {
+    fn test_cursor_stop_parse_errors_allow_stop_without_followup() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let inputs = [
             r#"{"hook_event_name":"stop","loop_count":0}"#,
@@ -5480,15 +5503,14 @@ mod tests {
         for input in inputs {
             let error = adapter.parse_input(input).unwrap_err().to_string();
             let output = adapter.format_error_for_input(&error, input);
-            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-            assert!(
-                value["followup_message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("fail-closed")
-            );
-            assert!(value.get("permission").is_none());
+            // followup_message は「次のユーザーメッセージとして自動送信される」=
+            // 継続指示に相当する。壊れたペイロードで継続させても同じ失敗を繰り返すだけ
+            // なので、停止を許可する空オブジェクトを返す。
+            assert_eq!(output, "{}");
+            // Cursor は exit 0 のときだけ stdout の JSON を解釈するため、
+            // stop 系のフェイルクローズ経路も終了コード 0 に揃える。
+            assert_eq!(adapter.error_exit_code(Some(input)), 0);
         }
     }
 
@@ -5514,9 +5536,10 @@ mod tests {
         let error = adapter.parse_input(input).unwrap_err().to_string();
         assert!(error.contains("executionNum"));
 
+        // Stop のパースエラーで "continue" を返すと、同じ壊れたペイロードで Stop が
+        // 再発火する無限ループになる。停止を許可する空オブジェクトを返す。
         let output = adapter.format_error_for_input(&error, input);
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value["decision"], "continue");
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -5530,10 +5553,9 @@ mod tests {
         let error = adapter.parse_input(input).unwrap_err().to_string();
         assert!(error.contains("fullyIdle"));
 
+        // continue（再投入）ではなく停止許可を返す（無限ループ回避）。
         let output = adapter.format_error_for_input(&error, input);
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value["decision"], "continue");
-        assert!(value["reason"].as_str().unwrap().contains("fail-closed"));
+        assert_eq!(output, "{}");
     }
 
     #[test]
@@ -5604,5 +5626,289 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         // Antigravity は JSON を stdout に返すため stderr 書き込みは不要
         assert!(!adapter.format_uses_stderr_for_errors());
+    }
+
+    // === Grok CLI フォーマット ===
+
+    #[test]
+    fn test_grok_pre_tool_use_bash_maps_to_before_command() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{
+            "hookEventName":"PreToolUse",
+            "sessionId":"grok-session",
+            "cwd":"/tmp",
+            "workspaceRoot":"/tmp",
+            "toolName":"Bash",
+            "toolInput":{"command":"rm -rf /tmp/x","timeout":30}
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        assert_eq!(parsed.tool_name, "Bash");
+        assert_eq!(parsed.session_id.as_deref(), Some("grok-session"));
+        match parsed.tool_input {
+            crate::domain::ToolInput::Bash(bash) => {
+                assert_eq!(bash.command, "rm -rf /tmp/x");
+                assert_eq!(bash.timeout, Some(30));
+            }
+            other => panic!("Bash 入力になるべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_grok_pre_tool_use_detects_command_regardless_of_tool_name() {
+        // Grok は Claude のツール名を自前のツール名へ自動マッピングするが、
+        // マッピング後の名前は公開仕様に列挙されていない。ツール名の文字列一致に
+        // 頼ると未知の名前のシェル実行ツールが素通りしてブロックを回避できるため、
+        // toolInput の形（command を持つか）で判定する。
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{
+            "hookEventName":"PreToolUse",
+            "sessionId":"s",
+            "toolName":"grok_internal_shell_v2",
+            "toolInput":{"command":"rm -rf /"}
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        assert_eq!(parsed.tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_grok_post_tool_use_file_edit_maps_to_after_file_edit() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        for key in ["file_path", "filePath"] {
+            let input = format!(
+                r#"{{
+                    "hookEventName":"PostToolUse",
+                    "sessionId":"s",
+                    "toolName":"Edit",
+                    "toolInput":{{"{key}":"/tmp/a.py"}}
+                }}"#
+            );
+
+            let parsed = adapter.parse_input(&input).unwrap();
+            assert_eq!(parsed.event, HookEvent::AfterFileEdit, "key: {key}");
+            assert_eq!(parsed.tool_name, "Write");
+            match parsed.tool_input {
+                crate::domain::ToolInput::File(file) => assert_eq!(file.file_path, "/tmp/a.py"),
+                other => panic!("File 入力になるべき: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_grok_pre_tool_use_file_edit_is_passthrough() {
+        // 編集前は claw-hooks の責務外（保存後フックは PostToolUse で実行する）
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{
+            "hookEventName":"PreToolUse",
+            "sessionId":"s",
+            "toolName":"Edit",
+            "toolInput":{"file_path":"/tmp/a.py"}
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::Passthrough);
+    }
+
+    #[test]
+    fn test_grok_post_tool_use_command_is_passthrough() {
+        // 実行後のコマンドはブロックできないため保存後フックの対象にもならない
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{
+            "hookEventName":"PostToolUse",
+            "sessionId":"s",
+            "toolName":"Bash",
+            "toolInput":{"command":"ls"}
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::Passthrough);
+    }
+
+    #[test]
+    fn test_grok_out_of_scope_tool_is_passthrough() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{
+            "hookEventName":"PreToolUse",
+            "sessionId":"s",
+            "toolName":"Read",
+            "toolInput":{"path":"/tmp/a"}
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::Passthrough);
+        assert_eq!(parsed.tool_name, "Read");
+    }
+
+    #[test]
+    fn test_grok_stop_and_subagent_events() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+
+        let stop = adapter
+            .parse_input(
+                r#"{"hookEventName":"Stop","sessionId":"s","lastAssistantMessage":"done"}"#,
+            )
+            .unwrap();
+        assert_eq!(stop.event, HookEvent::Stop);
+        match stop.tool_input {
+            crate::domain::ToolInput::Stop(input) => {
+                assert_eq!(input.agent_message.as_deref(), Some("done"));
+                // Grok には stop_hook_active / loop_count 相当の入力が無い
+                assert!(!input.stop_hook_active);
+                assert_eq!(input.loop_count, None);
+                assert_eq!(input.session_kind, crate::domain::StopSessionKind::Primary);
+            }
+            other => panic!("Stop 入力になるべき: {other:?}"),
+        }
+
+        let start = adapter
+            .parse_input(r#"{"hookEventName":"SubagentStart","sessionId":"s","subagentType":"Explore","prompt":"look"}"#)
+            .unwrap();
+        assert_eq!(start.event, HookEvent::SubagentStart);
+        match start.tool_input {
+            crate::domain::ToolInput::Subagent(input) => {
+                assert_eq!(input.subagent_type.as_deref(), Some("Explore"));
+                assert_eq!(input.prompt.as_deref(), Some("look"));
+            }
+            other => panic!("Subagent 入力になるべき: {other:?}"),
+        }
+
+        let stopped = adapter
+            .parse_input(r#"{"hookEventName":"SubagentStop","sessionId":"s","agentType":"Plan","status":"completed","duration":1200}"#)
+            .unwrap();
+        assert_eq!(stopped.event, HookEvent::SubagentStop);
+        match stopped.tool_input {
+            crate::domain::ToolInput::Subagent(input) => {
+                assert_eq!(input.subagent_type.as_deref(), Some("Plan"));
+                assert_eq!(input.status.as_deref(), Some("completed"));
+                assert_eq!(input.duration, Some(1200));
+            }
+            other => panic!("Subagent 入力になるべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_grok_unsupported_events_are_passthrough() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        for event in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PostToolUseFailure",
+            "PermissionDenied",
+            "StopFailure",
+            "Notification",
+            "PreCompact",
+            "PostCompact",
+            "SomeFutureEvent",
+        ] {
+            let input = format!(r#"{{"hookEventName":"{event}","sessionId":"s"}}"#);
+            let parsed = adapter.parse_input(&input).unwrap();
+            assert_eq!(parsed.event, HookEvent::Passthrough, "event: {event}");
+            assert_eq!(parsed.tool_name, event);
+        }
+    }
+
+    #[test]
+    fn test_grok_missing_required_fields_fail_closed() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let cases = [
+            (r#"{"sessionId":"s"}"#, "hookEventName"),
+            (
+                r#"{"hookEventName":"PreToolUse","toolInput":{"command":"ls"}}"#,
+                "toolName",
+            ),
+            (
+                r#"{"hookEventName":"PreToolUse","toolName":"Bash"}"#,
+                "toolInput",
+            ),
+        ];
+
+        for (input, field) in cases {
+            let err = adapter.parse_input(input).unwrap_err().to_string();
+            assert!(err.contains(field), "{field} 欠落時のエラーが不適切: {err}");
+        }
+    }
+
+    #[test]
+    fn test_grok_output_and_exit_codes() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let allow = Decision::allow();
+        let block = Decision::Block {
+            message: "🚫 Use safe-rm instead".to_string(),
+        };
+
+        // PreToolUse: 許可は空オブジェクト + exit 0
+        assert_eq!(
+            adapter
+                .format_output(&allow, HookEvent::BeforeCommand)
+                .unwrap(),
+            "{}"
+        );
+        assert_eq!(adapter.exit_code(&allow, HookEvent::BeforeCommand), 0);
+
+        // PreToolUse: 拒否は deny JSON + exit 2。
+        // 公式仕様は「exit 0 は許可、exit 2 は拒否、それ以外はフェイルオープン」なので、
+        // 両方で拒否を表明してどちらの解釈でもブロックが成立するようにする。
+        let output = adapter
+            .format_output(&block, HookEvent::BeforeCommand)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["decision"], "deny");
+        assert!(value["reason"].as_str().unwrap().contains("safe-rm"));
+        assert_eq!(adapter.exit_code(&block, HookEvent::BeforeCommand), 2);
+
+        // PreToolUse 以外は stdout が無視される事後フックなので常に {} + exit 0
+        for event in [
+            HookEvent::AfterFileEdit,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::Passthrough,
+        ] {
+            assert_eq!(adapter.format_output(&block, event).unwrap(), "{}");
+            assert_eq!(adapter.exit_code(&block, event), 0, "event: {event:?}");
+        }
+    }
+
+    #[test]
+    fn test_grok_parse_error_is_fail_closed_with_deny_and_exit_two() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        // Grok は exit 2 だけが明示的な拒否で、それ以外の異常終了はフェイルオープン。
+        assert_eq!(adapter.error_exit_code(None), 2);
+        // stdout を読む方式なので stderr へは書かない
+        assert!(!adapter.format_uses_stderr_for_errors());
+
+        let output = adapter.format_error("broken input");
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["decision"], "deny");
+        assert!(value["reason"].as_str().unwrap().contains("fail-closed"));
+    }
+
+    #[test]
+    fn test_grok_stop_parse_error_allows_stop() {
+        // Grok の Stop はブロック不可の事後フック。拒否を返しても無視されるだけなので、
+        // 余計なフック失敗記録を残さず停止を許可する。
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        let input = r#"{"hookEventName":"Stop","sessionId":"s"}"#;
+
+        assert_eq!(adapter.format_error_for_input("broken", input), "{}");
+        assert_eq!(adapter.error_exit_code(Some(input)), 0);
+
+        // PreToolUse はフェイルクローズドを維持する
+        let pre = r#"{"hookEventName":"PreToolUse","toolName":"Bash"}"#;
+        assert!(
+            adapter
+                .format_error_for_input("broken", pre)
+                .contains("deny")
+        );
+        assert_eq!(adapter.error_exit_code(Some(pre)), 2);
+    }
+
+    #[test]
+    fn test_grok_format_label_and_emoji() {
+        assert_eq!(Format::Grok.label(), "Grok CLI");
+        assert_eq!(Format::Grok.emoji(), "🤖");
     }
 }

@@ -2763,4 +2763,182 @@ undocumented-public-module: Missing docstring in public module\n\
         assert!(result.contains("Found 2 warnings."));
         assert!(!result.contains("\n\n\n"), "no double blanks: {result}");
     }
+
+    // === 同一診断内のソースコンテキスト再掲の除去 ===
+
+    #[test]
+    fn test_dedup_biome_repeated_source_context_within_diagnostic() {
+        // biome は 1 件の診断を複数ブロックに分け、ブロックごとに同じソース抜粋を
+        // 丸ごと再掲する（`!` メッセージ → 抜粋、`i` 補足 → 同じ抜粋、
+        // `i Safe fix:` → 同じ抜粋 + 差分）。2 回目以降は情報量ゼロ。
+        let input = "sample.ts:3:1 lint/style/useConst FIXABLE \u{2501}\u{2501}\u{2501}\u{2501}\n\
+             \n\
+             \u{0021} This let declares a variable that is only assigned once.\n\
+             \n\
+             1 \u{2502} const a = 1;\n\
+             > 3 \u{2502} let c = 3;\n\
+             4 \u{2502} const d = 4;\n\
+             \n\
+             i 'c' is never reassigned.\n\
+             \n\
+             1 \u{2502} const a = 1;\n\
+             > 3 \u{2502} let c = 3;\n\
+             4 \u{2502} const d = 4;\n\
+             \n\
+             i Safe fix: Use const instead.\n\
+             \n\
+             1 \u{2502} const a = 1;\n\
+             3 \u{2502} - let c = 3;\n\
+             3 \u{2502} + const c = 3;\n\
+             4 \u{2502} const d = 4;\n";
+
+        let result = normalize_lint_output(input);
+
+        // 抜粋は 1 回だけ残る
+        assert_eq!(
+            result.matches("> 3 \u{2502} let c = 3;").count(),
+            1,
+            "context line should appear once: {result}"
+        );
+        assert_eq!(
+            result.matches("1 \u{2502} const a = 1;").count(),
+            1,
+            "context line should appear once: {result}"
+        );
+        // 説明文と差分行は保持する
+        assert!(result.contains("i 'c' is never reassigned."), "{result}");
+        assert!(
+            result.contains("i Safe fix: Use const instead."),
+            "{result}"
+        );
+        assert!(result.contains("3 \u{2502} - let c = 3;"), "{result}");
+        assert!(result.contains("3 \u{2502} + const c = 3;"), "{result}");
+    }
+
+    #[test]
+    fn test_dedup_ruff_repeated_context_in_fix_diff() {
+        // ruff は修正差分ブロックでコンテキスト行を再掲する
+        let input = "missing-whitespace-around-operator: [*] Missing whitespace around operator\n\
+             --> sample.py:6:6\n\
+             5 | def foo(a, b):\n\
+             6 |     x=1\n\
+             7 |     y = 2\n\
+             help: Add missing whitespace\n\
+             5 | def foo(a, b):\n\
+             - x=1\n\
+             6 + x = 1\n\
+             7 |     y = 2\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("5 | def foo(a, b):").count(),
+            1,
+            "context line should appear once: {result}"
+        );
+        assert_eq!(
+            result.matches("7 | y = 2").count(),
+            1,
+            "context line should appear once: {result}"
+        );
+        // 差分行は修正内容なので保持する
+        assert!(result.contains("- x=1"), "{result}");
+        assert!(result.contains("6 + x = 1"), "{result}");
+    }
+
+    #[test]
+    fn test_dedup_scope_resets_per_diagnostic() {
+        // 別の診断で同じソース行が出るのは「その診断の位置情報」として意味があるため、
+        // 全体で一意化してはいけない。
+        let input = "rule-a: first problem\n\
+             --> sample.py:1:1\n\
+             1 | import os\n\
+             2 | import sys\n\
+             \n\
+             rule-b: second problem\n\
+             --> sample.py:2:1\n\
+             1 | import os\n\
+             2 | import sys\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("1 | import os").count(),
+            2,
+            "different diagnostics keep their own context: {result}"
+        );
+    }
+
+    #[test]
+    fn test_dedup_does_not_touch_lines_without_line_numbers() {
+        // 行番号のない繰り返し（ソース行に見えないもの）は対象外
+        let input = "Found 2 errors.\n\
+             Found 2 errors.\n";
+
+        let result = normalize_lint_output(input);
+        assert_eq!(result.matches("Found 2 errors.").count(), 2, "{result}");
+    }
+
+    #[test]
+    fn test_is_source_context_line_classification() {
+        // コンテキスト行として扱うもの
+        assert!(is_source_context_line("3 \u{2502} let c = 3;"));
+        assert!(is_source_context_line("> 3 \u{2502} let c = 3;"));
+        assert!(is_source_context_line("12 | x = 1"));
+        assert!(is_source_context_line("3 \u{2502}"), "empty excerpt line");
+
+        // 差分行は修正内容なので対象外
+        assert!(!is_source_context_line("3 \u{2502} - let c = 3;"));
+        assert!(!is_source_context_line("3 \u{2502} + const c = 3;"));
+        assert!(!is_source_context_line("- import os"));
+        assert!(!is_source_context_line("5 + def foo():"));
+
+        // 行番号や区切りが無いものは対象外
+        assert!(!is_source_context_line("help: Add missing whitespace"));
+        assert!(!is_source_context_line("-> sample.py:1:1"));
+        assert!(!is_source_context_line("Found 2 errors."));
+        assert!(!is_source_context_line(""));
+    }
+
+    #[test]
+    fn test_source_context_line_handles_multibyte_without_panic() {
+        // 行番号の直後をバイト添字でスライスするため、マルチバイト文字を含む
+        // ソース行でパニックしないことを保証する。
+        let cases = [
+            "3 \u{2502} let msg = \"日本語コメント\";",
+            "> 12 \u{2502} 絵文字🐱を含む行",
+            "1 | \u{00e9}\u{00e8}\u{00ea}",
+            "日本語だけの行",
+            "3\u{2502}区切り前に空白なし",
+            "\u{2502} 行番号なし",
+        ];
+        for line in cases {
+            // パニックしないことが検証対象（真偽値そのものは問わない）
+            let _ = is_source_context_line(line);
+            let _ = is_diagnostic_header_line(line);
+        }
+
+        // マルチバイトを含む抜粋も重複除去の対象になる
+        let input = "-> a.py:1:1\n\
+             3 \u{2502} let msg = \"日本語\";\n\
+             help: fix it\n\
+             3 \u{2502} let msg = \"日本語\";\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(
+            result.matches("let msg = \"日本語\";").count(),
+            1,
+            "multibyte context line should dedup: {result}"
+        );
+    }
+
+    #[test]
+    fn test_is_diagnostic_header_line_classification() {
+        assert!(is_diagnostic_header_line(
+            "sample.ts:3:1 lint/style/useConst FIXABLE \u{2501}"
+        ));
+        assert!(is_diagnostic_header_line("sample.ts format \u{2501}"));
+        assert!(is_diagnostic_header_line("-> sample.py:5:9"));
+        assert!(!is_diagnostic_header_line("3 \u{2502} let c = 3;"));
+        assert!(!is_diagnostic_header_line(""));
+    }
 }

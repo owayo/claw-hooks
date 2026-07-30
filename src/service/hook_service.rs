@@ -20,6 +20,18 @@ use crate::service::log_sanitizer::{summarize_hook_input, summarize_parsed_hook_
 /// 4 MiB は通常の hook ペイロードを十分カバーしつつ、メモリ圧迫を防ぐ目安。
 const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 
+/// stdin を上限付きで読み取る。
+///
+/// 上限超過の判定を呼び出し側でできるよう、`MAX_INPUT_BYTES + 1` バイトまで読む
+/// （読み取れたバイト数が上限を超えていれば過大入力）。
+fn read_stdin_bounded(stdin: io::Stdin) -> Result<Vec<u8>> {
+    let stdin_locked = stdin.lock();
+    let mut raw = Vec::new();
+    let mut limited = stdin_locked.take(MAX_INPUT_BYTES + 1);
+    limited.read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
 /// フックイベント処理サービス。
 pub struct HookService {
     config: Config,
@@ -30,6 +42,89 @@ pub struct HookService {
 }
 
 impl HookService {
+    /// 設定の読み込み・検証に失敗したときのフェイルクローズ応答を出力する。
+    ///
+    /// `main` が設定エラーを `?` で伝播すると exit 1 + stdout 空で終了するが、
+    /// Codex / Antigravity は「フック失敗＝判定を無視して処理継続」と解釈するため、
+    /// 設定ファイルの TOML タイポ 1 つで危険コマンドのブロックが全て無効化される
+    /// （フェイルオープン）。`--format` は設定を読まずに分かるので、
+    /// エージェント別の適切な拒否形式は設定なしでも組み立てられる。
+    ///
+    /// イベント名の判別のため stdin を読む。読めない場合は汎用形式へフォールバックする。
+    /// Stop 系は `format_error_for_input` 側で停止許可（`{}`）に倒れるため、
+    /// 設定エラーで継続ループに陥ることはない。
+    ///
+    /// 終了コードを返す（`main` 側でログガードを drop してから終了するため）。
+    pub fn emit_config_error(format: Format, trace: bool, error: &anyhow::Error) -> i32 {
+        // 設定内容そのもの（パスやフィルター定義）はエージェントへ返す本文に含めない。
+        // 診断の詳細は stderr に出し、ユーザーが `claw-hooks check` で確認できるようにする。
+        eprintln!("claw-hooks configuration error: {:#}", error);
+
+        let adapter = FormatAdapter::new(format, 0);
+        let message = "claw-hooks configuration is invalid. Run `claw-hooks check`.";
+
+        // イベント別の拒否形式を選ぶため、生入力からイベント名だけを読み取る。
+        let raw_input = read_stdin_bounded(io::stdin())
+            .ok()
+            .filter(|raw| !raw.is_empty() && raw.len() as u64 <= MAX_INPUT_BYTES)
+            .map(|raw| String::from_utf8_lossy(&raw).into_owned());
+
+        if trace {
+            eprintln!("🔍 [TRACE] Config error fail-closed: {:#}", error);
+        }
+
+        let output = match raw_input.as_deref() {
+            Some(input) => adapter.format_error_for_input(message, input),
+            None => adapter.format_error(message),
+        };
+
+        let write_result = if adapter.format_uses_stderr_for_errors() {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            writeln!(stderr, "{}", output).and_then(|()| stderr.flush())
+        } else {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            writeln!(stdout, "{}", output).and_then(|()| stdout.flush())
+        };
+        if let Err(e) = write_result {
+            // 書き込み自体が失敗した場合は終了コードだけでブロックを表明する。
+            eprintln!("claw-hooks failed to write fail-closed response: {}", e);
+        }
+
+        adapter.error_exit_code(raw_input.as_deref())
+    }
+
+    /// `run` の内部エラー（出力の書き込み失敗など）に対するフェイルクローズ応答を出力する。
+    ///
+    /// `emit_config_error` と同じ理由でエラーを `?` で伝播させられないが、
+    /// この時点では stdin を読み切っているためイベント名を判別できない。
+    /// そのため各フォーマットの汎用拒否形式で返す。
+    pub fn emit_runtime_error(format: Format, trace: bool, error: &anyhow::Error) -> i32 {
+        eprintln!("claw-hooks internal error: {:#}", error);
+        if trace {
+            eprintln!("🔍 [TRACE] Runtime error fail-closed: {:#}", error);
+        }
+
+        let adapter = FormatAdapter::new(format, 0);
+        let output = adapter.format_error("claw-hooks encountered an internal error");
+
+        let write_result = if adapter.format_uses_stderr_for_errors() {
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            writeln!(stderr, "{}", output).and_then(|()| stderr.flush())
+        } else {
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            writeln!(stdout, "{}", output).and_then(|()| stdout.flush())
+        };
+        if let Err(e) = write_result {
+            eprintln!("claw-hooks failed to write fail-closed response: {}", e);
+        }
+
+        adapter.error_exit_code(None)
+    }
+
     /// 指定フォーマットで新しい HookService を作成する。
     pub fn new(config: Config, format: Format, trace: bool) -> Self {
         let filter_chain = FilterChain::new(&config);
@@ -65,10 +160,20 @@ impl HookService {
         // （危険コマンドのブロックが効かなくなる）。そのため一旦バイトで読み、
         // 損失あり変換でフェイルクローズ経路（パース失敗→ブロック、または
         // 不正バイトを置換文字に変換した上での危険コマンド検出）に確実に載せる。
-        let stdin_locked = stdin.lock();
-        let mut raw = Vec::new();
-        let mut limited = stdin_locked.take(MAX_INPUT_BYTES + 1);
-        limited.read_to_end(&mut raw)?;
+        // stdin の I/O 失敗も `?` で伝播させない。伝播させると exit 1 + stdout 空になり、
+        // Codex / Antigravity では「フック失敗＝判定を無視」でフェイルオープンする。
+        let raw = match read_stdin_bounded(stdin) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let log_message = format!("Failed to read stdin: {}", e);
+                return self.fail_closed(
+                    &mut stdout,
+                    &log_message,
+                    "Failed to read hook input",
+                    None,
+                );
+            }
+        };
         if raw.len() as u64 > MAX_INPUT_BYTES {
             // 入力過大でフェイルクローズ。ログには実バイト数と上限を残しつつ、
             // エージェントへ返す本文は短い定型文（"Input too large"）にする。

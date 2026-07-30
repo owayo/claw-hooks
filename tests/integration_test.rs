@@ -83,11 +83,9 @@ fn test_allow_safe_command() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate allow: {}",
-        stdout
-    );
+    // PreToolUse の非ブロック時は判定を返さず {} にする（Claude 本来の権限フローに委ねる）。
+    // permissionDecision "allow" は権限プロンプトをスキップしてしまう。
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -262,10 +260,7 @@ fn test_allow_file_read_operation() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(exit_code, 0, "Read operation should be allowed");
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate allow"
-    );
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -275,10 +270,7 @@ fn test_allow_file_write_operation() {
 
     // extension_hooks 未設定なら書き込みは許可される
     assert_eq!(exit_code, 0, "Write operation should be allowed");
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate allow"
-    );
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -287,10 +279,7 @@ fn test_non_bash_tool_allowed() {
     let (stdout, _stderr, exit_code) = run_hook(input);
 
     assert_eq!(exit_code, 0, "Non-bash tool should be allowed");
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate allow"
-    );
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -465,9 +454,10 @@ fn test_cursor_format_allow_safe_command() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "Safe command should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor output should indicate allow (abstain): {}",
         stdout
     );
 }
@@ -477,7 +467,9 @@ fn test_cursor_format_block_rm_command() {
     let input = r#"{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/test","cwd":"/path/to/project"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    assert_eq!(exit_code, 2, "rm command should be blocked");
+    // Cursor は exit 0 のときだけ stdout の JSON を使う。deny は JSON 契約で伝える
+    // （exit 2 だと user_message の代替案がエージェントに届かない）。
+    assert_eq!(exit_code, 0, "rm command should be blocked via deny JSON");
     assert!(
         stdout.contains(r#""permission":"deny""#),
         "Cursor output should indicate deny: {}",
@@ -491,7 +483,7 @@ fn test_cursor_format_block_kill_command() {
     let input = r#"{"hook_event_name":"beforeShellExecution","command":"kill -9 1234","cwd":"/path/to/project"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    assert_eq!(exit_code, 2, "kill command should be blocked");
+    assert_eq!(exit_code, 0, "kill command should be blocked via deny JSON");
     assert!(
         stdout.contains(r#""permission":"deny""#),
         "Cursor output should indicate deny: {}",
@@ -505,11 +497,14 @@ fn test_cursor_format_after_file_edit() {
     let input = r#"{"hook_event_name":"afterFileEdit","file_path":"/path/to/file.rs"}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    // afterFileEdit は常に許可される PostToolUse 相当として扱う
+    // afterFileEdit は常に許可される PostToolUse 相当として扱う。
+    // claw-hooks は deny-only ポリシーなので、許可時は明示 allow ではなく {} を返し、
+    // Cursor 本来の権限設定と他フックの判定を上書きしない。
     assert_eq!(exit_code, 0, "afterFileEdit should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor output should abstain: {}",
         stdout
     );
 }
@@ -521,9 +516,10 @@ fn test_cursor_format_after_file_edit_camel_case() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "afterFileEdit should be allowed");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "Cursor output should indicate allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "Cursor output should indicate allow (abstain): {}",
         stdout
     );
 }
@@ -536,9 +532,10 @@ fn test_cursor_format_unsupported_event_passthrough() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "未対応イベントは allow として処理されるべき");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "未対応イベントは allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "未対応イベントは allow (abstain): {}",
         stdout
     );
 }
@@ -549,7 +546,10 @@ fn test_cursor_format_pre_tool_use_shell_blocks_rm() {
     let input = r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"rm -rf /"}}"#;
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
-    assert_eq!(exit_code, 2, "preToolUse Shell の rm はブロックされるべき");
+    assert_eq!(
+        exit_code, 0,
+        "preToolUse Shell の rm は deny JSON でブロックされるべき"
+    );
     assert!(
         stdout.contains(r#""permission":"deny""#),
         "preToolUse Shell は deny: {}",
@@ -565,9 +565,10 @@ fn test_cursor_format_pre_tool_use_non_shell_passthrough() {
     let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
 
     assert_eq!(exit_code, 0, "preToolUse Read はパススルーされるべき");
-    assert!(
-        stdout.contains(r#""permission":"allow""#),
-        "preToolUse Read は allow: {}",
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "preToolUse Read は allow (abstain): {}",
         stdout
     );
 }
@@ -894,11 +895,7 @@ fn test_custom_filter_allows_yarn_in_quotes() {
         exit_code, 0,
         "Command with yarn in quotes should be allowed"
     );
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate approve: {}",
-        stdout
-    );
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -1025,11 +1022,7 @@ fn test_custom_filter_allows_yarn_string_in_pipe() {
     let (stdout, _stderr, exit_code) = run_hook_with_config(input, &config_path);
 
     assert_eq!(exit_code, 0, "yarn as string argument should be allowed");
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
-        "Output should indicate approve: {}",
-        stdout
-    );
+    assert_eq!(stdout.trim(), "{}", "Output should abstain: {}", stdout);
 }
 
 #[test]
@@ -1225,21 +1218,35 @@ fn test_codex_missing_tool_input_is_fail_closed() {
 }
 
 #[test]
-fn test_codex_missing_common_field_is_fail_closed() {
+fn test_codex_missing_used_field_is_fail_closed() {
+    // 判定に使わない共通メタデータ（model 等）の欠落は許容する。
+    // 一方、危険コマンド検出の入力そのもの（tool_input）が欠けていれば fail-closed。
     let complete = complete_codex_input(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}"#,
     );
-    let mut input: serde_json::Value = serde_json::from_str(&complete).unwrap();
-    input.as_object_mut().unwrap().remove("model");
-    let (stdout, _stderr, exit_code) = run_hook_with_format(&input.to_string(), "codex");
+
+    let mut tolerated: serde_json::Value = serde_json::from_str(&complete).unwrap();
+    tolerated.as_object_mut().unwrap().remove("model");
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&tolerated.to_string(), "codex");
+    assert_eq!(exit_code, 0, "model 欠落は許容されるべき: {}", stdout);
+    assert_eq!(
+        stdout.trim(),
+        "{}",
+        "安全なコマンドは判定なしで素通しされるべき: {}",
+        stdout
+    );
+
+    let mut missing: serde_json::Value = serde_json::from_str(&complete).unwrap();
+    missing.as_object_mut().unwrap().remove("tool_input");
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&missing.to_string(), "codex");
 
     assert_eq!(
         exit_code, 0,
-        "Codex missing common field should exit 0 with block in JSON"
+        "Codex fail-closed should exit 0 with deny in JSON"
     );
     assert!(
-        stdout.contains("Missing model field"),
-        "Output should mention the missing common field: {}",
+        stdout.contains("Missing tool_input field"),
+        "Output should mention the missing field: {}",
         stdout
     );
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
@@ -1361,8 +1368,9 @@ fn test_allow_wrapper_echo_with_dangerous_string_arg() {
         exit_code, 0,
         "sudo echo with quoted string should be allowed"
     );
-    assert!(
-        stdout.contains(r#""permissionDecision":"allow""#),
+    assert_eq!(
+        stdout.trim(),
+        "{}",
         "quoted argument must not be treated as a command: {stdout}"
     );
 }
@@ -1821,4 +1829,191 @@ fn test_codex_user_prompt_submit_passthrough() {
         serde_json::json!({}),
         "Codex passthrough should return empty JSON"
     );
+}
+
+// === Grok CLI フォーマット ===
+
+#[test]
+fn test_grok_format_block_rm_command() {
+    let input = r#"{"hookEventName":"PreToolUse","sessionId":"s","cwd":"/tmp","workspaceRoot":"/tmp","toolName":"Bash","toolInput":{"command":"rm -rf /tmp/test"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "grok");
+
+    // Grok は「exit 0 = 許可、exit 2 = 拒否、それ以外はフェイルオープン」。
+    // deny JSON と exit 2 の両方で拒否を表明し、どちらの解釈でもブロックを成立させる。
+    assert_eq!(exit_code, 2, "rm command should be denied: {}", stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "deny");
+    // 本文は設定（rm_block_message）でカスタマイズ可能なため、
+    // ここでは理由が空でないことだけを検証する。
+    assert!(
+        !parsed["reason"].as_str().unwrap().trim().is_empty(),
+        "reason should explain the block: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_grok_format_allow_safe_command() {
+    let input = r#"{"hookEventName":"PreToolUse","sessionId":"s","toolName":"Bash","toolInput":{"command":"git status"}}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "grok");
+
+    assert_eq!(exit_code, 0, "safe command should be allowed");
+    assert_eq!(stdout.trim(), "{}", "allow should be an empty object");
+}
+
+#[test]
+fn test_grok_format_unsupported_event_passthrough() {
+    let input = r#"{"hookEventName":"SessionStart","sessionId":"s"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "grok");
+
+    assert_eq!(exit_code, 0, "out-of-scope event should pass through");
+    assert_eq!(stdout.trim(), "{}");
+}
+
+#[test]
+fn test_grok_empty_input_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("", "grok");
+
+    assert_eq!(exit_code, 2, "empty input should be denied");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "deny");
+}
+
+#[test]
+fn test_grok_invalid_json_is_fail_closed() {
+    let (stdout, _stderr, exit_code) = run_hook_with_format("{not json", "grok");
+
+    assert_eq!(exit_code, 2, "malformed input should be denied");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "deny");
+    assert!(parsed["reason"].as_str().unwrap().contains("fail-closed"));
+}
+
+#[test]
+fn test_grok_stop_event_allows_stop() {
+    let input = r#"{"hookEventName":"Stop","sessionId":"s"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "grok");
+
+    assert_eq!(exit_code, 0, "Stop is a post-hook and cannot be blocked");
+    assert_eq!(stdout.trim(), "{}");
+}
+
+// === 設定エラー時のフェイルクローズ ===
+
+/// 壊れた TOML の設定ファイルを作成する。
+fn create_broken_config() -> (std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let path = dir.path().join("broken.toml");
+    std::fs::write(&path, "this is not = valid toml [[[\n").expect("Failed to write config");
+    (path, dir)
+}
+
+#[test]
+fn test_config_error_still_blocks_dangerous_command() {
+    // 設定エラーを exit 1 + stdout 空で終了させると、Codex / Antigravity では
+    // 「フック失敗＝判定を無視」と解釈され、TOML のタイポ 1 つで危険コマンドの
+    // ブロックが全て無効化される（フェイルオープン）。全フォーマットでブロックを維持する。
+    let (config_path, _dir) = create_broken_config();
+    let cases = [
+        (
+            "claude",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#,
+        ),
+        (
+            "codex",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#,
+        ),
+        (
+            "cursor",
+            r#"{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/x"}"#,
+        ),
+        (
+            "windsurf",
+            r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"rm -rf /tmp/x"}}"#,
+        ),
+        (
+            "agy",
+            r#"{"stepIdx":1,"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/x"}}}"#,
+        ),
+        (
+            "grok",
+            r#"{"hookEventName":"PreToolUse","toolName":"Bash","toolInput":{"command":"rm -rf /tmp/x"}}"#,
+        ),
+    ];
+
+    for (format, input) in cases {
+        let (stdout, stderr, exit_code) =
+            run_hook_with_config_and_format(input, format, &config_path);
+
+        // 設定エラーの詳細は stderr に出し、エージェントへ返す本文には含めない
+        assert!(
+            stderr.contains("configuration error"),
+            "{format}: config error should be reported on stderr: {stderr}"
+        );
+
+        let blocked = match format {
+            // exit 2 + stderr 本文でブロックを表現するフォーマット
+            "claude" | "windsurf" => exit_code == 2,
+            // stdout の JSON でブロックを表現するフォーマット
+            _ => {
+                let json: serde_json::Value = serde_json::from_str(stdout.trim())
+                    .unwrap_or_else(|e| panic!("{format}: stdout is not JSON ({e}): {stdout}"));
+                json["decision"] == "deny"
+                    || json["permission"] == "deny"
+                    || json["hookSpecificOutput"]["permissionDecision"] == "deny"
+            }
+        };
+        assert!(
+            blocked,
+            "{format}: dangerous command must stay blocked on config error \
+             (stdout={stdout}, exit={exit_code})"
+        );
+    }
+}
+
+#[test]
+fn test_config_error_does_not_loop_stop_event() {
+    // Stop 系で「ブロック」は多くのエージェントで継続指示を意味するため、
+    // 設定エラーで返すと Stop 再発火 → 同じ失敗 → … の自己維持ループになる。
+    // ループ防止層はパース成功後にしか働かないので、停止を許可する。
+    let (config_path, _dir) = create_broken_config();
+    let cases = [
+        (
+            "claude",
+            r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+        ),
+        (
+            "codex",
+            r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+        ),
+        (
+            "cursor",
+            r#"{"hook_event_name":"stop","status":"completed","loop_count":0}"#,
+        ),
+        (
+            "windsurf",
+            r#"{"agent_action_name":"post_cascade_response","tool_info":{"response":"done"}}"#,
+        ),
+        (
+            "agy",
+            r#"{"executionNum":1,"terminationReason":"model_stop","fullyIdle":true}"#,
+        ),
+        ("grok", r#"{"hookEventName":"Stop","sessionId":"s"}"#),
+    ];
+
+    for (format, input) in cases {
+        let (stdout, _stderr, exit_code) =
+            run_hook_with_config_and_format(input, format, &config_path);
+
+        assert_eq!(
+            exit_code, 0,
+            "{format}: Stop must not be blocked on config error (stdout={stdout})"
+        );
+        // stdout は空（Claude/Windsurf は stderr 経路）か空オブジェクト
+        let body = stdout.trim();
+        assert!(
+            body.is_empty() || body == "{}",
+            "{format}: Stop response must not carry a continue directive: {stdout}"
+        );
+    }
 }

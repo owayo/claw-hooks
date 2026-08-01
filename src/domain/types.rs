@@ -224,15 +224,15 @@ pub struct HookOutput {
     pub reason: Option<String>,
 
     /// Claude Code 用のフック固有出力
-    /// PreToolUse: permissionDecision / permissionDecisionReason
-    /// PostToolUse: additionalContext
+    /// PreToolUse の権限判定: permissionDecision / permissionDecisionReason
+    /// PostToolUse の追加コンテキスト: additionalContext
     #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 
 /// Claude Code 用のフック固有出力。
-/// PreToolUse: permissionDecision / permissionDecisionReason
-/// PostToolUse: additionalContext
+/// PreToolUse の権限判定: permissionDecision / permissionDecisionReason
+/// PostToolUse の追加コンテキスト: additionalContext
 #[derive(Debug, Clone, Serialize)]
 pub struct HookSpecificOutput {
     /// フックイベント名
@@ -309,7 +309,7 @@ impl Decision {
                     // （matcher "Bash" で導入するだけで Bash の承認プロンプトが
                     // 全て消えてしまうため）。
                     HookEvent::BeforeCommand => None,
-                    // PostToolUse: hookSpecificOutput.additionalContext
+                    // PostToolUse では hookSpecificOutput.additionalContext を使用する。
                     HookEvent::AfterFileEdit => additional_context.map(|ctx| HookSpecificOutput {
                         hook_event_name: "PostToolUse".to_string(),
                         additional_context: Some(ctx),
@@ -349,8 +349,8 @@ impl Decision {
 
     /// この判定の終了コードを取得する。
     ///
-    /// - Allow: 0
-    /// - Block: 2
+    /// - 許可: 0
+    /// - ブロック: 2
     pub fn exit_code(&self) -> i32 {
         match self {
             Decision::Allow { .. } => 0,

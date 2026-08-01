@@ -696,7 +696,7 @@ commands = ["git-sc --all --yes --quiet"]
 
 **Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf and Grok CLI stop hooks, failures are always best-effort — the underlying hook is asynchronous (Windsurf) or its stdout is ignored (Grok).
 
-**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries both non-blank `agent_id` and `agent_type` fields. A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity) are also treated as the main session.
+**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries both non-blank `agent_id` and `agent_type` fields. A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity, Grok CLI) are also treated as the main session.
 
 ```toml
 # Runs only when the main session stops (default — no field needed)
@@ -783,7 +783,7 @@ echo "install"; yarn install
 
 # Allowed: "yarn" is inside quotes (not a command), pnpm is OK
 echo "not yarn install"; pnpm install
-# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}
+# → {}
 ```
 
 Commands inside quotes are ignored (they're arguments, not commands).
@@ -814,7 +814,9 @@ Uses the official Claude Code hooks specification:
 }
 ```
 
-Supported hook events: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`
+Handled hook events: `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop`. Known lifecycle events outside claw-hooks' scope — including `Notification`, `PermissionRequest`, `UserPromptSubmit`, `SessionStart`, and `SessionEnd` — pass through without a decision.
+
+`stop_hook_active` is required on Claude `Stop`. If it is absent or mistyped, claw-hooks treats the payload as malformed, does not run stop hooks, and allows the session to terminate (`{}` + exit `0`). Defaulting an unreadable guard to `false` would run the hooks and could make a failing reported hook re-trigger `Stop` forever.
 
 ### Cursor (`--format cursor`)
 
@@ -827,11 +829,13 @@ Uses the `hook_event_name` field for event detection:
 | `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
 | `stop` | `status` | Stop |
 
-Unsupported Cursor events, including non-shell `preToolUse` tools, are passed through as allow.
+Unsupported Cursor events, including non-shell `preToolUse` tools, pass through as an empty object (`{}`) rather than `{"permission":"allow"}`. Cursor merges hook responses from several sources and a higher-priority `allow` can override another hook's `deny`, so claw-hooks never votes to approve an event it did not inspect (`beforeReadFile`, `beforeMCPExecution`, `beforeTabFileRead`, `sessionStart`, `postToolUse`, …). Allowed commands return `{}` for the same reason.
+
+Blocks are returned as `{"permission":"deny", …}` on stdout with exit code `0`. Cursor — like Claude Code — only consumes the stdout JSON when the hook exits `0`, so exiting `2` would discard the `user_message` that carries the "use safe-rm instead" guidance.
 
 For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
 
-Malformed `stop` payloads fail closed with the event's native `followup_message` shape; claw-hooks does not emit the command-hook-only `permission` field for this path.
+Malformed `stop` payloads let the stop through (`{}` + exit `0`) instead of failing closed: a `followup_message` is auto-submitted as the next user message, so returning one for a payload claw-hooks could not parse would re-trigger the same failure forever. See [Fail-Closed Behavior](#fail-closed-behavior).
 
 ### Windsurf (`--format windsurf`)
 
@@ -863,22 +867,24 @@ camelCase schema. A representative PreToolUse payload:
 }
 ```
 
-Official Antigravity payloads do not include an event-name field. claw-hooks infers the event from its official event-specific fields: `toolCall` identifies PreToolUse, the Stop fields identify Stop, `stepIdx` plus `error` without `toolCall` identifies PostToolUse, and invocation fields identify Pre/PostInvocation. Legacy non-blank `hook_event_name` / `event` fields remain accepted for compatibility. `PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native deny/continue response.
+Official Antigravity payloads do not include an event-name field. claw-hooks infers the event from its official event-specific fields: `toolCall` identifies PreToolUse, the Stop fields identify Stop, `stepIdx` **without** `toolCall` identifies PostToolUse, and invocation fields identify Pre/PostInvocation. `error` is deliberately not part of that test — the spec marks it Optional ("Empty if successful"), so requiring it would break event inference for every *successful* tool call and answer an unblockable post-hook with a spurious deny. Legacy non-blank `hook_event_name` / `event` fields remain accepted for compatibility. `PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`, and an empty `terminationReason` is accepted. `toolCall.args` is required only for `run_command`, because the spec documents zero-argument tools and allows `matcher: ""` / `"*"`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native deny/continue response.
 
 | Inferred event shape | toolCall.name | Internal Mapping |
 |---|---|---|
 | `toolCall` + `stepIdx` (PreToolUse) | `run_command` | BeforeCommand (`toolCall.args.CommandLine` → Bash) |
 | `toolCall` + `stepIdx` (PreToolUse) | other (`write_to_file`, `replace_file_content`, …) | pass-through allow |
-| `stepIdx` + `error`, or invocation fields | n/a | PostToolUse / invocation pass-through allow (out of claw-hooks scope) |
+| `stepIdx` without `toolCall`, or invocation fields | n/a | PostToolUse / invocation pass-through allow (out of claw-hooks scope) |
 | `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
 
-> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload only has `stepIdx` and `error` (no `toolCall`), and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
+> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload carries only `stepIdx` (plus `error` when the tool failed) and no `toolCall`, and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
 
 ### Codex CLI (`--format codex`)
 
 Standard `hook_event_name` + `tool_name` + `tool_input` schema. `apply_patch`'s `tool_input.command` is parsed for the `*** Add/Update/Move to File:` headers to drive extension hooks (delete-only patches are skipped).
 
-Every Codex event is validated against the official required metadata before it is mapped: `session_id`, `cwd`, and `model` must be non-empty strings, while `transcript_path` must be present as a string or `null`. Event-specific fields such as `turn_id`, `permission_mode`, tool identifiers/payloads, and Stop state are also type-checked. Missing or invalid fields fail closed with the event's native deny/block response; known out-of-scope events pass through only after this validation succeeds.
+Validation is limited to the fields claw-hooks actually reads: the event name, `tool_name` / `tool_input` (plus `tool_input.command` for `Bash` and the patch body for `apply_patch`), and `stop_hook_active` on `Stop`. The official docs present `session_id`, `cwd`, `model`, `transcript_path`, `turn_id`, and `permission_mode` as the shared fields you will usually see rather than as a strict schema — their own `SessionEnd` example payload omits `model` — so requiring them meant a single absent field could fail closed on every hook call. Out-of-scope pass-through events are not validated at all.
+
+`PostToolUse` for non-file tools (for example `Bash`) is also passed through without strict validation, because a Codex `PostToolUse` block *replaces the real tool output* with the hook message: failing closed there would hide the command's own output from the model while gaining nothing, since only file paths matter for post-edit hooks. Fields that claw-hooks does read still fail closed with the event's native deny/block response when they are missing or mistyped.
 
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
@@ -890,6 +896,34 @@ Every Codex event is validated against the official required metadata before it 
 
 Codex returns all decisions — allow, block, and fail-closed — with exit code `0`; non-zero is treated as hook infrastructure failure. See [Input/Output Reference](#inputoutput-reference) for the per-event output JSON.
 
+### Grok CLI (`--format grok`)
+
+camelCase schema with an explicit `hookEventName` field:
+
+```jsonc
+{
+  "hookEventName": "PreToolUse",
+  "sessionId": "…",
+  "cwd": "/path/to/project",
+  "workspaceRoot": "/path/to/project",
+  "toolName": "Bash",
+  "toolInput": { "command": "rm -rf /tmp/test" }
+}
+```
+
+| hookEventName | `toolInput` shape | Internal Mapping |
+|---|---|---|
+| `PreToolUse` | `command` | BeforeCommand (the only event Grok lets a hook block) |
+| `PreToolUse` | file path, or neither | pass-through allow |
+| `PostToolUse` | `file_path` / `filePath` | AfterFileEdit (extension hooks) |
+| `PostToolUse` | `command`, or neither | pass-through allow |
+| `Stop` | n/a | Stop |
+| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PostToolUseFailure` / `PermissionDenied` / `StopFailure` / `Notification` / `PreCompact` / `PostCompact` | n/a | pass-through allow |
+
+claw-hooks dispatches on the **shape of `toolInput`, not on `toolName`**. Grok states that it maps Claude tool names such as `Bash` and `Edit` onto its own, but the mapped names are not part of the published spec, so matching by name would let an unanticipated shell tool slip past the command filter. A payload carrying `command` therefore goes to the command filters and one carrying `file_path` / `filePath` goes to the extension hooks; anything else passes through. `toolName` and `toolInput` are still required on tool events — a payload missing either fails closed. Legacy snake_case keys (`hook_event_name`, `session_id`, `tool_name`, `tool_input`) are accepted as well, because Grok also reads Claude Code and Cursor hook files.
+
+Grok's contract is fail-open: exit `0` allows, exit `2` denies, and every other outcome — timeout, crash, malformed stdout — records a failure but lets the tool call proceed. claw-hooks therefore blocks with the deny JSON **and** exit code `2` so the decision holds under either interpretation, and never exits `1` on a fail-closed path. Allowed commands return `{}` rather than an `allow` decision, since `deny` is the only documented `decision` value.
+
 ### Event Mapping Summary
 
 ```mermaid
@@ -900,6 +934,7 @@ graph LR
         WS1[Windsurf: pre_run_command]
         AG1[Antigravity: PreToolUse + run_command]
         CX1[Codex: PreToolUse + Bash]
+        GR1[Grok: PreToolUse + command]
     end
     CH1[🛡️ Validate & suggest alternatives]
     CC1 --> CH1
@@ -907,18 +942,21 @@ graph LR
     WS1 --> CH1
     AG1 --> CH1
     CX1 --> CH1
+    GR1 --> CH1
 
     subgraph After File Save
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
         CX2[Codex: PostToolUse + apply_patch]
+        GR2[Grok: PostToolUse + file path]
     end
     CH2[🔧 Run commands by extension]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
     CX2 --> CH2
+    GR2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]
@@ -926,6 +964,7 @@ graph LR
         WS3[Windsurf: post_cascade_response]
         AG3[Antigravity: Stop]
         CX3[Codex: Stop]
+        GR3[Grok: Stop]
     end
     CH3[⏹️ Lint / notifications / cleanup]
     CC3 --> CH3
@@ -933,9 +972,10 @@ graph LR
     WS3 --> CH3
     AG3 --> CH3
     CX3 --> CH3
+    GR3 --> CH3
 ```
 
-Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events. Antigravity CLI is intentionally absent from the "After File Save" group because its `PostToolUse` payload does not include the original `toolCall` — use Stop hooks for project-wide lint/typecheck instead.
+Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events. Antigravity CLI is intentionally absent from the "After File Save" group because its `PostToolUse` payload does not include the original `toolCall` — use Stop hooks for project-wide lint/typecheck instead. Grok CLI appears in all three groups, but only its `PreToolUse` can block; the other two are post-hooks whose output Grok ignores, so their work is real but their feedback is not.
 
 ## Input/Output Reference
 
@@ -943,10 +983,10 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 
 | Agent | Event | Allow | Block / fail-closed |
 |---|---|---|---|
-| Claude Code | PreToolUse | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}` | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
+| Claude Code | PreToolUse | `{}` (no decision — the normal permission flow still applies) | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
 | Claude Code | PostToolUse | `{}` or `…additionalContext:"…"` (lint feedback) | `{"decision":"block","reason":"…"}` |
 | Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
-| Cursor | preToolUse / beforeShellExecution | `{"permission":"allow"}` | `{"permission":"deny","user_message":"…","agent_message":"…"}`, exit 2 |
+| Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}` (exit 0 — Cursor reads the stdout JSON only on exit 0) |
 | Cursor | stop | `{}` | `{"followup_message":"…"}` |
 | Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** plain text (not JSON) |
 | Windsurf | post_cascade_response | `{}` | `{}` (best-effort post-hook; cannot block) |
@@ -954,17 +994,33 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 | Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}` (spec defines no block path) |
 | Antigravity | Stop | `{}` | `{"decision":"continue","reason":"…"}` (re-enters the agent loop, `reason` injected as a system message) |
 | Codex CLI | any | `{}` or `…additionalContext:"…"` | PreToolUse: `…permissionDecision:"deny",…`. PermissionRequest: `…decision:{behavior:"deny",message:"…"}`. PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
+| Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
+| Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
 
-`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead.
+`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
+
+claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's `PreToolUse` is the one exception — its schema has no neutral value, so an explicit `"allow"` is required there.
 
 ### Exit Codes
 
 | Agent | Allow | Block | Fail-closed parse error |
 |---|---|---|---|
 | Claude Code | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `2` + **stderr** plain text |
-| Cursor / Windsurf | `0` | `2` (Windsurf BeforeCommand writes stderr; Cursor Stop stays `0` with `followup_message`) | `2` |
-| Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific JSON (`deny` for PreToolUse, `continue` for Stop) |
+| Cursor | `0` | `0` (deny JSON in stdout; exit `2` would make Cursor discard the message) | `2` |
+| Windsurf | `0` | `2` (BeforeCommand writes plain text to stderr; Stop stays `0`) | `2` |
+| Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny JSON |
 | Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny/block JSON (non-zero is treated as hook infra failure and discarded) |
+| Grok CLI | `0` | `2` + deny JSON in stdout (PreToolUse only; other events return `0`) | `2` (never `1` — Grok treats anything other than `2` as fail-open) |
+
+Across every agent, a parse error on a stop event (`Stop`, Cursor's `stop`, Windsurf's `post_cascade_response`) returns `{}` + exit `0` instead of the deny shown above — see below.
+
+### Fail-Closed Behavior
+
+**Pre-execution gates fail closed.** When the payload cannot be parsed, stdin is empty or oversized, or a field claw-hooks actually reads is missing, the command-blocking events (`PreToolUse`, `beforeShellExecution`, `pre_run_command`, `PermissionRequest`) return the agent's native deny response. A broken hook never turns into a silent approval.
+
+**A broken config denies too, instead of disabling protection.** If the TOML config fails to load or validate, claw-hooks answers with that same deny response, writes the diagnostic to stderr, and suggests running `claw-hooks check`. It no longer exits `1` with empty stdout — Codex CLI and Antigravity CLI read that as "the hook failed, ignore its decision", so one typo in `config.toml` used to switch off command blocking entirely. Logging is diagnostics rather than a control, so a logger that cannot be initialized only prints a warning and claw-hooks keeps running without logs.
+
+**Stop events allow instead.** On a stop event, "block" does not mean deny — it means *don't stop, here is a new prompt*: `decision:"block"` for Claude Code and Codex CLI, `decision:"continue"` for Antigravity CLI, and Cursor's `followup_message` is auto-submitted as the next user message. Returning that for a malformed payload or a broken config is self-sustaining: fail → continue → `Stop` fires again → same failure. None of the loop guards (`stop_hook_active`, `loop_count`, `CLAW_HOOKS_STOP_ACTIVE`) can break the cycle, because all of them only engage after a successful parse. Stop is not a pre-execution gate, so allowing it (`{}` + exit `0`) adds no new side effects, whereas auto-continuing would invite more tool calls — loop avoidance wins there.
 
 ## Performance
 

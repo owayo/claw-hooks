@@ -31,7 +31,7 @@ impl CustomCommandFilter {
     /// 引数ではなくコマンド名にマッチすることを保証する。
     /// 例: パターン "yarn" は "yarn install" にマッチするが "grep yarn" にはマッチしない。
     ///
-    /// # Errors
+    /// # エラー
     ///
     /// パターンが有効な正規表現でない場合エラーを返す。
     pub fn new(pattern: &str, message: String) -> Result<Self, regex::Error> {
@@ -64,7 +64,7 @@ impl CustomCommandFilter {
     /// // マッチする: pip install, pip3 install
     /// ```
     ///
-    /// # Errors
+    /// # エラー
     ///
     /// コマンドパターンが有効な正規表現でない場合エラーを返す。
     pub fn with_args(

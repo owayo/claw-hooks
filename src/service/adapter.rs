@@ -495,7 +495,7 @@ impl FormatAdapter {
 
         // Stop / Subagent / ツール系をイベント別ハンドラに委譲する。
         if event == HookEvent::Stop {
-            return Ok(self.parse_claude_stop(claude_input));
+            return self.parse_claude_stop(claude_input);
         }
         if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
             return Ok(self.parse_claude_subagent(&raw, event, claude_input));
@@ -504,8 +504,15 @@ impl FormatAdapter {
     }
 
     /// Claude の Stop イベントを内部 Stop HookInput に変換する（tool_name/tool_input は持たない）。
-    fn parse_claude_stop(&self, claude_input: ClaudeInput) -> HookInput {
+    fn parse_claude_stop(&self, claude_input: ClaudeInput) -> Result<HookInput> {
         let tool_name = "Stop".to_string();
+        // stop_hook_active は Stop による継続ループを防ぐための必須フィールド。
+        // 欠落を false とみなすと、壊れた Stop 入力でも stop hook を実行し、
+        // 失敗時の decision:"block" が同じ Stop を再発火させ続ける。
+        // パースエラーにすれば format_error_for_input が {} を返して安全に停止できる。
+        let stop_hook_active = claude_input
+            .stop_hook_active
+            .ok_or_else(|| anyhow!("Missing stop_hook_active field"))?;
         // `--agent` で起動したメインセッションにも agent_type は入るため、
         // サブエージェント固有の agent_id と agent_type が両方ある場合だけ委譲扱いにする。
         // 欠落・空・型不一致は最終 lint / コミットを落とさないよう Primary に倒す。
@@ -529,7 +536,7 @@ impl FormatAdapter {
             loop_count: None,
             response: None,
             agent_message: claude_input.last_assistant_message.clone(),
-            stop_hook_active: claude_input.stop_hook_active.unwrap_or(false),
+            stop_hook_active,
             session_kind,
         });
 
@@ -540,12 +547,12 @@ impl FormatAdapter {
             "{} parsed input", self.log_prefix()
         );
 
-        HookInput {
+        Ok(HookInput {
             event: HookEvent::Stop,
             tool_name,
             tool_input,
             session_id: claude_input.session_id,
-        }
+        })
     }
 
     /// Claude の SubagentStart / SubagentStop を内部 HookInput に変換する。
@@ -1647,13 +1654,13 @@ impl FormatAdapter {
 //
 // 入力（stdin JSON, camelCase）:
 //   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath
-//   - PreToolUse: toolCall { name, args }, stepIdx
+//   - ツール実行前: toolCall { name, args }, stepIdx
 //   - PostToolUse: stepIdx, error (toolCall は含まれない)
-//   - PreInvocation / PostInvocation: invocationNum, initialNumSteps
-//   - Stop: executionNum, terminationReason, error, fullyIdle
+//   - 呼び出し前／後: invocationNum, initialNumSteps
+//   - Stop イベント: executionNum, terminationReason, error, fullyIdle
 //
 // 出力（stdout JSON）:
-//   - PreToolUse: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
+//   - ツール実行前: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
 //   - PostToolUse: {} （事後フックでありブロック不可。エラー伝達も仕様には無い）
 //   - PreInvocation / PostInvocation: { injectSteps?, terminationBehavior? } （claw-hooks スコープ外）
 //   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
@@ -1855,7 +1862,7 @@ impl FormatAdapter {
 
     fn format_agy_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         // Antigravity の出力スキーマはイベントによって異なる:
-        //   - PreToolUse: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
+        //   - ツール実行前: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
         //   - PostToolUse / PreInvocation / PostInvocation: {} 固定（ブロック不可）
         //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は {}
         let output = match (event, decision) {
@@ -2579,15 +2586,16 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_input_parsing_stop_hook_active_unset() {
+    fn test_claude_input_parsing_stop_hook_active_unset_allows_stop_without_loop() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
         let input = r#"{"hook_event_name":"Stop"}"#;
-        let result = adapter.parse_input(input).unwrap();
-        if let crate::domain::ToolInput::Stop(stop) = &result.tool_input {
-            assert!(!stop.stop_hook_active);
-        } else {
-            panic!("Expected Stop tool input");
-        }
+        let error = adapter.parse_input(input).unwrap_err();
+        assert!(error.to_string().contains("stop_hook_active"));
+        assert_eq!(
+            adapter.format_error_for_input(&error.to_string(), input),
+            "{}"
+        );
+        assert_eq!(adapter.error_exit_code(Some(input)), 0);
     }
 
     #[test]
@@ -3873,7 +3881,7 @@ mod tests {
 
     #[test]
     fn test_claude_exit_code_allow_before_command_zero() {
-        // Claude: Allow + BeforeCommand → 0
+        // Claude: 許可 + BeforeCommand → 0
         let adapter = FormatAdapter::new(Format::Claude, 0);
         assert_eq!(
             adapter.exit_code(&Decision::allow(), HookEvent::BeforeCommand),
@@ -4129,7 +4137,7 @@ mod tests {
 
     #[test]
     fn test_codex_input_pre_tool_use_bash_maps_to_before_command() {
-        // Codex: PreToolUse + Bash → BeforeCommand
+        // Codex: PreToolUse + Bash は BeforeCommand に変換
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{
             "hook_event_name": "PreToolUse",

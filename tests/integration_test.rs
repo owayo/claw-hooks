@@ -313,6 +313,21 @@ fn test_stop_event() {
 }
 
 #[test]
+fn test_claude_stop_without_loop_guard_allows_stop() {
+    // stop_hook_active が欠落した壊れた入力では Stop hooks を実行しない。
+    // Stop のブロックは継続指示になるため、フェイルクローズすると自己維持ループを招く。
+    let input = r#"{"hook_event_name":"Stop"}"#;
+    let (stdout, _stderr, exit_code) = run_hook(input);
+
+    assert_eq!(exit_code, 0, "Malformed Stop must be allowed to terminate");
+    let body = stdout.trim();
+    assert!(
+        body.is_empty() || body == "{}",
+        "Malformed Stop must not carry a continuation decision: {stdout}"
+    );
+}
+
+#[test]
 fn test_init_command_creates_config() {
     let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let config_path = temp_dir.path().join("claw-hooks.toml");

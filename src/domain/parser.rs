@@ -1740,96 +1740,22 @@ impl ShellParser {
                 && i + 1 < len
                 && chars[i + 1] == '('
             {
-                let start = i + 2;
-                let mut j = start;
-                let mut depth = 1usize;
-                let mut sub_in_single = false;
-                let mut sub_in_double = false;
-                let mut sub_escape = false;
-
-                while j < len {
-                    let sub = chars[j];
-
-                    if sub_escape {
-                        sub_escape = false;
-                        j += 1;
-                        continue;
+                if let Some((end, inner)) = Self::extract_parenthesized_fragment(&chars, i + 1) {
+                    if !inner.trim().is_empty() {
+                        fragments.push(inner);
                     }
-
-                    if sub == '\\' && !sub_in_single {
-                        sub_escape = true;
-                        j += 1;
-                        continue;
-                    }
-                    if sub == '\'' && !sub_in_double {
-                        sub_in_single = !sub_in_single;
-                        j += 1;
-                        continue;
-                    }
-                    if sub == '"' && !sub_in_single {
-                        sub_in_double = !sub_in_double;
-                        j += 1;
-                        continue;
-                    }
-                    if sub_in_single || sub_in_double {
-                        j += 1;
-                        continue;
-                    }
-
-                    if sub == '(' {
-                        depth += 1;
-                    } else if sub == ')' {
-                        depth -= 1;
-                        if depth == 0 {
-                            let inner: String = chars[start..j].iter().collect();
-                            if !inner.trim().is_empty() {
-                                fragments.push(inner);
-                            }
-                            i = j + 1;
-                            break;
-                        }
-                    }
-
-                    j += 1;
-                }
-
-                if depth == 0 {
+                    i = end + 1;
                     continue;
                 }
             }
 
             // `` `...` `` 形式
             if !in_single && ch == '`' {
-                let start = i + 1;
-                let mut j = start;
-                let mut sub_escape = false;
-                let mut found = false;
-
-                while j < len {
-                    let sub = chars[j];
-                    if sub_escape {
-                        sub_escape = false;
-                        j += 1;
-                        continue;
+                if let Some((end, inner)) = Self::extract_backtick_fragment(&chars, i) {
+                    if !inner.trim().is_empty() {
+                        fragments.push(inner);
                     }
-                    if sub == '\\' {
-                        sub_escape = true;
-                        j += 1;
-                        continue;
-                    }
-                    if sub == '`' {
-                        let inner: String = chars[start..j].iter().collect();
-                        if !inner.trim().is_empty() {
-                            fragments.push(inner);
-                        }
-                        i = j + 1;
-                        found = true;
-                        break;
-                    }
-                    j += 1;
-                }
-
-                if found {
+                    i = end + 1;
                     continue;
                 }
             }
@@ -1838,6 +1764,85 @@ impl ShellParser {
         }
 
         fragments
+    }
+
+    /// 開き括弧に対応する閉じ括弧と、その内側のコマンド断片を返す。
+    ///
+    /// 引用符内とバックスラッシュでエスケープされた括弧は構造として数えない。
+    /// 閉じ括弧が無い場合は `None` を返し、呼び出し側が残りの入力走査を継続する。
+    fn extract_parenthesized_fragment(
+        chars: &[char],
+        open_index: usize,
+    ) -> Option<(usize, String)> {
+        debug_assert_eq!(chars.get(open_index), Some(&'('));
+
+        let start = open_index + 1;
+        let mut depth = 1usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escape = false;
+
+        for index in start..chars.len() {
+            let ch = chars[index];
+
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' && !in_single {
+                escape = true;
+                continue;
+            }
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if in_single || in_double {
+                continue;
+            }
+
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((index, chars[start..index].iter().collect()));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    /// バッククォートに対応する終端と、その内側のコマンド断片を返す。
+    /// エスケープされたバッククォートは終端として扱わない。
+    fn extract_backtick_fragment(chars: &[char], open_index: usize) -> Option<(usize, String)> {
+        debug_assert_eq!(chars.get(open_index), Some(&'`'));
+
+        let start = open_index + 1;
+        let mut escape = false;
+        for index in start..chars.len() {
+            let ch = chars[index];
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == '`' {
+                return Some((index, chars[start..index].iter().collect()));
+            }
+        }
+
+        None
     }
 
     /// 文字列処理ベースのフォールバックパーサー。
@@ -3240,6 +3245,44 @@ mod tests {
         let frags = ShellParser::extract_nested_command_fragments("$(echo $(inner))");
         // 最外周の $() のみ抽出
         assert_eq!(frags, vec!["echo $(inner)"]);
+    }
+
+    // === コマンド置換断片の境界値テスト ===
+
+    #[test]
+    fn test_extract_parenthesized_fragment_ignores_quoted_and_escaped_parentheses() {
+        let chars: Vec<char> = r#"(printf ')' \) && rm)"#.chars().collect();
+
+        let (end, inner) = ShellParser::extract_parenthesized_fragment(&chars, 0)
+            .expect("対応する閉じ括弧を検出できること");
+
+        assert_eq!(end, chars.len() - 1);
+        assert_eq!(inner, r#"printf ')' \) && rm"#);
+    }
+
+    #[test]
+    fn test_extract_parenthesized_fragment_unclosed_returns_none() {
+        let chars: Vec<char> = "(echo $(rm)".chars().collect();
+
+        assert!(ShellParser::extract_parenthesized_fragment(&chars, 0).is_none());
+    }
+
+    #[test]
+    fn test_extract_backtick_fragment_ignores_escaped_terminator() {
+        let chars: Vec<char> = r"`printf \`literal\`; rm`".chars().collect();
+
+        let (end, inner) = ShellParser::extract_backtick_fragment(&chars, 0)
+            .expect("エスケープされていない終端を検出できること");
+
+        assert_eq!(end, chars.len() - 1);
+        assert_eq!(inner, r"printf \`literal\`; rm");
+    }
+
+    #[test]
+    fn test_extract_backtick_fragment_unclosed_returns_none() {
+        let chars: Vec<char> = "`echo rm".chars().collect();
+
+        assert!(ShellParser::extract_backtick_fragment(&chars, 0).is_none());
     }
 
     // === find_wrapped_command_index のテスト ===

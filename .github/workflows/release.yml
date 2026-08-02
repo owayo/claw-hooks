@@ -208,7 +208,7 @@ jobs:
           body: |
             ## claw-hooks ${{ needs.prepare-release.outputs.version }}
 
-            AI coding agent hook system for Claude Code, Cursor, and Windsurf.
+            AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI.
 
             ### Installation
 
@@ -344,7 +344,7 @@ jobs:
           # Formula を作成または更新する
           cat > Formula/claw-hooks.rb << 'FORMULA'
           class ClawHooks < Formula
-            desc "Hooks CLI for AI coding agents (Claude Code, Cursor, Windsurf)"
+            desc "Hooks CLI for Claude Code, Cursor, Windsurf, Antigravity, Codex, and Grok"
             homepage "https://github.com/owayo/claw-hooks"
             url "URL_SOURCE_PLACEHOLDER"
             sha256 "SHA256_SOURCE_PLACEHOLDER"

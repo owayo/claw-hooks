@@ -38,7 +38,11 @@ fn main() -> Result<()> {
 
     // コマンド実行（フック判定の終了コードを集約する）
     let exit_code: i32 = match cli.command {
-        Commands::Hook { format, trace } => run_hook(config, format, trace),
+        Commands::Hook {
+            format,
+            trace,
+            ref event,
+        } => run_hook(config, format, trace, event.clone()),
         Commands::Check => run_check(&config, cli.quiet)?,
         Commands::Init { .. } | Commands::Version => 0,
     };
@@ -78,7 +82,7 @@ fn load_config(cli: &Cli) -> Result<Config> {
     match ConfigService::load(cli.config.as_deref()) {
         Ok(config) => Ok(config),
         Err(error) => {
-            if let Commands::Hook { format, trace } = cli.command {
+            if let Commands::Hook { format, trace, .. } = cli.command {
                 let exit_code = HookService::emit_config_error(format, trace, &error);
                 std::process::exit(exit_code);
             }
@@ -110,8 +114,8 @@ fn init_logging(cli: &Cli, config: &Config) -> Option<LoggingGuard> {
 /// `HookService::run` の内部エラー（stdin の I/O 失敗、出力の書き込み失敗など）も
 /// `?` で伝播させない。伝播させると exit 1 + stdout 空になり、
 /// Codex / Antigravity ではフェイルオープンするため、汎用の拒否応答に倒す。
-fn run_hook(config: Config, format: cli::Format, trace: bool) -> i32 {
-    let service = HookService::new(config, format, trace);
+fn run_hook(config: Config, format: cli::Format, trace: bool, event: Option<String>) -> i32 {
+    let service = HookService::new(config, format, trace).with_event_override(event);
     match service.run() {
         Ok(exit_code) => exit_code,
         Err(error) => HookService::emit_runtime_error(format, trace, &error),

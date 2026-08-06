@@ -305,8 +305,19 @@ impl ExtensionHookFilter {
                     // 成功時の no-op 完了メッセージ（`1 file already formatted` /
                     // `All checks passed!` 等）は編集のたびに毎回出る定型通知で、
                     // エージェントに返しても行動につながらないため破棄する。
-                    let noop_success =
-                        result.success && crate::domain::is_noop_success_output(&result.output);
+                    //
+                    // 判定は「正規化後」の文字列で行う。生の出力には正規化で捨てられる
+                    // ノイズが混ざり得るためである。例えば ruff の
+                    // `check --select D...` は stdout に `All checks passed!` を出しつつ
+                    // stderr へ毎回 `warning: ... are incompatible. Ignoring ...` を出す。
+                    // 生の結合文字列で判定すると「no-op ではない」と見なされて出力が残り、
+                    // その後の正規化で警告だけが消えるため、結果として
+                    // `[ruff] All checks passed!` が編集のたびにエージェントへ返っていた。
+                    // 収集する文字列自体は変更しない（正規化は最後に一度だけ適用する）。
+                    let noop_success = result.success
+                        && crate::domain::is_noop_success_output(&normalize_lint_output(
+                            &result.output,
+                        ));
                     // 空でない出力を収集（警告、エラー、lint メッセージ）
                     if !result.output.is_empty() && !noop_success {
                         outputs.push(format!("[{}] {}", result.display_label, result.output));

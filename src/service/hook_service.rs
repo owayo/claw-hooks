@@ -137,6 +137,12 @@ impl HookService {
         }
     }
 
+    /// `--event` によるイベント名の明示指定を設定する。
+    pub fn with_event_override(mut self, event: Option<String>) -> Self {
+        self.adapter = self.adapter.with_event_override(event);
+        self
+    }
+
     /// フック処理ループを実行する。
     ///
     /// stdin から JSON 入力を読み取り、処理して stdout に JSON 出力を書き込む。

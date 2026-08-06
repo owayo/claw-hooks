@@ -86,6 +86,14 @@ pub enum Commands {
         /// トレースモード: デバッグ用に生の入力を stderr に出力
         #[arg(long, short = 't')]
         trace: bool,
+
+        /// フックイベント名を明示指定する（例: PostToolUse）
+        ///
+        /// Antigravity CLI 用。PreToolUse と PostToolUse はペイロード形状が同一で
+        /// 判別できないため、hooks.json のイベント別エントリで指定する。
+        /// 未指定時はペイロードから推定する（PreToolUse 側に倒す）。
+        #[arg(long, short = 'e')]
+        event: Option<String>,
     },
     /// デフォルト設定ファイルを生成
     Init {
@@ -109,9 +117,14 @@ mod tests {
     fn test_parse_hook_default_format() {
         let cli = Cli::try_parse_from(["claw-hooks", "hook"]).unwrap();
         match cli.command {
-            Commands::Hook { format, trace } => {
+            Commands::Hook {
+                format,
+                trace,
+                event,
+            } => {
                 assert_eq!(format, Format::Claude);
                 assert!(!trace);
+                assert!(event.is_none());
             }
             _ => panic!("Expected Hook command"),
         }
@@ -155,6 +168,27 @@ mod tests {
         let cli = Cli::try_parse_from(["claw-hooks", "hook", "-f", "codex"]).unwrap();
         match cli.command {
             Commands::Hook { format, .. } => assert_eq!(format, Format::Codex),
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_hook_event_override() {
+        // Antigravity の PostToolUse を明示指定できる（--event / -e）
+        let cli =
+            Cli::try_parse_from(["claw-hooks", "hook", "-f", "agy", "--event", "PostToolUse"])
+                .unwrap();
+        match cli.command {
+            Commands::Hook { event, .. } => assert_eq!(event.as_deref(), Some("PostToolUse")),
+            _ => panic!("Expected Hook command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_hook_event_override_short_flag() {
+        let cli = Cli::try_parse_from(["claw-hooks", "hook", "-e", "PreToolUse"]).unwrap();
+        match cli.command {
+            Commands::Hook { event, .. } => assert_eq!(event.as_deref(), Some("PreToolUse")),
             _ => panic!("Expected Hook command"),
         }
     }

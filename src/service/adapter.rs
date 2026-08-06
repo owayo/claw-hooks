@@ -21,6 +21,13 @@ pub struct FormatAdapter {
     format: Format,
     /// 出力メッセージの最大長（0 = 無制限）
     output_max_length: usize,
+    /// `--event` で明示指定されたイベント名。
+    ///
+    /// Antigravity の PreToolUse と PostToolUse はペイロード形状が同一
+    /// （どちらも `toolCall` + `stepIdx`）で、区別できるのは Optional な `error` だけ。
+    /// 一方 `hooks.json` はイベントごとに別エントリでコマンドを登録するため、
+    /// 呼び出し側がどちらのイベントかを知っている。その情報を受け取るための項目。
+    event_override: Option<String>,
 }
 
 impl FormatAdapter {
@@ -29,7 +36,19 @@ impl FormatAdapter {
         Self {
             format,
             output_max_length,
+            event_override: None,
         }
+    }
+
+    /// `--event` によるイベント名の明示指定を設定する。
+    ///
+    /// 空文字・空白のみは未指定として扱う。現状これを参照するのは Antigravity のみ
+    /// （他エージェントはペイロードにイベント名フィールドがあり判別が一意なため）。
+    pub fn with_event_override(mut self, event: Option<String>) -> Self {
+        self.event_override = event
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
+        self
     }
 
     /// ログ出力用のプレフィックス（例: "✴️ Claude Code"）を返す。
@@ -1718,9 +1737,21 @@ impl FormatAdapter {
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Antigravity input: {}", e))?;
 
-        // 公式ペイロードにイベント名は含まれないため、イベント固有フィールドから判定する。
-        // 旧版との互換性のため hook_event_name / event があればそちらを優先する。
-        let raw_event = Self::agy_hook_event_name(&raw)
+        // イベント名の決定順:
+        //   1. `--event` による明示指定（hooks.json はイベントごとに別エントリで
+        //      コマンドを登録するため、呼び出し側が正確なイベント名を知っている）
+        //   2. ペイロード中の hook_event_name / event（旧版互換）
+        //   3. イベント固有フィールドの形状からの推定
+        //
+        // 3 の推定では PreToolUse と PostToolUse を区別できない。公式仕様では
+        // どちらも `toolCall` + `stepIdx` を持ち、差は Optional な `error` だけだからである。
+        // 推定時は PreToolUse に倒す（危険コマンドのブロックを維持するフェイルクローズド方向。
+        // 逆に倒すと実行前のコマンドを素通ししてしまう）。正確な PostToolUse 処理
+        // （保存後フックの実行と `{}` 固定の出力）が必要な場合は `--event PostToolUse` を使う。
+        let raw_event = self
+            .event_override
+            .clone()
+            .or_else(|| Self::agy_hook_event_name(&raw))
             .ok_or_else(|| anyhow!("Unable to infer Antigravity hook event"))?;
 
         // Antigravity は conversationId を会話 ID として渡す。
@@ -1734,11 +1765,14 @@ impl FormatAdapter {
         match raw_event.as_str() {
             "PreToolUse" => self.parse_agy_pre_tool_use(&raw, session_id),
             "Stop" => Self::parse_agy_stop(&raw, session_id),
-            // PostToolUse は発火するが、ペイロードに toolCall が含まれない（stepIdx と error のみ）
-            // ため、ファイル単位の拡張子フックは成立しない。PreInvocation / PostInvocation は
-            // モデル呼び出し前後のオーケストレーション系で claw-hooks のスコープ外。
-            // いずれもパススルーで Allow を返す。
-            "PostToolUse" | "PreInvocation" | "PostInvocation" | "Invocation" => {
+            // PostToolUse は `toolCall`（name と args）を含むため、編集対象ファイルを
+            // 復元できる。`write_to_file` / `replace_file_content` /
+            // `multi_replace_file_content` の `args.TargetFile` を拾って保存後フックを回す。
+            // 出力は仕様どおり `{}` 固定（format_agy_output の AfterFileEdit 分岐）。
+            "PostToolUse" => self.parse_agy_post_tool_use(&raw, session_id),
+            // PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で
+            // claw-hooks のスコープ外。パススルーで Allow を返す。
+            "PreInvocation" | "PostInvocation" | "Invocation" => {
                 debug!(
                     agent = self.format.label(),
                     hook_event_name = %raw_event,
@@ -1847,6 +1881,84 @@ impl FormatAdapter {
                 })
             }
         }
+    }
+
+    /// Antigravity の PostToolUse を内部 HookInput に変換する。
+    ///
+    /// 公式仕様の PostToolUse は `toolCall`（`name` と `args`）を含むため、
+    /// ファイル編集ツールの `args.TargetFile` から編集対象を復元できる。
+    /// これにより保存後の formatter / linter 実行（拡張子フック）が成立する。
+    ///
+    /// 出力は仕様上 `{}` 固定でブロック不可のため、ここで返す HookInput が
+    /// どの判定になっても Antigravity へは `{}` しか返らない
+    /// （`format_agy_output` の `AfterFileEdit` / `Passthrough` 分岐）。
+    /// したがって `toolCall` 欠落などのパース失敗でフェイルクローズドしても
+    /// エージェントに伝わらないため、ここは寛容側に倒してパススルーする。
+    fn parse_agy_post_tool_use(
+        &self,
+        raw: &serde_json::Value,
+        session_id: Option<String>,
+    ) -> Result<HookInput> {
+        let tool_name = raw
+            .get("toolCall")
+            .and_then(|c| c.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        // Antigravity のファイル編集ツールは編集先を `args.TargetFile` で渡す。
+        let target_file = raw
+            .get("toolCall")
+            .and_then(|c| c.get("args"))
+            .and_then(|a| a.get("TargetFile"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+
+        let is_file_edit_tool = matches!(
+            tool_name.as_str(),
+            "write_to_file" | "replace_file_content" | "multi_replace_file_content"
+        );
+
+        if let (true, Some(file_path)) = (is_file_edit_tool, target_file) {
+            debug!(
+                agent = self.format.label(),
+                raw_event = "PostToolUse",
+                mapped_event = ?HookEvent::AfterFileEdit,
+                raw_tool_name = %tool_name,
+                mapped_tool = "Write",
+                file_path_bytes = file_path.len(),
+                "{} parsed input", self.log_prefix()
+            );
+            return Ok(HookInput {
+                event: HookEvent::AfterFileEdit,
+                tool_name: "Write".to_string(),
+                tool_input: crate::domain::ToolInput::File(crate::domain::FileOperationInput {
+                    file_path: file_path.to_string(),
+                    content: None,
+                }),
+                session_id,
+            });
+        }
+
+        // run_command の PostToolUse（コマンドは実行済みでブロック不可）や
+        // 編集対象を持たないツールはスコープ外としてパススルーする。
+        debug!(
+            agent = self.format.label(),
+            raw_event = "PostToolUse",
+            mapped_event = ?HookEvent::Passthrough,
+            raw_tool_name = %tool_name,
+            "{} PostToolUse has no post-edit hook target, passing through", self.log_prefix()
+        );
+        Ok(HookInput {
+            event: HookEvent::Passthrough,
+            tool_name: if tool_name.is_empty() {
+                "PostToolUse".to_string()
+            } else {
+                tool_name
+            },
+            tool_input: crate::domain::ToolInput::Other(raw.clone()),
+            session_id,
+        })
     }
 
     /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
@@ -5560,31 +5672,38 @@ mod tests {
     }
 
     #[test]
-    fn test_agy_pre_tool_use_missing_step_idx_is_error() {
+    fn test_agy_pre_tool_use_without_step_idx_is_accepted() {
+        // `stepIdx` は公式仕様で Required マークが無く claw-hooks も判定に使わない。
+        // 必須にすると、送られてこないビルドで全 run_command が
+        // 「即時ハードブロック」の deny に倒れるため、任意扱いで受理する。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}
         }"#;
 
-        let error = adapter.parse_input(input).unwrap_err().to_string();
-        assert!(error.contains("stepIdx"));
+        let parsed = adapter
+            .parse_input(input)
+            .expect("stepIdx は任意であるべき");
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        assert_eq!(parsed.bash_command(), Some("echo ok"));
     }
 
     #[test]
-    fn test_agy_stop_missing_execution_num_fails_closed() {
+    fn test_agy_stop_without_execution_num_is_accepted() {
+        // `executionNum` は Required マークが無く、claw-hooks は値を破棄している。
+        // 必須にすると Stop のパースが失敗し、Antigravity の Stop パース失敗は
+        // `{}` + exit 0 に倒れる仕様のため、全 stop hook（lint / commit / 通知）が
+        // エラー表示なしで黙って実行されなくなる。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "terminationReason":"model_stop",
             "fullyIdle":true
         }"#;
 
-        let error = adapter.parse_input(input).unwrap_err().to_string();
-        assert!(error.contains("executionNum"));
-
-        // Stop のパースエラーで "continue" を返すと、同じ壊れたペイロードで Stop が
-        // 再発火する無限ループになる。停止を許可する空オブジェクトを返す。
-        let output = adapter.format_error_for_input(&error, input);
-        assert_eq!(output, "{}");
+        let parsed = adapter
+            .parse_input(input)
+            .expect("executionNum は任意であるべき");
+        assert_eq!(parsed.event, HookEvent::Stop);
     }
 
     #[test]
@@ -5604,12 +5723,109 @@ mod tests {
     }
 
     #[test]
-    fn test_agy_stop_missing_termination_reason_is_error() {
+    fn test_agy_stop_without_termination_reason_is_accepted() {
+        // `terminationReason` も Required マークが無く、status / agent_message の
+        // 情報表示にしか使わない。欠落で stop hook 全体を落とさない。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{"executionNum":1,"fullyIdle":true}"#;
 
-        let error = adapter.parse_input(input).unwrap_err().to_string();
-        assert!(error.contains("terminationReason"));
+        let parsed = adapter
+            .parse_input(input)
+            .expect("terminationReason は任意であるべき");
+        assert_eq!(parsed.event, HookEvent::Stop);
+    }
+
+    #[test]
+    fn test_agy_post_tool_use_maps_file_edit_to_after_file_edit() {
+        // 公式仕様の PostToolUse は toolCall を含むため args.TargetFile から
+        // 編集対象を復元でき、保存後フック（formatter / linter）が成立する。
+        let adapter =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("PostToolUse".to_string()));
+        let input = r#"{
+            "toolCall":{"name":"write_to_file","args":{"TargetFile":"/tmp/a.rs","CodeContent":"fn main(){}"}},
+            "stepIdx":5,
+            "conversationId":"c1"
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::AfterFileEdit);
+        assert_eq!(parsed.tool_name, "Write");
+        match &parsed.tool_input {
+            crate::domain::ToolInput::File(file) => assert_eq!(file.file_path, "/tmp/a.rs"),
+            other => panic!("File 入力を期待したが {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_agy_post_tool_use_run_command_does_not_deny() {
+        // 実行済みコマンドの PostToolUse に deny を返してはいけない
+        // （公式仕様では PostToolUse の出力は `{}` 固定）。
+        let adapter =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("PostToolUse".to_string()));
+        let input = r#"{
+            "toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /tmp/x"}},
+            "stepIdx":5
+        }"#;
+
+        let parsed = adapter.parse_input(input).unwrap();
+        assert_eq!(parsed.event, HookEvent::Passthrough);
+
+        let output = adapter
+            .format_output(&Decision::allow(), parsed.event)
+            .unwrap();
+        assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn test_agy_post_tool_use_block_still_outputs_empty_object() {
+        // PostToolUse はブロック不可。内部判定が Block でも `{}` に倒す。
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let output = adapter
+            .format_output(
+                &Decision::Block {
+                    message: "lint failed".to_string(),
+                },
+                HookEvent::AfterFileEdit,
+            )
+            .unwrap();
+        assert_eq!(output, "{}");
+    }
+
+    #[test]
+    fn test_agy_event_override_takes_precedence_over_shape_inference() {
+        // 形状推定では PreToolUse に倒れるペイロードでも、--event で PostToolUse を選べる。
+        let shape_only = FormatAdapter::new(Format::Agy, 0);
+        let overridden =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("PostToolUse".to_string()));
+        let input = r#"{
+            "toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}},
+            "stepIdx":1
+        }"#;
+
+        assert_eq!(
+            shape_only.parse_input(input).unwrap().event,
+            HookEvent::BeforeCommand
+        );
+        assert_eq!(
+            overridden.parse_input(input).unwrap().event,
+            HookEvent::Passthrough
+        );
+    }
+
+    #[test]
+    fn test_agy_event_override_blank_is_ignored() {
+        // 空文字・空白のみの --event は未指定として扱う。
+        let adapter =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("   ".to_string()));
+        let input = r#"{
+            "toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}},
+            "stepIdx":1
+        }"#;
+
+        assert_eq!(
+            adapter.parse_input(input).unwrap().event,
+            HookEvent::BeforeCommand
+        );
     }
 
     #[test]

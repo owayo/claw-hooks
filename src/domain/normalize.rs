@@ -71,11 +71,41 @@ pub fn strip_ansi_codes(input: &str) -> String {
                         }
                     }
                 }
+                Some(&next) if ('\x20'..='\x2f').contains(&next) => {
+                    // ECMA-48 のエスケープシーケンス:
+                    //   ESC + 中間バイト(0x20-0x2F)を0個以上 + 終端バイト(0x30-0x7E)
+                    // 例: `ESC ( B`（terminfo の sgr0 = `\E(B\E[m` が出す G0 文字集合指定）、
+                    // `ESC ) 0`、`ESC # 8`。
+                    //
+                    // 中間バイトを読み飛ばさないと終端バイト（上記なら `B`）が本文へ混入し、
+                    // 行が `B+ assert!(` のようになる。すると差分行・ソース行・枠線の判定が
+                    // すべて外れ、後続の正規化（重複除去・進捗行圧縮・枠線除去）が
+                    // その行に対して一切効かなくなる。
+                    while let Some(&c) = chars.peek() {
+                        if ('\x20'..='\x2f').contains(&c) {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    // 終端バイトを消費する（欠けている場合は不正シーケンスとして触らない）
+                    if let Some(&c) = chars.peek() {
+                        if ('\x30'..='\x7e').contains(&c) {
+                            chars.next();
+                        }
+                    }
+                }
                 Some(_) => {
-                    chars.next(); // ESC後の1文字を消費 (SS2/SS3等)
+                    chars.next(); // ESC後の1文字を消費 (SS2/SS3、ESC 7 / ESC 8 等)
                 }
                 None => {}
             }
+        } else if c == '\x0e' || c == '\x0f' {
+            // SO (0x0E) / SI (0x0F) は ESC を伴わない生の C0 制御文字として現れる
+            // （TERM によっては terminfo の sgr0 が `\E[m\017` になる）。
+            // ANSI エスケープではないため上の分岐に掛からず、そのまま本文に残って
+            // 行頭を汚し、ESC ( B と同様に後続の正規化を無効化する。表示上も
+            // 意味を持たないため除去する。
         } else {
             result.push(c);
         }

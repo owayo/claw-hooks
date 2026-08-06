@@ -30,17 +30,18 @@
 ## 機能
 
 - 🦀 **Rust製** - 低オーバーヘッド、軽量シングルバイナリ、超高速（起動<10ms）
-- ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
-- 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
+- ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`, PowerShell の `Stop-Process` をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
+- 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell の `Remove-Item` をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
+- 🪟 **PowerShell ツール対応** - Claude Code の `PowerShell` ツールにも同じフィルターを適用。Git Bash の無い Windows では PowerShell が唯一のシェルツールになる。matcher は `Bash|PowerShell` を指定すること
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
+- 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI も `PostToolUse` は発火するが、ペイロードに元の `toolCall` が含まれず編集ファイルを特定できないため、ファイル単位の拡張子フックは Stop hooks のプロジェクト全体 lint で代替。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
+- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf と Grok CLI はベストエフォート）
 - ⏱️ **フックタイムアウト** - フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
-- 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持
+- 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持。no-op 判定は**正規化後**の文字列で行うため、成功メッセージと毎回同じ設定警告を同時に出すツール（`ruff check --select D…` は毎回 stderr にルールセット非互換警告を出す）でも no-op と判定され、編集のたびに `All checks passed!` だけが返る事象を防ぐ。biome の `Checked N file(s) in <時間>. No fixes applied.` 集計行と、締めの `check ━` / `× Some errors were emitted while running checks.` は診断が併記されているときのみ除去し、出力全体がそれだけの場合は保持。ANSI 除去は `ESC` + 中間バイト形式（terminfo の `sgr0`、例: `\E(B\E[m`）と生の `SO`/`SI` にも対応（未対応だと色付き `cargo fmt --check` の差分行の先頭に文字が残り、上記の圧縮が一切効かなくなる）
 - ♻️ **ソース抜粋の再掲除去** - 同一診断の中で逐語一致するソース抜粋行（`3 │ code`、`> 3 │ code`、`12 | code`）は2回目以降を除去。biome は 1 件の診断をサブブロック（`!` メッセージ、`i` 補足、`i Safe fix:`）ごとに分けて同じ抜粋を再掲し、ruff も修正差分の中でコンテキストを再掲するが、これらの再掲には情報量が無い。差分行（`- old` / `+ new`）は修正内容そのものなので保持し、重複判定のスコープは診断ヘッダごとにリセットするため、別の診断は自分のコンテキストを保持する。実出力での計測値: ruff −6%、biome −14%
 - 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッションとバイト数サマリーのみ。生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
 - 🛑 **入出力サイズ上限** - stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
@@ -71,7 +72,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 {
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|PowerShell",
       "hooks": [{"type": "command", "command": "claw-hooks hook"}]
     }]
   }
@@ -108,7 +109,7 @@ sys.exit(0)
 ### 拡張子フックのルール
 
 - 各コマンドテンプレートには `{file}` プレースホルダーを 1 つだけ含めます。
-- 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`、Grok `PostToolUse`（`toolInput` にファイルパスを含むもの）。Antigravity の `PostToolUse` も発火するが、ペイロードに元の `toolCall` が含まれず編集ファイルパスを復元できないため、プロジェクト全体の lint/typecheck を Stop hooks で回します。
+- 保存後・編集後イベントのみ: Claude `PostToolUse` (`Write`/`Edit`)、Cursor `afterFileEdit`、Windsurf `post_write_code`、Codex `PostToolUse` + `apply_patch`、Grok `PostToolUse`（`toolInput` にファイルパスを含むもの）、Antigravity `PostToolUse`（hook エントリに `--event PostToolUse` を指定した場合。編集対象は `toolCall.args.TargetFile` から取得）。Antigravity の事後フック出力は `{}` 固定のため診断を返せません。lint の本文が必要な場合は Stop hooks を使ってください。
 - Codex の `PostToolUse` + `Bash` はパススルー。`apply_patch` は変更ファイルパスを抽出して拡張子フックに渡します（削除のみの patch はスキップ）。
 - Grok の `PostToolUse` は `toolInput` に `file_path` / `filePath` があればフックを実行するため、フォーマッターによるファイル書き換えは通常どおり行われます。ただし Grok は事後フックの stdout を無視するので、lint の本文自体はエージェントに返りません。
 - パスに `../`、リダイレクトメタ文字（`<`、`>`）、タブ、改行、NUL バイトを含むものは拒否。必須フィールドを欠くペイロードはフェイルクローズドで拒否。
@@ -222,7 +223,9 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 | オプション | 短縮形 | 説明 |
 |-----------|--------|------|
 | `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI) |
+| `--event` | `-e` | フックイベント名（例: `PostToolUse`）。ペイロードにイベント名フィールドが無く `PreToolUse` / `PostToolUse` の形状が同一な Antigravity CLI 用。他エージェントでは不要 |
 | `--config` | `-c` | 設定ファイルのパス |
+| `--trace` | `-t` | トレースモード: 生の入力・パース結果・出力を stderr に出力（ディスクには保存しない） |
 | `--help` | `-h` | ヘルプを表示 |
 
 ### 例
@@ -237,8 +240,9 @@ claw-hooks hook --format cursor
 # Windsurfフックを処理
 claw-hooks hook --format windsurf
 
-# Antigravity CLIフックを処理
-claw-hooks hook --format agy
+# Antigravity CLIフックを処理（ペイロードにイベント名が無いため --event を指定する）
+claw-hooks hook --format agy --event PreToolUse
+claw-hooks hook --format agy --event PostToolUse
 
 # Codex CLIフックを処理
 claw-hooks hook --format codex
@@ -261,7 +265,7 @@ claw-hooks hook --config /path/to/config.toml
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
       }
     ],
@@ -337,18 +341,26 @@ claw-hooks hook --config /path/to/config.toml
     "PreToolUse": [
       {
         "matcher": "run_command",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy" }]
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PreToolUse" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PostToolUse" }]
       }
     ],
     "Stop": [
-      { "type": "command", "command": "claw-hooks hook --format agy" }
+      { "type": "command", "command": "claw-hooks hook --format agy --event Stop" }
     ]
   }
 }
 ```
 
 注意点:
-- Antigravity の `PostToolUse` イベントには元の `toolCall` が含まれません。そのためファイル単位の拡張子フックは利用できません。代わりに Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` でエージェントに再投入してください。
+- **Antigravity では `--event` を指定してください。** Antigravity のペイロードにはイベント名フィールドが無く、`PreToolUse` と `PostToolUse` は形状で区別できません（どちらも `toolCall` と `stepIdx` を持ち、差は Optional な `error` のみ）。`hooks.json` はイベントごとに別エントリで登録するため、`--event` でどちらかを伝えます。未指定の場合は形状から推定し、区別できないケースは `PreToolUse` に倒します（コマンドブロックは維持されますが、保存後フックは動作しません）。
+- `--event PostToolUse` を指定すると Antigravity でも拡張子フックが動作します。編集対象は `toolCall.args.TargetFile` から復元します。ただし公式仕様で `PostToolUse` の出力は `{}` 固定のため、formatter/linter は**実行されますが診断結果をエージェントへ返せません**。診断を伝えたい場合は従来どおり Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` で再投入してください。
+- Antigravity には `stop_hook_active`（Claude/Codex）や `loop_count`（Cursor）に相当する入力がありません（`executionNum` は実行試行の連番で、通常の初回停止でも `1` です）。そのため恒久的に失敗する stop hook によるループを claw-hooks 側では遮断できません。report=true の stop hook には自己完結する終了条件を持たせてください。
 - `PreInvocation` / `PostInvocation` は claw-hooks のスコープ外（モデル呼び出し前後のオーケストレーション）なので、自動的にパススルーされます。これらのイベントは hook 登録不要です。
 - Antigravity hooks 公式仕様: <https://antigravity.google/docs/customizations/hooks>
 
@@ -607,7 +619,7 @@ dd_block = false  # このプロジェクトでは dd を許可
 {
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|PowerShell",
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "PostToolUse": [{
@@ -867,7 +879,9 @@ camelCase スキーマ。代表的な PreToolUse ペイロード:
 }
 ```
 
-Antigravity の公式ペイロードにはイベント名フィールドがありません。claw-hooks は公式のイベント固有フィールドから判別します: `toolCall` は PreToolUse、Stop 固有フィールドは Stop、`toolCall` の**無い** `stepIdx` は PostToolUse、invocation 固有フィールドは Pre/PostInvocation です。`error` は判別条件に含めません — 公式仕様で `error` は Optional（「成功時は空」）とされているため、これを必須にすると**成功した**ツール呼び出しでイベント判別に失敗し、ブロック不可の事後フックに対して誤った deny を返してしまいます。後方互換のため、空白でない `hook_event_name` / `event` も引き続き受理します。`PreToolUse` では `stepIdx`、`Stop` では `toolCall` の代わりに `executionNum` / `terminationReason` / `fullyIdle` が必須で、`terminationReason` は空文字も受理します。`toolCall.args` を必須とするのは `run_command` のときだけです（公式仕様は引数を持たないツールを列挙し、`matcher: ""` / `"*"` も認めているため）。必須フィールドの欠落・空白・型不正は、判別したイベント固有の deny/continue 応答でフェイルクローズドになります。
+Antigravity の公式ペイロードにはイベント名フィールドが無く、さらに `PreToolUse` と `PostToolUse` は**形状が同一**です（どちらも `toolCall` と `stepIdx` を持ち、差は Optional な `error` のみ）。どちらのイベントかは `--event <name>` で指定してください。`hooks.json` はイベントごとに別エントリで登録するため、呼び出し側は必ず知っています。判別順は `--event` → 空白でない `hook_event_name` / `event`（旧版互換）→ 形状推定（`toolCall` は PreToolUse、Stop 固有フィールドは Stop、invocation 固有フィールドは Pre/PostInvocation）です。推定では PreToolUse / PostToolUse を区別できないため **PreToolUse に倒し**、コマンドブロックを維持します（逆に倒すと未実行のコマンドを素通しします）。`error` は判別条件に使いません — 公式仕様で Optional（「成功時は空」）とされており、これを鍵にすると**成功した**ツール呼び出しを誤判別するためです。
+
+必須フィールドの検証は「claw-hooks が判定に使うもの」に限定します。公式仕様で **Required** マークが付くのは Stop の `fullyIdle`（と出力の `decision`）だけなので、`stepIdx` / `executionNum` / `terminationReason` はいずれも任意扱いです。これらを必須にすると、`run_command` すべてに deny（Antigravity では「即時ハードブロック」）が返り、Stop では**全 stop hook が黙ってスキップ**されます（Antigravity の Stop パースエラーは再投入ループ回避のため `{}` + exit 0 に倒れ、エラーが一切表面化しないため）。`toolCall.args` を必須とするのは `run_command` のときだけです（公式仕様は引数を持たないツールを列挙し、`matcher: ""` / `"*"` も認めているため）。必須フィールドの欠落・空白・型不正は、判別したイベント固有の deny/continue 応答でフェイルクローズドになります。
 
 | 判別に使うイベント形状 | toolCall.name | 内部マッピング |
 |---|---|---|
@@ -876,7 +890,7 @@ Antigravity の公式ペイロードにはイベント名フィールドがあ�
 | `toolCall` の無い `stepIdx`、または invocation 固有フィールド | n/a | PostToolUse / invocation のパススルー allow（claw-hooks のスコープ外） |
 | `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
 
-> **拡張子フック**: Antigravity の `PostToolUse` は発火しますが、ペイロードに含まれるのは `stepIdx`（とツール失敗時の `error`）だけで `toolCall` は無く、公式仕様の出力も `{}` 固定のため、ファイル単位の post-edit フックを再構築できません。`--format agy` では `PostToolUse` をパススルー扱いとし、プロジェクト全体の lint/typecheck は Stop hooks で回して `"decision":"continue"` で再投入してください。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。明示名を持つ未対応イベントは allow でパススルーし、イベントを判別できない名前なしペイロードは安全な応答形式を選べないためフェイルクローズドになります。
+> **拡張子フック**: Antigravity の `PostToolUse` は `toolCall`（`name` と `args`）を含むため、`write_to_file` / `replace_file_content` / `multi_replace_file_content` の `args.TargetFile` から編集対象を復元できます。hook エントリに `--event PostToolUse` を付けてください（ペイロードは `PreToolUse` と形状が同一のため、未指定だと `PreToolUse` と推定され保存後フックが動きません）。公式仕様の出力は `{}` 固定なので formatter/linter は実行されますが診断は返せません。lint の本文が必要な場合は Stop hooks で回して `"decision":"continue"` で再投入してください。`run_command` の `PostToolUse` はパススルーします（コマンドは実行済みで、事後のブロックは不可能かつ無意味なため）。出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。明示名を持つ未対応イベントは allow でパススルーし、イベントを判別できない名前なしペイロードは安全な応答形式を選べないためフェイルクローズドになります。
 
 ### Codex CLI (`--format codex`)
 
@@ -975,7 +989,7 @@ graph LR
     GR3 --> CH3
 ```
 
-Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックのため、「ファイル保存後」フローには含めません。ファイル書き込みイベントとして扱うのは `apply_patch` のみです。Antigravity CLI も「ファイル保存後」グループから意図的に除外しています（`PostToolUse` ペイロードに元の `toolCall` が含まれないため）。代わりに Stop hooks でプロジェクト全体の lint/typecheck を回してください。Grok CLI は 3 つのグループすべてに登場しますが、ブロックできるのは `PreToolUse` だけです。残り 2 つは Grok が出力を無視する事後フックのため、処理自体は実行されてもフィードバックは返りません。
+Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックのため、「ファイル保存後」フローには含めません。ファイル書き込みイベントとして扱うのは `apply_patch` のみです。Antigravity CLI は `--event PostToolUse` を指定した hook エントリでのみ「ファイル保存後」グループに入ります（`toolCall.args.TargetFile` から編集対象を復元）。ただし出力は `{}` 固定で診断を返せないため、lint の本文が必要な場合は Stop hooks でプロジェクト全体の lint/typecheck を回してください。Grok CLI は 3 つのグループすべてに登場しますが、ブロックできるのは `PreToolUse` だけです。残り 2 つは Grok が出力を無視する事後フックのため、処理自体は実行されてもフィードバックは返りません。
 
 ## 入出力リファレンス
 

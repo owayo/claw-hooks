@@ -130,6 +130,23 @@ mod tests {
     }
 
     #[test]
+    fn test_powershell_tool_is_filtered_like_bash() {
+        // Claude Code は Windows で PowerShell を主シェルにし、Git Bash が無い環境では
+        // Bash ツールを登録すらしない。ここで拾わないとコマンドブロックが丸ごと無効化される。
+        let filter = make_test_filter(true);
+        let input = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "PowerShell".to_string(),
+            tool_input: ToolInput::Bash(crate::domain::BashInput {
+                command: "testcmd --flag".to_string(),
+                timeout: None,
+            }),
+            session_id: None,
+        };
+        assert!(filter.applies_to(&input));
+    }
+
+    #[test]
     fn test_after_file_edit_event_is_not_applied() {
         let filter = make_test_filter(true);
         let input = HookInput {

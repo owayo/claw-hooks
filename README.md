@@ -30,17 +30,18 @@
 ## Features
 
 - 🦀 **Built with Rust** - Low overhead, lightweight single binary, blazing fast (<10ms startup)
-- ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill` and suggests [safe-kill](https://github.com/owayo/safe-kill)
-- 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase` and suggests [safe-rm](https://github.com/owayo/safe-rm)
+- ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill`, PowerShell's `Stop-Process` and suggests [safe-kill](https://github.com/owayo/safe-kill)
+- 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell's `Remove-Item` and suggests [safe-rm](https://github.com/owayo/safe-rm)
+- 🪟 **PowerShell Tool Coverage** - The same filters apply to Claude Code's `PowerShell` tool, which is the only shell tool on Windows without Git Bash. Configure the matcher as `Bash|PowerShell`
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
+- 🌳 **AST-based Parsing** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes; lint output flows back to Claude Code / Codex CLI via `additionalContext`. Antigravity CLI does fire `PostToolUse`, but the payload omits the original `toolCall` — there's no way to recover which file was edited — so per-file extension hooks fall back to Stop hooks for project-wide lint. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes; lint output flows back to Claude Code / Codex CLI via `additionalContext`. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
 - ⏱️ **Hook Timeout** - Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
 - 📏 **Output Truncation** - Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
-- 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved
+- 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved. The no-op test runs on the *normalized* text, so a tool that pairs a success line with per-run config warnings (e.g. `ruff check --select D…`, which writes ruleset-incompatibility warnings to stderr on every run) is still recognised as a no-op instead of returning a bare `All checks passed!` after every edit. Biome's `Checked N file(s) in <duration>. No fixes applied.` counter and its closing `check ━` / `× Some errors were emitted while running checks.` block are dropped when diagnostics accompany them, and kept when they are the whole output. ANSI stripping also covers the general `ESC` + intermediate-byte escape form (terminfo's `sgr0`, e.g. `\E(B\E[m`) and bare `SO`/`SI`, which otherwise leak a stray character onto every colored `cargo fmt --check` diff line and defeat all the rules above
 - ♻️ **Repeated Source Excerpt Removal** - Within a single diagnostic, source-excerpt lines (`3 │ code`, `> 3 │ code`, `12 | code`) that repeat verbatim are dropped after the first occurrence: biome re-prints the same excerpt once per sub-block (the `!` message, the `i` note, the `i Safe fix:` block) and ruff re-prints context inside its fix diff, and those repeats carry no information. Diff lines (`- old` / `+ new`) survive because they *are* the fix, and the dedup scope resets at every diagnostic header, so separate diagnostics keep their own context. Measured on real output: ruff −6%, biome −14%
 - 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata and byte-size summaries. Raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
 - 🛑 **Bounded I/O** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
@@ -71,7 +72,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 {
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|PowerShell",
       "hooks": [{"type": "command", "command": "claw-hooks hook"}]
     }]
   }
@@ -108,7 +109,7 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 ### Extension hook rules
 
 - Each `{file}` template must contain exactly one `{file}` placeholder.
-- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`, Grok `PostToolUse` with a file path in `toolInput`. Antigravity's `PostToolUse` fires too, but its payload omits the original `toolCall` so the edited file path can't be recovered — use Stop hooks for project-wide lint/typecheck instead.
+- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`, Grok `PostToolUse` with a file path in `toolInput`, and Antigravity `PostToolUse` when the hook entry passes `--event PostToolUse` (the edited path comes from `toolCall.args.TargetFile`). Antigravity's post-hook output is fixed at `{}`, so diagnostics can't be returned there — use Stop hooks when you need the lint text itself.
 - Codex `PostToolUse` + `Bash` passes through; `apply_patch` is parsed for changed file paths (delete-only patches are skipped).
 - Grok `PostToolUse` runs the hooks whenever `toolInput` carries `file_path` / `filePath`, so formatters still rewrite the file. Grok ignores post-hook stdout, though, so the lint text itself is not returned to the agent.
 - Paths with `../`, shell redirection (`<`, `>`), tabs, newlines, or NUL bytes are rejected. Agent payloads missing required fields fail closed.
@@ -222,7 +223,9 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI) |
+| `--event` | `-e` | Hook event name (e.g. `PostToolUse`). For Antigravity CLI, whose payloads carry no event-name field and whose `PreToolUse` / `PostToolUse` are shape-identical. Omit for other agents |
 | `--config` | `-c` | Path to configuration file |
+| `--trace` | `-t` | Trace mode: write the raw input, parsed input, and output to stderr (not persisted to disk) |
 | `--help` | `-h` | Show help |
 
 ### Examples
@@ -237,8 +240,9 @@ claw-hooks hook --format cursor
 # Process Windsurf hooks
 claw-hooks hook --format windsurf
 
-# Process Antigravity CLI hooks
-claw-hooks hook --format agy
+# Process Antigravity CLI hooks (pass --event: its payloads have no event-name field)
+claw-hooks hook --format agy --event PreToolUse
+claw-hooks hook --format agy --event PostToolUse
 
 # Process Codex CLI hooks
 claw-hooks hook --format codex
@@ -261,7 +265,7 @@ Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
       }
     ],
@@ -337,18 +341,26 @@ Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (p
     "PreToolUse": [
       {
         "matcher": "run_command",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy" }]
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PreToolUse" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PostToolUse" }]
       }
     ],
     "Stop": [
-      { "type": "command", "command": "claw-hooks hook --format agy" }
+      { "type": "command", "command": "claw-hooks hook --format agy --event Stop" }
     ]
   }
 }
 ```
 
 Notes:
-- Antigravity's `PostToolUse` event does not include the original `toolCall`, so file-level extension hooks are unavailable. Use Stop hooks to run project-wide lint/typecheck instead — failures are injected back to the agent via `{"decision":"continue","reason":"..."}`.
+- **Pass `--event` for Antigravity.** Antigravity payloads carry no event-name field, and `PreToolUse` and `PostToolUse` are indistinguishable by shape — both send `toolCall` plus `stepIdx`, differing only in an optional `error`. Since `hooks.json` registers each event separately, `--event` tells claw-hooks which one it is. Without it, claw-hooks infers the event and resolves the ambiguous case to `PreToolUse`, which keeps command blocking intact but leaves post-edit hooks inactive.
+- Extension hooks work on Antigravity when `--event PostToolUse` is set: the edited path is read from `toolCall.args.TargetFile`. The official `PostToolUse` output is fixed at `{}`, so formatters and linters **run** but their diagnostics cannot be returned to the agent. To surface diagnostics, run project-wide lint/typecheck as Stop hooks — those failures are injected back via `{"decision":"continue","reason":"..."}`.
+- Antigravity has no `stop_hook_active` / `loop_count` equivalent (`executionNum` is just an attempt counter and is `1` on a normal first stop), so claw-hooks cannot break a loop caused by a stop hook that fails forever. Give reported stop hooks a self-limiting exit condition.
 - `PreInvocation` / `PostInvocation` are out of claw-hooks' scope and pass through automatically; no hook entry is needed for those events.
 - Official Antigravity hooks docs: <https://antigravity.google/docs/customizations/hooks>
 
@@ -607,7 +619,7 @@ dd_block = false  # Allow dd in this project
 {
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|PowerShell",
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "PostToolUse": [{
@@ -867,7 +879,9 @@ camelCase schema. A representative PreToolUse payload:
 }
 ```
 
-Official Antigravity payloads do not include an event-name field. claw-hooks infers the event from its official event-specific fields: `toolCall` identifies PreToolUse, the Stop fields identify Stop, `stepIdx` **without** `toolCall` identifies PostToolUse, and invocation fields identify Pre/PostInvocation. `error` is deliberately not part of that test — the spec marks it Optional ("Empty if successful"), so requiring it would break event inference for every *successful* tool call and answer an unblockable post-hook with a spurious deny. Legacy non-blank `hook_event_name` / `event` fields remain accepted for compatibility. `PreToolUse` requires `stepIdx`; `Stop` requires `executionNum` / `terminationReason` / `fullyIdle` instead of `toolCall`, and an empty `terminationReason` is accepted. `toolCall.args` is required only for `run_command`, because the spec documents zero-argument tools and allows `matcher: ""` / `"*"`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native deny/continue response.
+Official Antigravity payloads do not include an event-name field, and `PreToolUse` and `PostToolUse` are **shape-identical** — both carry `toolCall` and `stepIdx`, differing only in an optional `error`. Pass `--event <name>` so claw-hooks knows which one it received; `hooks.json` registers each event separately, so the calling entry always knows. Resolution order is `--event`, then a legacy non-blank `hook_event_name` / `event` field, then shape inference (`toolCall` → PreToolUse, Stop fields → Stop, invocation fields → Pre/PostInvocation). Inference resolves the PreToolUse/PostToolUse ambiguity to **PreToolUse**, keeping command blocking intact — the opposite choice would let a not-yet-executed command through. `error` is deliberately not used as a discriminator: the spec marks it Optional ("Empty if successful"), so keying on it would misclassify every *successful* tool call.
+
+Required-field validation is limited to what claw-hooks actually uses for a decision. The spec marks only Stop's `fullyIdle` (and the output `decision`) as **Required**, so `stepIdx`, `executionNum` and `terminationReason` are all optional here. Requiring them would answer every `run_command` with a deny — which Antigravity documents as an immediate hard block — and, on Stop, would silently skip every stop hook, because an Antigravity Stop parse error resolves to `{}` + exit 0 to avoid a re-entry loop and so surfaces no error at all. `toolCall.args` is required only for `run_command`, because the spec documents zero-argument tools and allows `matcher: ""` / `"*"`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native deny/continue response.
 
 | Inferred event shape | toolCall.name | Internal Mapping |
 |---|---|---|
@@ -876,7 +890,7 @@ Official Antigravity payloads do not include an event-name field. claw-hooks inf
 | `stepIdx` without `toolCall`, or invocation fields | n/a | PostToolUse / invocation pass-through allow (out of claw-hooks scope) |
 | `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
 
-> **Extension hooks**: Antigravity's `PostToolUse` does fire, but its payload carries only `stepIdx` (plus `error` when the tool failed) and no `toolCall`, and the official output is fixed at `{}` — so per-file post-edit hooks can't be reconstructed. `--format agy` therefore treats `PostToolUse` as a pass-through; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"`. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
+> **Extension hooks**: Antigravity's `PostToolUse` carries `toolCall` (`name` and `args`), so the edited path is recoverable from `args.TargetFile` for `write_to_file` / `replace_file_content` / `multi_replace_file_content`. Add `--event PostToolUse` to that hook entry — the payload is shape-identical to `PreToolUse`, so without the flag claw-hooks infers `PreToolUse` and the post-edit hooks stay inactive. The official output is fixed at `{}`, so formatters and linters run but their diagnostics can't be returned; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"` when you need the text. `PostToolUse` for `run_command` passes through — the command already ran, and blocking it afterwards is neither possible nor meaningful. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
 
 ### Codex CLI (`--format codex`)
 

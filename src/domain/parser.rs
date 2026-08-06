@@ -2823,6 +2823,16 @@ mod tests {
             "chroot /jail ls",
             "taskset -c 0 ls",
             "setsid mycmd --flag",
+            // 追加ラッパーの正常系。実コマンドが安全なら過剰ブロックしない。
+            "arch",
+            "arch -arm64 ls -la",
+            "arch -arch arm64 cargo build",
+            "arch -e FOO=1 cargo test",
+            "systemd-run --uid 0 ls",
+            "systemd-run -u myunit echo done",
+            // script は先頭の記録先ファイルを消費するため、コマンド未指定なら何も検出しない。
+            "script /tmp/typescript",
+            "script -q /dev/null ls",
         ] {
             let commands = parser.extract_commands(input);
             assert!(
@@ -3747,6 +3757,57 @@ mod tests {
         // -unroot の cluster: 先頭 `u` が値取得フラグで以降 `nroot` が inline 値
         // → 追加トークン不要（false）
         assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-unroot"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_arch_single_dash_long_flag() {
+        // `-arch` はダッシュ1つの複数文字フラグ。cluster 解釈に回すと先頭の `-a` 等で
+        // 誤判定するため、完全一致で値取得と判定する必要がある。
+        assert!(ShellParser::wrapper_flag_takes_arg("arch", "-arch"));
+        // `=` で値が付いている場合は追加トークン不要。
+        assert!(!ShellParser::wrapper_flag_takes_arg("arch", "-arch=arm64"));
+        // アーキテクチャ指定（`-arm64` / `-x86_64` / `-32`）は値を取らない。
+        assert!(!ShellParser::wrapper_flag_takes_arg("arch", "-arm64"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("arch", "-x86_64"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("arch", "-32"));
+        // 環境変数の指定・削除は値を取る。
+        assert!(ShellParser::wrapper_flag_takes_arg("arch", "-e"));
+        assert!(ShellParser::wrapper_flag_takes_arg("arch", "-d"));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_systemd_run() {
+        assert!(ShellParser::wrapper_flag_takes_arg("systemd-run", "--uid"));
+        assert!(ShellParser::wrapper_flag_takes_arg("systemd-run", "-u"));
+        // `--foo=bar` 形式は追加トークン不要。
+        assert!(!ShellParser::wrapper_flag_takes_arg(
+            "systemd-run",
+            "--unit=foo"
+        ));
+        // boolean フラグは値を取らない。
+        assert!(!ShellParser::wrapper_flag_takes_arg(
+            "systemd-run",
+            "--scope"
+        ));
+    }
+
+    #[test]
+    fn test_wrapper_flag_takes_arg_script() {
+        // BSD の `-F <pipe>` / util-linux の `-o <size>` は値を取る。
+        assert!(ShellParser::wrapper_flag_takes_arg("script", "-F"));
+        assert!(ShellParser::wrapper_flag_takes_arg("script", "-o"));
+        // `-t` は util-linux で任意引数のため boolean 扱い（実コマンドを食わない）。
+        assert!(!ShellParser::wrapper_flag_takes_arg("script", "-t"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("script", "-q"));
+    }
+
+    #[test]
+    fn test_existing_short_flags_unaffected_by_single_dash_long_match() {
+        // 完全一致分岐の追加で既存の cluster 解釈が変わっていないこと。
+        assert!(ShellParser::wrapper_flag_takes_arg("sudo", "-u"));
+        assert!(ShellParser::wrapper_flag_takes_arg("sudo", "-nu"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-uroot"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("sudo", "-nv"));
     }
 
     #[test]

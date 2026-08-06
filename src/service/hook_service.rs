@@ -64,9 +64,12 @@ impl HookService {
         let message = "claw-hooks configuration is invalid. Run `claw-hooks check`.";
 
         // イベント別の拒否形式を選ぶため、生入力からイベント名だけを読み取る。
+        // 上限超過の入力も捨てずに渡す。捨てると Stop を判別できず、設定エラー時に
+        // Stop へブロック（= 継続プロンプト）を返して無限ループを招く。
+        // 先頭は読めているため、イベント名の走査フォールバックで判別できる。
         let raw_input = read_stdin_bounded(io::stdin())
             .ok()
-            .filter(|raw| !raw.is_empty() && raw.len() as u64 <= MAX_INPUT_BYTES)
+            .filter(|raw| !raw.is_empty())
             .map(|raw| String::from_utf8_lossy(&raw).into_owned());
 
         if trace {
@@ -180,19 +183,28 @@ impl HookService {
                 );
             }
         };
+        // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
+        // （置換文字 U+FFFD に変換され、後続のパース/検出はフェイルクローズで動作する）。
+        let input = String::from_utf8_lossy(&raw).into_owned();
+
         if raw.len() as u64 > MAX_INPUT_BYTES {
             // 入力過大でフェイルクローズ。ログには実バイト数と上限を残しつつ、
             // エージェントへ返す本文は短い定型文（"Input too large"）にする。
+            //
+            // 元入力（先頭が読めている分）を渡すのが重要。渡さないと
+            // `blocks_would_loop_or_be_ignored` がイベント名を判別できず、Stop に対しても
+            // ブロックを返してしまう。Stop のブロックは「停止させず reason を継続プロンプト
+            // にする」意味なので、巨大な Stop ペイロードが来るたびに
+            // ブロック → 継続 → Stop 再発火 → 同じ失敗、の無限ループになる。
+            // `read_stdin_bounded` は上限 +1 バイトで打ち切るため JSON としては壊れているが、
+            // イベント名は先頭付近にあるため走査フォールバックで判別できる。
             let log_message = format!(
                 "Input exceeds limit: {} bytes (max {})",
                 raw.len(),
                 MAX_INPUT_BYTES
             );
-            return self.fail_closed(&mut stdout, &log_message, "Input too large", None);
+            return self.fail_closed(&mut stdout, &log_message, "Input too large", Some(&input));
         }
-        // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
-        // （置換文字 U+FFFD に変換され、後続のパース/検出はフェイルクローズで動作する）。
-        let input = String::from_utf8_lossy(&raw).into_owned();
 
         // トレースモード: 生の入力を即座に stderr に出力
         if self.trace {
@@ -378,16 +390,27 @@ impl HookService {
             Some(input) => self.adapter.format_error_for_input(emit_message, input),
             None => self.adapter.format_error(emit_message),
         };
-        self.write_error_output(stdout, &output_json)?;
-        Ok(self.adapter.error_exit_code(raw_input))
+        let exit_code = self.adapter.error_exit_code(raw_input);
+        self.write_error_output(stdout, &output_json, exit_code)?;
+        Ok(exit_code)
     }
 
     /// フェイルクローズ時のエラー出力を適切なストリームに書き込む。
     ///
-    /// Windsurf はブロック時に exit code 2 + stderr からメッセージを読むため、
+    /// Windsurf / Claude はブロック時に exit code 2 + stderr からメッセージを読むため、
     /// フェイルクローズパスでも stderr に書く必要がある。
-    fn write_error_output(&self, stdout: &mut io::StdoutLock, output_json: &str) -> Result<()> {
-        if self.adapter.format_uses_stderr_for_errors() {
+    ///
+    /// ただし終了コードが 0 の場合は「ブロックではない」応答なので stdout に書く。
+    /// Stop 系のパースエラーは無限ループ回避のため `{}` + exit 0（停止許可）を返すが、
+    /// これは判定 JSON であってエラー本文ではない。stderr に出すと本来 stdout で
+    /// 返すべき JSON がデバッグログ側へ流れ、stdout が空のままになる。
+    fn write_error_output(
+        &self,
+        stdout: &mut io::StdoutLock,
+        output_json: &str,
+        exit_code: i32,
+    ) -> Result<()> {
+        if exit_code != 0 && self.adapter.format_uses_stderr_for_errors() {
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
             writeln!(stderr, "{}", output_json)?;

@@ -283,6 +283,111 @@ fn test_non_bash_tool_allowed() {
 }
 
 #[test]
+fn test_powershell_tool_dangerous_command_blocked() {
+    // Windows で Git Bash が無い環境では Claude Code が Bash ツールを登録せず
+    // PowerShell が主シェルになる。公式仕様も `Bash|PowerShell` の両方に
+    // マッチさせるよう明記しており、ここを拾わないと全ブロックが無効化される。
+    for command in [
+        "rm -rf /tmp/x",
+        "Remove-Item -Recurse -Force C:/build",
+        "Stop-Process -Id 123",
+        "del C:/tmp/x",
+    ] {
+        let input = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{{"command":"{}"}}}}"#,
+            command
+        );
+        let (stdout, _stderr, _exit_code) = run_hook(&input);
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "PowerShell の危険コマンドはブロックされるべき ({command}): {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_powershell_tool_safe_command_allowed() {
+    for command in ["Get-ChildItem -Recurse", "ri Array", "ls"] {
+        let input = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{{"command":"{}"}}}}"#,
+            command
+        );
+        let (stdout, _stderr, exit_code) = run_hook(&input);
+        assert_eq!(exit_code, 0, "安全なコマンドは許可されるべき ({command})");
+        assert_eq!(
+            stdout.trim(),
+            "{}",
+            "安全なコマンドは判定を返さない ({command}): {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_execution_wrapper_bypasses_are_blocked() {
+    // 実行委譲ラッパー経由でも危険コマンドを検出する。
+    // arch は macOS 標準、systemd-run は Linux、script は両者に存在する。
+    for command in [
+        "arch -arm64 rm -rf /tmp/x",
+        "arch -arch x86_64 rm -rf /tmp/x",
+        "systemd-run --uid 0 rm -rf /tmp/x",
+        "script -q /dev/null rm -rf /tmp/x",
+        "sudo arch -arm64 rm -rf /tmp/x",
+    ] {
+        let input = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
+            command
+        );
+        let (stdout, _stderr, _exit_code) = run_hook(&input);
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "ラッパー経由の危険コマンドはブロックされるべき ({command}): {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_execution_wrapper_safe_commands_not_overblocked() {
+    for command in [
+        "arch -arm64 ls -la",
+        "script /tmp/typescript",
+        "systemd-run --uid 0 ls",
+    ] {
+        let input = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#,
+            command
+        );
+        let (stdout, _stderr, exit_code) = run_hook(&input);
+        assert_eq!(exit_code, 0, "過剰ブロックしてはいけない ({command})");
+        assert_eq!(
+            stdout.trim(),
+            "{}",
+            "過剰ブロックしてはいけない ({command}): {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_truncated_stop_payload_allows_stop_instead_of_looping() {
+    // Stop のブロックは「停止させず reason を継続プロンプトにする」意味なので、
+    // 壊れたペイロードに返すと Stop 再発火の無限ループになる。
+    let truncated = r#"{"hook_event_name":"Stop","stop_hook_active":"#;
+    let (stdout, _stderr, exit_code) = run_hook(truncated);
+
+    assert_eq!(exit_code, 0, "停止を許可すべき: {stdout}");
+    assert_eq!(stdout.trim(), "{}", "停止を許可すべき: {stdout}");
+}
+
+#[test]
+fn test_truncated_pre_tool_use_payload_still_fails_closed() {
+    // 実行前ゲートは壊れた入力でもブロックを維持する。
+    let truncated =
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"#;
+    let (_stdout, stderr, exit_code) = run_hook(truncated);
+
+    assert_eq!(exit_code, 2, "フェイルクローズドを維持すべき: {stderr}");
+}
+
+#[test]
 fn test_post_tool_use_event() {
     let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"kill 1234"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

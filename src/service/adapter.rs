@@ -16,6 +16,85 @@ use crate::cli::Format;
 use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output, truncate_output};
 use crate::service::log_sanitizer::summarize_hook_input;
 
+/// 壊れた JSON からイベント名を走査する際に読む先頭バイト数。
+///
+/// 各エージェントはイベント名を識別子としてペイロード先頭付近に置くため、
+/// 先頭だけを見れば十分。全体を走査すると、巨大な `tool_input.command` の本文に
+/// 偶然含まれる同名キーを拾ってしまう余地が広がるため、意図的に狭くする。
+const EVENT_NAME_SCAN_PREFIX_BYTES: usize = 4096;
+
+/// JSON としてパースできない入力から、イベント名フィールドの値だけを走査で取り出す。
+///
+/// 用途は「Stop 系など、ブロックを返すとループする / 無視されるイベントか」の判定に限る。
+/// 入力が上限超過で途中までしか読めていない場合（`read_stdin_bounded` は
+/// `MAX_INPUT_BYTES + 1` で打ち切るため必ず壊れた JSON になる）や、エージェント側の
+/// 書き込みが途中で切れた場合でも、Stop のループ回避を効かせるために必要。
+/// これが無いと「パース失敗 → ブロック → 継続 → Stop 再発火 → 同じ失敗」の
+/// 自己維持ループになる（ループ防止層はどれもパース成功後にしか働かない）。
+///
+/// 誤判定の方向づけ:
+/// - キーは引用符込みの完全一致で探し、値は最初の 1 件だけを採用する。
+/// - 走査対象を先頭 `EVENT_NAME_SCAN_PREFIX_BYTES` に限定する。実エージェントは
+///   イベント名を先頭付近に置くため、巨大なコマンド本文中の同名文字列より先に
+///   本物のキーへ到達する。
+/// - 見つからなければ `None` を返し、呼び出し側は従来どおりフェイルクローズド
+///   （ブロック）に倒れる。
+fn scan_event_name_in_malformed_input(input: &str, keys: &[&str]) -> Option<String> {
+    let mut end = input.len().min(EVENT_NAME_SCAN_PREFIX_BYTES);
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = &input[..end];
+
+    keys.iter()
+        .filter_map(|key| {
+            let key_at = prefix.find(key)?;
+            let value = scan_json_string_value(&prefix[key_at + key.len()..])?;
+            Some((key_at, value))
+        })
+        // 複数キーが見つかった場合は、より手前に現れた方を採用する。
+        .min_by_key(|(key_at, _)| *key_at)
+        .map(|(_, value)| value)
+}
+
+/// `: "value"` の形を読み、文字列値を返す。読めなければ `None`。
+fn scan_json_string_value(after_key: &str) -> Option<String> {
+    let mut chars = after_key
+        .char_indices()
+        .skip_while(|(_, c)| c.is_whitespace());
+    let (_, colon) = chars.next()?;
+    if colon != ':' {
+        return None;
+    }
+    let mut rest = chars.skip_while(|(_, c)| c.is_whitespace());
+    let (quote_at, quote) = rest.next()?;
+    if quote != '"' {
+        return None;
+    }
+
+    let body = &after_key[quote_at + 1..];
+    let mut value = String::new();
+    let mut escaped = false;
+    for c in body.chars() {
+        if escaped {
+            // エスケープの厳密な復元は不要（イベント名に必要な文字は現れない）。
+            value.push(c);
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '"' => {
+                let trimmed = value.trim();
+                return (!trimmed.is_empty()).then(|| trimmed.to_string());
+            }
+            _ => value.push(c),
+        }
+    }
+    // 閉じ引用符が無い（切り詰められた）場合は判定に使わない。
+    None
+}
+
 /// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
     format: Format,
@@ -269,14 +348,8 @@ impl FormatAdapter {
             ),
             Format::Windsurf => {
                 // Windsurf のイベント名フィールドは agent_action_name。
-                serde_json::from_str::<serde_json::Value>(input)
-                    .ok()
-                    .and_then(|raw| {
-                        raw.get("agent_action_name")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s == "post_cascade_response")
-                    })
-                    .unwrap_or(false)
+                Self::windsurf_action_name_from_input(input).as_deref()
+                    == Some("post_cascade_response")
             }
             Format::Grok => {
                 // Grok でブロックできるのは PreToolUse だけ。
@@ -336,18 +409,34 @@ impl FormatAdapter {
         self.format_error(message)
     }
 
+    /// 壊れた JSON から `agent_action_name`（Windsurf のイベント名）を取り出す。
+    fn windsurf_action_name_from_input(input: &str) -> Option<String> {
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(input) {
+            return raw
+                .get("agent_action_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from);
+        }
+        scan_event_name_in_malformed_input(input, &["\"agent_action_name\""])
+    }
+
     /// 生 JSON からイベント名だけを取り出す。失敗時は通常のエラー形式へフォールバックする。
     fn raw_hook_event_name(input: &str) -> Option<String> {
-        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
-        raw.get("hook_event_name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                raw.get("event")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .map(String::from)
+        let parsed = serde_json::from_str::<serde_json::Value>(input).ok();
+        if let Some(raw) = parsed {
+            return raw
+                .get("hook_event_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    raw.get("event")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .map(String::from);
+        }
+        scan_event_name_in_malformed_input(input, &["\"hook_event_name\"", "\"event\""])
     }
 
     /// Antigravity のイベント名を明示フィールドまたは公式のイベント固有フィールドから得る。
@@ -394,12 +483,15 @@ impl FormatAdapter {
 
     /// 生 JSON から Grok のイベント名を取得する（camelCase の hookEventName）。
     fn grok_hook_event_name_from_input(input: &str) -> Option<String> {
-        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
-        raw.get("hookEventName")
-            .or_else(|| raw.get("hook_event_name"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .map(String::from)
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(input) {
+            return raw
+                .get("hookEventName")
+                .or_else(|| raw.get("hook_event_name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from);
+        }
+        scan_event_name_in_malformed_input(input, &["\"hookEventName\"", "\"hook_event_name\""])
     }
 
     /// 生 JSON から Antigravity のイベント名を取得する。
@@ -5826,6 +5918,94 @@ mod tests {
             adapter.parse_input(input).unwrap().event,
             HookEvent::BeforeCommand
         );
+    }
+
+    // === 壊れた JSON からのイベント名走査（Stop のループ回避） ===
+
+    #[test]
+    fn test_scan_event_name_reads_truncated_payload() {
+        let truncated = r#"{"hook_event_name":"Stop","stop_hook_active":"#;
+        assert_eq!(
+            scan_event_name_in_malformed_input(truncated, &["\"hook_event_name\"", "\"event\""]),
+            Some("Stop".to_string())
+        );
+    }
+
+    #[test]
+    fn test_scan_event_name_returns_none_without_closing_quote() {
+        // 値そのものが切れている場合は判定に使わない（フェイルクローズドを維持）。
+        let truncated = r#"{"hook_event_name":"Sto"#;
+        assert_eq!(
+            scan_event_name_in_malformed_input(truncated, &["\"hook_event_name\""]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_scan_event_name_ignores_content_beyond_prefix_window() {
+        // 先頭ウィンドウ外に現れるキーは拾わない（巨大なコマンド本文での誤検出防止）。
+        let padded = format!(
+            "{{\"pad\":\"{}\",\"hook_event_name\":\"Stop\"",
+            "x".repeat(EVENT_NAME_SCAN_PREFIX_BYTES)
+        );
+        assert_eq!(
+            scan_event_name_in_malformed_input(&padded, &["\"hook_event_name\""]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_scan_event_name_prefers_earliest_key() {
+        let input = r#"{"hook_event_name":"Stop","event":"PreToolUse""#;
+        assert_eq!(
+            scan_event_name_in_malformed_input(input, &["\"hook_event_name\"", "\"event\""]),
+            Some("Stop".to_string())
+        );
+    }
+
+    #[test]
+    fn test_truncated_stop_does_not_block_for_claude_and_codex() {
+        // Stop のブロックは「停止させず reason を継続プロンプトにする」意味なので、
+        // 壊れたペイロードで返すと Stop 再発火の無限ループになる。
+        let truncated = r#"{"hook_event_name":"Stop","stop_hook_active":"#;
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 0);
+            assert_eq!(
+                adapter.format_error_for_input("boom", truncated),
+                "{}",
+                "{format:?} は停止を許可すべき"
+            );
+            assert_eq!(adapter.error_exit_code(Some(truncated)), 0);
+        }
+    }
+
+    #[test]
+    fn test_truncated_pre_tool_use_still_fails_closed() {
+        // 実行前ゲートは壊れた入力でもブロックを維持する（フェイルクローズド）。
+        let truncated =
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"#;
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let output = adapter.format_error_for_input("boom", truncated);
+        assert!(
+            output.contains("\"permissionDecision\":\"deny\""),
+            "PreToolUse は拒否を維持すべき: {output}"
+        );
+    }
+
+    #[test]
+    fn test_truncated_cursor_stop_does_not_block() {
+        let truncated = r#"{"hook_event_name":"stop","conversation_id":"#;
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        assert_eq!(adapter.format_error_for_input("boom", truncated), "{}");
+        assert_eq!(adapter.error_exit_code(Some(truncated)), 0);
+    }
+
+    #[test]
+    fn test_truncated_windsurf_post_cascade_does_not_block() {
+        let truncated = r#"{"agent_action_name":"post_cascade_response","cascade_id":"#;
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        assert_eq!(adapter.format_error_for_input("boom", truncated), "{}");
+        assert_eq!(adapter.error_exit_code(Some(truncated)), 0);
     }
 
     #[test]

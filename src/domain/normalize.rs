@@ -194,9 +194,63 @@ pub fn normalize_lint_output(output: &str) -> String {
 
     let lines = dedup_repeated_explanation_lines(lines);
     let lines = dedup_repeated_source_context_lines(lines);
+    let lines = drop_redundant_tool_summary_lines(lines);
     let lines = collapse_repeated_prefix_lines(lines);
 
     lines.join("\n")
+}
+
+/// 診断が併記されているときにだけ冗長になるツールの集計行・締めの行を除去する。
+///
+/// biome は診断を列挙したうえで、次の 2 種類の「情報量ゼロの締め」を必ず付ける:
+///
+/// 1. `Checked 1 file in 12ms. No fixes applied.`
+///    「何件見て何 ms かかったか」「書き換えなかったか」だけの集計行。下に診断が
+///    並んでいる時点で「書き換えていない」ことは自明で、経過ミリ秒はエージェントの
+///    行動を変えない。
+/// 2. `check ━` ヘッダ + `× Some errors were emitted while running checks.`
+///    「エラーがあった」ことの再掲。直前に列挙された診断そのものが証拠なので重複。
+///
+/// ただし、これらが出力の全体である場合（診断が 1 件も無い成功時）は削除しない。
+/// 「何も問題が無かった」という唯一の手掛かりを消してしまうためである。その場合の
+/// 抑制は呼び出し側の成功時 no-op 判定（`is_noop_success_output`）が担当する。
+/// この分担により、コマンド失敗時に唯一の出力だった集計行を失う事故を避けられる。
+fn drop_redundant_tool_summary_lines(lines: Vec<String>) -> Vec<String> {
+    let has_other_content = lines
+        .iter()
+        .any(|line| !line.is_empty() && !is_redundant_tool_summary_line(line));
+    if !has_other_content {
+        return lines;
+    }
+
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if is_redundant_tool_summary_line(&line) {
+            continue;
+        }
+        // 集計行の除去で空行が連続し得るため 1 行に圧縮する。
+        if line.is_empty() && result.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        result.push(line);
+    }
+    while result.last().is_some_and(|l| l.is_empty()) {
+        result.pop();
+    }
+    result
+}
+
+/// 診断が併記されているときに冗長になる集計行・締めの行かどうかを判定する。
+fn is_redundant_tool_summary_line(line: &str) -> bool {
+    // biome の集計行（`Checked N file(s) in <時間>. No fixes applied.`）。
+    // `Fixed N file(s).` は「ファイルが書き換えられた」シグナルなので対象外。
+    if is_noop_success_line(line) {
+        return true;
+    }
+    // biome の締めブロック。`check ━` は集計ブロックのヘッダで、ファイルパスを持つ
+    // 実診断のヘッダ（`src/a.ts:3:1 lint/... ━` / `src/a.ts format ━`）とは異なる。
+    // `━` は collapse_repeated_chars で 1 文字に圧縮済み。
+    line == "check ━" || line == "× Some errors were emitted while running checks."
 }
 
 /// 同一診断の中で逐語一致するソースコンテキスト行の2回目以降を除去する。
@@ -2970,5 +3024,138 @@ undocumented-public-module: Missing docstring in public module\n\
         assert!(is_diagnostic_header_line("-> sample.py:5:9"));
         assert!(!is_diagnostic_header_line("3 \u{2502} let c = 3;"));
         assert!(!is_diagnostic_header_line(""));
+    }
+
+    // === ESC + 中間バイトのエスケープシーケンス（terminfo sgr0）===
+
+    #[test]
+    fn test_strip_ansi_removes_g0_charset_escape() {
+        // terminfo の sgr0 は `\E(B\E[m`。`ESC ( B` の中間バイト `(` を読み飛ばさないと
+        // 終端バイト `B` が本文に残り、行頭が `B+` になる（rustfmt の色付き差分で発生）。
+        let input = "\x1b(B\x1b[m\x1b[32m+ assert!(\x1b(B\x1b[m";
+        assert_eq!(strip_ansi_codes(input), "+ assert!(");
+    }
+
+    #[test]
+    fn test_strip_ansi_removes_bare_shift_in_out() {
+        // TERM によっては sgr0 が `\E[m\017`（生の SI）になる。ESC を伴わないため
+        // エスケープ解析に掛からず、そのまま本文へ残る。
+        let input = "\x1b[m\x0f+ second_line\x0e";
+        assert_eq!(strip_ansi_codes(input), "+ second_line");
+    }
+
+    #[test]
+    fn test_strip_ansi_preserves_two_byte_escapes() {
+        // ESC 7 / ESC 8（カーソル保存・復元）のような 2 バイト形式は従来どおり除去する。
+        assert_eq!(strip_ansi_codes("a\x1b7b\x1b8c"), "abc");
+        // SS2 / SS3 も同様。
+        assert_eq!(strip_ansi_codes("a\x1bNb"), "ab");
+    }
+
+    #[test]
+    fn test_normalize_rustfmt_colored_diff_has_no_residue() {
+        // 実際の `cargo fmt --check` 出力（色付き）を通しで正規化する。
+        let input = "Diff in js_ts.rs:735:\n\
+                     \x1b(B\x1b[m\x1b[32m+ assert!(\x1b(B\x1b[m\n\
+                     \x1b(B\x1b[m\x1b[32m+ a.has_unresolved_access,\x1b(B\x1b[m\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("B+"),
+            "sgr0 の終端バイトが残ってはいけない: {result}"
+        );
+        assert!(result.contains("+ assert!("), "差分行は保持する: {result}");
+    }
+
+    // === biome の冗長な集計行・締めの行 ===
+
+    #[test]
+    fn test_biome_checked_summary_dropped_when_diagnostics_follow() {
+        let input = "Checked 1 file in 12ms. No fixes applied.\n\
+                     Found 1 error.\n\
+                     web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("No fixes applied"),
+            "診断があるとき集計行は冗長: {result}"
+        );
+        assert!(
+            result.contains("Found 1 error."),
+            "件数は保持する: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_biome_checked_summary_kept_when_only_content() {
+        // 集計行しか無い場合は消さない（成功時の抑制は呼び出し側の no-op 判定が担当）。
+        let input = "Checked 1 file in 12ms. No fixes applied.\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "Checked 1 file in 12ms. No fixes applied.");
+    }
+
+    #[test]
+    fn test_biome_trailing_check_block_dropped() {
+        let input = "web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n\
+                     \n\
+                     check \u{2501}\u{2501}\u{2501}\u{2501}\n\
+                     \n\
+                     \u{d7} Some errors were emitted while running checks.\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("Some errors were emitted"),
+            "締めの再掲は冗長: {result}"
+        );
+        assert!(
+            !result.contains("check \u{2501}"),
+            "集計ブロックのヘッダも不要: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "実診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_biome_file_header_with_box_char_is_preserved() {
+        // ファイルパスを持つ実診断のヘッダは `check ━` と違い残す。
+        let input = "web/a.ts format \u{2501}\u{2501}\u{2501}\n\
+                     \u{d7} Formatter would have printed the following content:\n\
+                     3 \u{2502} + const a = 1;\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("web/a.ts format"),
+            "実ヘッダは保持: {result}"
+        );
+        assert!(
+            result.contains("Formatter would have printed"),
+            "整形差分の見出しは保持: {result}"
+        );
+    }
+
+    #[test]
+    fn test_all_checks_passed_alone_is_preserved_by_normalize() {
+        // normalize 自体は `All checks passed!` を消さない（成功時のみ抑制するのは
+        // 呼び出し側の責務。失敗時に唯一の出力を失わないための分担）。
+        let result = normalize_lint_output("All checks passed!");
+        assert_eq!(result, "All checks passed!");
+    }
+
+    #[test]
+    fn test_ruff_incompatibility_warnings_with_all_checks_passed_becomes_noop() {
+        // ruff の `check --select D...` は毎回 stderr にルールセット非互換警告を出す。
+        // 正規化後は `All checks passed!` だけが残り、no-op 判定が成立する必要がある
+        // （これが成立しないと編集のたびに `[ruff] All checks passed!` が返る）。
+        let input = "All checks passed!\n\
+                     warning: `one-blank-line-before-class` (D203) and `no-blank-line-before-class` (D211) are incompatible. Ignoring `one-blank-line-before-class`.\n\
+                     warning: `multi-line-summary-first-line` (D212) and `multi-line-summary-second-line` (D213) are incompatible. Ignoring `multi-line-summary-second-line`.\n";
+        let normalized = normalize_lint_output(input);
+        assert_eq!(normalized, "All checks passed!");
+        assert!(
+            is_noop_success_output(&normalized),
+            "正規化後は no-op と判定されるべき: {normalized}"
+        );
     }
 }

@@ -314,10 +314,15 @@ impl ExtensionHookFilter {
                     // その後の正規化で警告だけが消えるため、結果として
                     // `[ruff] All checks passed!` が編集のたびにエージェントへ返っていた。
                     // 収集する文字列自体は変更しない（正規化は最後に一度だけ適用する）。
+                    //
+                    // 正規化で中身が空になった場合も no-op とみなす。正規化はノイズ行
+                    // （ルールセット非互換警告・冗長な集計行・枠線など）を落とすため、
+                    // 「ノイズしか無かった」出力はここで空文字列になる。これを no-op に
+                    // 含めないと、空の追加コンテキストをエージェントへ返してしまう。
+                    let normalized_output = normalize_lint_output(&result.output);
                     let noop_success = result.success
-                        && crate::domain::is_noop_success_output(&normalize_lint_output(
-                            &result.output,
-                        ));
+                        && (normalized_output.is_empty()
+                            || crate::domain::is_noop_success_output(&normalized_output));
                     // 空でない出力を収集（警告、エラー、lint メッセージ）
                     if !result.output.is_empty() && !noop_success {
                         outputs.push(format!("[{}] {}", result.display_label, result.output));
@@ -1014,6 +1019,66 @@ mod tests {
                 additional_context: None,
             } => {}
             other => panic!("no-op 成功出力は抑制されるべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_suppresses_noop_success_output_with_ruleset_warnings() {
+        // ruff の `check --select D...` は stdout に `All checks passed!` を出しつつ、
+        // stderr へ毎回ルールセット非互換の警告を出す（exit 0）。生の結合文字列で
+        // no-op 判定すると「no-op ではない」と誤判定し、その後の正規化で警告だけが
+        // 消えるため `[ruff] All checks passed!` が編集のたびに返ってしまっていた。
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec![
+                "sh -c 'printf \"All checks passed!\\n\"; printf \"warning: D203 and D211 are incompatible. Ignoring D203.\\n\" >&2 #ignore {file}'"
+                    .to_string(),
+            ],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: None,
+            } => {}
+            other => panic!("非互換警告付きの no-op 成功出力も抑制されるべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_execute_suppresses_output_that_normalizes_to_empty() {
+        // 正規化で全て落ちる出力（枠線のみ等）は空の追加コンテキストを返さない。
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["sh -c 'printf \"   |\\n  ^^^\\n\" #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: None,
+            } => {}
+            other => panic!("正規化で空になる出力は返さないべき: {other:?}"),
         }
     }
 

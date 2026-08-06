@@ -11,7 +11,7 @@ keywords = ["cli", "hooks", "ai", "claude-code", "cursor"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-clap = { version = "4.6.3", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.3"
@@ -41,7 +41,7 @@ ast-parser = ["tree-sitter", "tree-sitter-bash"]
 # Unix では timeout 時にプロセスグループ全体を SIGKILL するため libc を使う。
 # Windows では同等の Job Object 実装は未対応のため、libc 依存は不要。
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.186"
+libc = "0.2.189"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -70,10 +70,49 @@ impl Drop for RecursionGuard {
 /// `pkexec`（Polkit）と `gosu`（コンテナ向けの軽量 setuid 代替）は `sudo` / `doas` と同様に
 /// 後続の引数を昇格権限で実行するため、ここで認識しないと `pkexec rm -rf /` や
 /// `gosu root rm -rf /` のように危険コマンド検出を root 権限ごとバイパスされる。
+///
+/// `arch` は macOS 標準の `/usr/bin/arch` で、`arch -arm64 rm -rf /` のように
+/// アーキテクチャを指定して後続コマンドを実行する（`env` / `nice` と同じ実行委譲）。
+/// Linux の coreutils `arch` は引数を無視して機種名を表示するだけなので、そこでは
+/// 過剰ブロックになり得るが、フェイルクローズ方針に従い検出漏れより過剰ブロックを選ぶ。
+///
+/// `systemd-run` は一時ユニットとしてコマンドを実行し、`--uid` / `--machine` 等で
+/// 特権委譲も伴うため、`pkexec` / `gosu` と同じ理由で認識する必要がある。
+///
+/// `script` は擬似端末を割り当てて後続コマンドを実行する（BSD/macOS の
+/// `script -q /dev/null rm -rf /` 形式）。Linux 版は `-c` でコマンド文字列を取るため
+/// `SHELL_COMMANDS` にも登録して両形式を捕捉する。
 const COMMAND_WRAPPERS: &[&str] = &[
-    "sudo", "env", "nohup", "nice", "ionice", "time", "timeout", "strace", "ltrace", "doas",
-    "command", "exec", "setsid", "stdbuf", "unshare", "nsenter", "setpriv", "chroot", "flock",
-    "taskset", "watch", "busybox", "toybox", "runuser", "pkexec", "gosu", "su",
+    "sudo",
+    "env",
+    "nohup",
+    "nice",
+    "ionice",
+    "time",
+    "timeout",
+    "strace",
+    "ltrace",
+    "doas",
+    "command",
+    "exec",
+    "setsid",
+    "stdbuf",
+    "unshare",
+    "nsenter",
+    "setpriv",
+    "chroot",
+    "flock",
+    "taskset",
+    "watch",
+    "busybox",
+    "toybox",
+    "runuser",
+    "pkexec",
+    "gosu",
+    "su",
+    "arch",
+    "systemd-run",
+    "script",
 ];
 
 /// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。

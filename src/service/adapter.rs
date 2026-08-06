@@ -424,7 +424,12 @@ impl FormatAdapter {
         raw_tool_input: &serde_json::Value,
     ) -> Result<crate::domain::ToolInput> {
         match tool_name {
-            "Bash" => {
+            // PowerShell ツールの tool_input は Bash と同一形状（`command` にコマンド文字列）。
+            // Windows で Git Bash が無い環境では Claude Code が Bash ツールを登録せず
+            // PowerShell が主シェルになるため、ここで拾わないと危険コマンドの
+            // ブロックが全く効かなくなる（公式仕様も `Bash|PowerShell` の両方に
+            // マッチさせるよう明記している）。
+            "Bash" | "PowerShell" => {
                 let command = raw_tool_input
                     .get("command")
                     .and_then(|v| v.as_str())
@@ -1455,16 +1460,18 @@ impl FormatAdapter {
             other => other.to_string(),
         };
 
-        let raw_tool_input = raw
-            .get("tool_input")
-            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+        // `tool_input` の取得は「あれば使う」に留め、必須判定は後段のツール種別で行う。
+        // 公式仕様では MCP ツールや `update_plan` のような関数ツールも同じフック経路を
+        // 通り、引数を持たないツールは `tool_input` を送らない。
+        // ここで全ツール共通に必須化すると次の実害が出る:
+        //   - PostToolUse: `decision:"block"` が「実際のツール出力をフックのメッセージで
+        //     置き換える」動作のため、モデルが本来のツール出力を失う
+        //   - PreToolUse: 引数を持たないツールに対する誤 deny（即時ハードブロック）
+        let raw_tool_input = raw.get("tool_input");
 
         // PostToolUse（実行後）では、claw-hooks は保存後フックのためにファイルパスしか
-        // 使わない。Bash などファイル編集以外のツールに対して tool_input を厳密検証しても
-        // 得るものが無い一方、失敗時のコストが極端に大きい:
-        // Codex の PostToolUse では `decision:"block"` が「実際のツール出力を
-        // フックのメッセージで置き換える」動作になるため、フェイルクローズドすると
-        // モデルは本来のコマンド出力を一切見られなくなる。
+        // 使わない。ファイル編集以外のツールに対して tool_input を厳密検証しても
+        // 得るものが無い一方、失敗時のコストが極端に大きい（上記の出力置き換え）。
         // そのためファイル編集系ツール以外は検証せず素通しする。
         let is_file_editing_tool = raw_tool_name == "apply_patch"
             || matches!(mapped_tool_name.as_str(), "Write" | "Edit" | "MultiEdit");
@@ -1479,10 +1486,42 @@ impl FormatAdapter {
             return Ok(HookInput {
                 event,
                 tool_name: mapped_tool_name,
-                tool_input: crate::domain::ToolInput::Other(raw_tool_input.clone()),
+                tool_input: crate::domain::ToolInput::Other(
+                    raw_tool_input
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                ),
                 session_id,
             });
         }
+
+        // claw-hooks が実際に判定へ使うツールだけ `tool_input` を必須にする
+        // （危険コマンド判定の `Bash` / `PowerShell`、保存後フックのファイル編集系）。
+        // それ以外は欠落を許容し、`ToolInput::Other` として素通しする。
+        let inspects_tool_input = raw_tool_name == "apply_patch"
+            || matches!(
+                mapped_tool_name.as_str(),
+                "Bash" | "PowerShell" | "Write" | "Edit" | "MultiEdit"
+            );
+        let Some(raw_tool_input) = raw_tool_input else {
+            if inspects_tool_input {
+                return Err(anyhow!("Missing tool_input field"));
+            }
+            debug!(
+                agent = self.format.label(),
+                raw_event = %raw_event,
+                raw_tool_name = %raw_tool_name,
+                mapped_event = ?event,
+                "{} tool_input absent for tool outside claw-hooks' scope, passing through",
+                self.log_prefix()
+            );
+            return Ok(HookInput {
+                event,
+                tool_name: mapped_tool_name,
+                tool_input: crate::domain::ToolInput::Other(serde_json::json!({})),
+                session_id,
+            });
+        };
 
         let tool_input = if raw_tool_name == "apply_patch" {
             // Bash 経路と同様に空文字列の command も fail-closed にする（必須フィールド扱い）。
@@ -1736,10 +1775,10 @@ impl FormatAdapter {
         raw: &serde_json::Value,
         session_id: Option<String>,
     ) -> Result<HookInput> {
-        let _step_idx = raw
-            .get("stepIdx")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("Missing stepIdx field"))?;
+        // `stepIdx` は公式仕様で Required マークが無く、claw-hooks も値を判定に使わない。
+        // 必須にすると、このフィールドを送らない（あるいは名前を変えた）ビルドで
+        // 全ての run_command が「即時ハードブロック」を意味する deny に倒れるため、
+        // 判定に使うフィールドだけ検証する方針（Codex と同じ）に揃えて任意扱いにする。
         let tool_call = raw
             .get("toolCall")
             .ok_or_else(|| anyhow!("Missing toolCall field"))?;
@@ -1812,19 +1851,17 @@ impl FormatAdapter {
 
     /// Antigravity の Stop イベントを内部 Stop HookInput に変換する。
     fn parse_agy_stop(raw: &serde_json::Value, session_id: Option<String>) -> Result<HookInput> {
-        let _execution_num = raw
-            .get("executionNum")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow!("Missing executionNum field"))?;
-        // terminationReason は文字列であることだけを要求する（空文字も受理する）。
-        // 公式仕様は非空を保証しておらず、この値は status / agent_message の
-        // 情報表示にしか使わない。Antigravity の Stop でフェイルクローズすると
-        // `decision:"continue"` を返してエージェントを再投入するため、
-        // 空文字を拒否すると同じペイロードで Stop が再発火する無限ループになり得る。
+        // `executionNum` / `terminationReason` は公式仕様で **Required** マークが無く、
+        // かつ claw-hooks は判定に使わない（前者は破棄、後者は status / agent_message の
+        // 情報表示のみ）。これらを必須にすると、フィールドが 1 つ欠けただけで Stop の
+        // パースが失敗する。Antigravity の Stop のパース失敗は無限ループ回避のため
+        // `{}` + exit 0（停止許可）に倒れる仕様なので、失敗は「エラー表示なしで
+        // 全 stop hook（lint / commit / 通知）が黙って実行されない」形で現れる。
+        // 判定に使わないフィールドで機能を丸ごと落とさないよう、任意扱いにする。
         let termination_reason = raw
             .get("terminationReason")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("Missing terminationReason field"))?
+            .unwrap_or_default()
             .to_string();
 
         // fullyIdle は Stop 固有の必須フィールド。値自体はフィルター判定に使わないが、

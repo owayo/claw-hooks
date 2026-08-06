@@ -94,6 +94,18 @@ impl HookInput {
             None
         }
     }
+
+    /// シェルコマンドを実行するツールかどうかを判定する。
+    ///
+    /// Claude Code は Windows で `PowerShell` ツールを主シェルとして使い、
+    /// Git Bash が無い環境では `Bash` ツールを登録すらしない。公式仕様も
+    /// 「シェルコマンドを検査するフックは `Bash|PowerShell` にマッチさせること。
+    /// `Bash` だけにマッチするフックはそこでは一度も発火しない」と明記している。
+    /// そのため `tool_name == "Bash"` だけで判定すると、Windows 環境で
+    /// 危険コマンドのブロックが丸ごと無効化される（完全なフェイルオープン）。
+    pub fn is_shell_tool(&self) -> bool {
+        matches!(self.tool_name.as_str(), "Bash" | "PowerShell")
+    }
 }
 
 /// ツール固有の入力バリアント。

@@ -6,11 +6,18 @@ use super::builtin_filter::BuiltinCommandFilter;
 const DEFAULT_RM_MESSAGE: &str = "🚫 rm/rmdir command blocked for safety. Configure rm_block_message in config.toml to customize this message.";
 
 /// Unix/Windows の rm コマンドパターン
+///
+/// PowerShell の `Remove-Item` は `rm` / `rmdir` / `del` / `erase` の別名でもあるため
+/// 既存エントリでも捕捉できるが、正規名で書かれた場合に取りこぼさないよう明示する
+/// （`command_key` が小文字化するのでここも小文字で持つ）。
+/// 短縮別名の `ri` は Ruby のドキュメントツール `ri` と衝突するため意図的に含めない。
 const RM_COMMANDS: &[&str] = &[
-    "rm",    // Unix
-    "rmdir", // Unix/Windows
-    "del",   // Windows
-    "erase", // Windows (del のエイリアス)
+    "rm",          // Unix
+    "rmdir",       // Unix/Windows
+    "del",         // Windows
+    "erase",       // Windows (del のエイリアス)
+    "rd",          // Windows cmd (rmdir のエイリアス) / PowerShell
+    "remove-item", // PowerShell の正規コマンドレット名
 ];
 
 /// rm 関連コマンドをブロックするフィルターを作成する。

@@ -118,8 +118,10 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。
 /// `su` / `runuser` は `-c "cmd"` を sh 経由で実行し、`flock` は `<file> -c cmd` 形式を
 /// 取るため、いずれも shell -c と同様に内側コマンド文字列を再評価する必要がある。
+/// util-linux の `script -c "cmd"` も同様にコマンド文字列をシェル経由で実行する。
 const SHELL_COMMANDS: &[&str] = &[
     "bash", "sh", "zsh", "ksh", "csh", "tcsh", "fish", "dash", "cmd", "su", "runuser", "flock",
+    "script",
 ];
 
 /// find で後続引数をコマンドとして実行する述語
@@ -299,6 +301,64 @@ const WRAPPER_FLAG_SPECS: &[WrapperFlagSpec] = &[
             "-o", "-e", "-p", "-s", "-E", "-P", "-a", "-S", "-u", "-b", "-l", "-X",
         ],
         long: &["--output", "--expression", "--attach"],
+    },
+    // macOS の `arch(1)`。`-arch <name>` はダッシュ 1 つの複数文字フラグなので、
+    // cluster 解釈（`-nu`）ではなく完全一致で値取得と判定する必要がある
+    // （`wrapper_flag_takes_arg_key` の単一ダッシュ長形フラグ分岐）。
+    // `-arm64` / `-x86_64` / `-32` / `-64` は値を取らないアーキテクチャ指定なので
+    // ここには含めない（含めると後続の実コマンドを値として食ってしまう）。
+    WrapperFlagSpec {
+        keys: &["arch"],
+        short: &["-arch", "-d", "-e"],
+        long: &[],
+    },
+    // systemd-run の値取得フラグ。`--foo=bar` 形式は inline 値として別途処理されるため、
+    // ここではスペース区切りで値を取る形式を網羅する。取りこぼすと
+    // `systemd-run --uid 0 rm -rf /` のような形式で実コマンドを見落とす。
+    WrapperFlagSpec {
+        keys: &["systemd-run"],
+        short: &["-u", "-p", "-E", "-H", "-M"],
+        long: &[
+            "--unit",
+            "--property",
+            "--description",
+            "--slice",
+            "--setenv",
+            "--host",
+            "--machine",
+            "--service-type",
+            "--uid",
+            "--gid",
+            "--nice",
+            "--working-directory",
+            "--on-active",
+            "--on-boot",
+            "--on-startup",
+            "--on-unit-active",
+            "--on-unit-inactive",
+            "--on-calendar",
+            "--timer-property",
+            "--path-property",
+            "--socket-property",
+        ],
+    },
+    // script の値取得フラグ。BSD/macOS は `-F <pipe>`、util-linux は
+    // `-o/-T/-I/-O/-B/-m/-E <value>` を取る。`-t` は util-linux で任意引数
+    // （`--timing[=file]`）のため、既存方針（任意引数フラグは boolean 扱い）に従い
+    // 値取得には含めない — 含めると後続の実コマンドを値として食う恐れがある。
+    // `-c` は flock と同様に含めない（コマンド文字列は SHELL_COMMANDS 経路が再評価する）。
+    WrapperFlagSpec {
+        keys: &["script"],
+        short: &["-F", "-o", "-T", "-I", "-O", "-B", "-m", "-E"],
+        long: &[
+            "--output-limit",
+            "--log-timing",
+            "--log-in",
+            "--log-out",
+            "--log-io",
+            "--logging-format",
+            "--echo",
+        ],
     },
 ];
 
@@ -1415,6 +1475,13 @@ impl ShellParser {
         // - `-nu`（cluster の末尾だけが値取得フラグ）→ 追加トークンが必要
         // - `-nv`（値取得フラグを含まない）→ 追加トークン不要
         if base_flag.len() > 2 {
+            // ダッシュ 1 つの複数文字フラグ（macOS `arch -arch <name>` 等）は
+            // cluster 解釈より先に完全一致で判定する。文字単位に分解すると
+            // 先頭文字が別の短縮フラグに一致して誤判定し、実コマンドを
+            // 値として食う（= 検出漏れ）ため。
+            if spec.short.contains(&base_flag) {
+                return !has_inline_value;
+            }
             let cluster = &base_flag[1..];
             for (idx, ch) in cluster.char_indices() {
                 let opt = format!("-{}", ch);
@@ -1541,9 +1608,11 @@ impl ShellParser {
     /// 読み飛ばさないと `su root rm -rf /` で `rm` を検出できず、特権昇格込みでバイパスされる。
     /// `runuser` は `-u USER` フラグでユーザを指定する形式が GNU 標準なので、leading
     /// positional には含めない（含めると `runuser -u user cmd` の `cmd` を消費してしまう）。
+    /// `script <file> cmd`（BSD/macOS）も先頭に記録先ファイルを取るため 1 つ消費する。
+    /// 読み飛ばさないと `script -q /dev/null rm -rf /` で `/dev/null` をコマンドと誤認する。
     fn wrapper_leading_positionals(wrapper_key: &str) -> usize {
         match wrapper_key {
-            "chroot" | "flock" | "gosu" | "su" => 1,
+            "chroot" | "flock" | "gosu" | "su" | "script" => 1,
             _ => 0,
         }
     }
@@ -2632,6 +2701,28 @@ mod tests {
             "su --command=\"rm -rf /tmp/x\" root",
             "runuser --session-command \"rm -rf /tmp/x\" user",
             "flock --command \"rm -rf /tmp/x\" /tmp/lock",
+            // macOS の arch(1): アーキテクチャ指定フラグを読み飛ばして実コマンドへ到達する。
+            // `-arch <name>` はダッシュ1つの複数文字フラグなので cluster 解釈では扱えない。
+            "arch rm -rf /tmp/x",
+            "arch -arm64 rm -rf /tmp/x",
+            "arch -x86_64 rm -rf /tmp/x",
+            "arch -32 rm -rf /tmp/x",
+            "arch -arch arm64 rm -rf /tmp/x",
+            "arch -arch x86_64 -e FOO=1 rm -rf /tmp/x",
+            "arch -d PATH rm -rf /tmp/x",
+            "/usr/bin/arch -arm64 rm -rf /tmp/x",
+            // systemd-run: 一時ユニットとしてコマンドを実行する（--uid 等で特権委譲も伴う）。
+            "systemd-run rm -rf /tmp/x",
+            "systemd-run --uid 0 rm -rf /tmp/x",
+            "systemd-run -u myunit rm -rf /tmp/x",
+            "systemd-run --unit=foo --scope rm -rf /tmp/x",
+            "systemd-run -p MemoryMax=1G rm -rf /tmp/x",
+            // script: 擬似端末を割り当てて後続コマンドを実行する。
+            // BSD/macOS は `<file> cmd` 形式、util-linux は `-c "cmd"` 形式。
+            "script -q /dev/null rm -rf /tmp/x",
+            "script /tmp/log.txt rm -rf /tmp/x",
+            "script -a -q /dev/null rm -rf /tmp/x",
+            "script -c \"rm -rf /tmp/x\" /tmp/log.txt",
         ] {
             let commands = parser.extract_commands(input);
             assert!(

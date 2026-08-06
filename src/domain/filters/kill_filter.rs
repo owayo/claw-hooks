@@ -6,11 +6,15 @@ use super::builtin_filter::BuiltinCommandFilter;
 const DEFAULT_KILL_MESSAGE: &str = "🚫 kill/pkill/killall command blocked for safety. Use safe-kill: safe-kill <PID>, safe-kill -N <name>, or safe-kill -p <port>.";
 
 /// Unix/Windows の kill コマンドパターン
+///
+/// PowerShell の `Stop-Process` は `kill` の別名でもあるため既存エントリでも捕捉できるが、
+/// 正規名で書かれた場合に取りこぼさないよう明示する（`command_key` が小文字化する）。
 const KILL_COMMANDS: &[&str] = &[
-    "kill",     // Unix
-    "pkill",    // Unix
-    "killall",  // Unix
-    "taskkill", // Windows
+    "kill",         // Unix
+    "pkill",        // Unix
+    "killall",      // Unix
+    "taskkill",     // Windows
+    "stop-process", // PowerShell の正規コマンドレット名
 ];
 
 /// kill 関連コマンドをブロックするフィルターを作成する。

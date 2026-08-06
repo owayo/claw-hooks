@@ -54,7 +54,7 @@ impl Filter for BuiltinCommandFilter {
         if !matches!(
             input.event,
             HookEvent::BeforeCommand | HookEvent::PermissionRequest
-        ) || input.tool_name != "Bash"
+        ) || !input.is_shell_tool()
         {
             return false;
         }

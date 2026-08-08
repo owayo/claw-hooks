@@ -118,6 +118,24 @@ mod tests {
     }
 
     #[test]
+    fn summarize_hook_input_reads_nested_windsurf_tool_name_without_sensitive_data() {
+        let input = r#"{
+            "agent_action_name": "pre_run_command",
+            "tool_info": {
+                "tool_name": "Shell",
+                "command_line": "echo super-secret-token"
+            }
+        }"#;
+
+        let summary = summarize_hook_input(input);
+
+        assert!(summary.contains("event=pre_run_command"));
+        assert!(summary.contains("tool=Shell"));
+        assert!(!summary.contains("super-secret-token"));
+        assert!(!summary.contains("command_line"));
+    }
+
+    #[test]
     fn summarize_hook_input_handles_invalid_json_without_echoing_input() {
         let summary = summarize_hook_input("not json with secret");
 

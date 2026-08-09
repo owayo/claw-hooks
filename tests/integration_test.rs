@@ -25,6 +25,19 @@ fn run_hook_with_format(json_input: &str, format: &str) -> (String, String, i32)
     run_hook_with_config_and_format(json_input, format, empty_config.path())
 }
 
+fn run_hook_with_format_and_event(
+    json_input: &str,
+    format: &str,
+    event: &str,
+) -> (String, String, i32) {
+    let empty_config = tempfile::Builder::new()
+        .prefix("claw-hooks-test-empty")
+        .suffix(".toml")
+        .tempfile()
+        .expect("Failed to create temp config");
+    run_hook_with_config_format_and_event(json_input, format, empty_config.path(), Some(event))
+}
+
 /// 統合テスト用の Codex 入力に、公式仕様の必須メタデータを補完する。
 fn complete_codex_input(input: &str) -> String {
     fn insert_default(
@@ -883,12 +896,27 @@ fn run_hook_with_config_and_format(
     format: &str,
     config_path: &std::path::Path,
 ) -> (String, String, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+    run_hook_with_config_format_and_event(json_input, format, config_path, None)
+}
+
+fn run_hook_with_config_format_and_event(
+    json_input: &str,
+    format: &str,
+    config_path: &std::path::Path,
+    event: Option<&str>,
+) -> (String, String, i32) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_claw-hooks"));
+    command
         .arg("run")
         .arg("--format")
         .arg(format)
         .arg("--config")
-        .arg(config_path)
+        .arg(config_path);
+    if let Some(event) = event {
+        command.arg("--event").arg(event);
+    }
+
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1951,6 +1979,76 @@ fn test_codex_user_prompt_submit_passthrough() {
     );
 }
 
+// === Antigravity CLI フォーマット ===
+
+#[test]
+fn test_agy_format_block_rm_command() {
+    let input = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "rm -rf /tmp/test"}
+        },
+        "stepIdx": 1,
+        "conversationId": "test-conversation",
+        "workspacePaths": ["/tmp"],
+        "transcriptPath": "/tmp/transcript.json",
+        "artifactDirectoryPath": "/tmp/artifacts",
+        "modelName": "test-model"
+    }"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format_and_event(input, "agy", "PreToolUse");
+
+    assert_eq!(exit_code, 0);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "deny");
+    assert!(!parsed["reason"].as_str().unwrap().trim().is_empty());
+}
+
+#[test]
+fn test_agy_format_allow_safe_command() {
+    let input = r#"{
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "echo safe"}
+        },
+        "stepIdx": 1,
+        "conversationId": "test-conversation"
+    }"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format_and_event(input, "agy", "PreToolUse");
+
+    assert_eq!(exit_code, 0);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "allow");
+}
+
+#[test]
+fn test_agy_stop_event_uses_required_decision() {
+    let input = r#"{
+        "fullyIdle": true,
+        "executionNum": 1,
+        "terminationReason": "success",
+        "conversationId": "test-conversation",
+        "workspacePaths": ["/tmp"],
+        "transcriptPath": "/tmp/transcript.json",
+        "artifactDirectoryPath": "/tmp/artifacts",
+        "modelName": "test-model"
+    }"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format_and_event(input, "agy", "Stop");
+
+    assert_eq!(exit_code, 0);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "stop");
+}
+
+#[test]
+fn test_agy_malformed_stop_event_uses_required_decision() {
+    let input = r#"{"fullyIdle":"invalid"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format_and_event(input, "agy", "Stop");
+
+    assert_eq!(exit_code, 0);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(parsed["decision"], "stop");
+}
+
 // === Grok CLI フォーマット ===
 
 #[test]
@@ -2129,11 +2227,16 @@ fn test_config_error_does_not_loop_stop_event() {
             exit_code, 0,
             "{format}: Stop must not be blocked on config error (stdout={stdout})"
         );
-        // stdout は空（Claude/Windsurf は stderr 経路）か空オブジェクト
+        // Antigravity は必須 decision、他形式は空出力または空オブジェクトで停止を許可する。
         let body = stdout.trim();
-        assert!(
-            body.is_empty() || body == "{}",
-            "{format}: Stop response must not carry a continue directive: {stdout}"
-        );
+        if format == "agy" {
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed, serde_json::json!({"decision": "stop"}));
+        } else {
+            assert!(
+                body.is_empty() || body == "{}",
+                "{format}: Stop response must not carry a continue directive: {stdout}"
+            );
+        }
     }
 }

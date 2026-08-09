@@ -342,10 +342,13 @@ impl FormatAdapter {
                 Self::raw_hook_event_name(input).as_deref(),
                 Some("stop" | "subagentStop")
             ),
-            Format::Agy => matches!(
-                Self::agy_hook_event_name_from_input(input).as_deref(),
-                Some("Stop")
-            ),
+            Format::Agy => {
+                self.event_override.as_deref() == Some("Stop")
+                    || matches!(
+                        Self::agy_hook_event_name_from_input(input).as_deref(),
+                        Some("Stop")
+                    )
+            }
             Format::Windsurf => {
                 // Windsurf のイベント名フィールドは agent_action_name。
                 Self::windsurf_action_name_from_input(input).as_deref()
@@ -371,6 +374,9 @@ impl FormatAdapter {
         // ブロック不可のイベントではフェイルクローズの拒否を返してはいけない。
         // 詳細は `blocks_would_loop_or_be_ignored` のドキュメントを参照。
         if self.blocks_would_loop_or_be_ignored(input) {
+            if self.format == Format::Agy {
+                return serde_json::json!({"decision": "stop"}).to_string();
+            }
             return "{}".to_string();
         }
 
@@ -2059,7 +2065,8 @@ impl FormatAdapter {
         // かつ claw-hooks は判定に使わない（前者は破棄、後者は status / agent_message の
         // 情報表示のみ）。これらを必須にすると、フィールドが 1 つ欠けただけで Stop の
         // パースが失敗する。Antigravity の Stop のパース失敗は無限ループ回避のため
-        // `{}` + exit 0（停止許可）に倒れる仕様なので、失敗は「エラー表示なしで
+        // `{"decision":"stop"}` + exit 0（停止許可）に倒れる仕様なので、失敗は
+        // 「エラー表示なしで
         // 全 stop hook（lint / commit / 通知）が黙って実行されない」形で現れる。
         // 判定に使わないフィールドで機能を丸ごと落とさないよう、任意扱いにする。
         let termination_reason = raw
@@ -2105,7 +2112,8 @@ impl FormatAdapter {
         // Antigravity の出力スキーマはイベントによって異なる:
         //   - ツール実行前: {decision: "allow|deny|ask|force_ask", reason?, permissionOverrides?}
         //   - PostToolUse / PreInvocation / PostInvocation: {} 固定（ブロック不可）
-        //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は {}
+        //   - Stop: 再投入は {decision: "continue", reason?}、停止許可は
+        //     {decision: "stop"}（decision は必須で、continue 以外なら停止）
         let output = match (event, decision) {
             // Stop の Block は "continue" + reason でエージェントを再起動させ、reason を
             // system message としてエージェントに注入する（lint/typecheck の修正指示等）。
@@ -2116,8 +2124,10 @@ impl FormatAdapter {
                     "reason": truncated
                 })
             }
-            // Stop の Allow は {} を返す（"decision":"continue" 以外なら停止許可、最も無害な空オブジェクト）。
-            (HookEvent::Stop, Decision::Allow { .. }) => serde_json::json!({}),
+            // Stop の Allow は必須 decision に continue 以外の値を指定して停止を許可する。
+            (HookEvent::Stop, Decision::Allow { .. }) => {
+                serde_json::json!({"decision": "stop"})
+            }
             // PostToolUse / 内部 Passthrough（PreInvocation / PostInvocation / 未対応ツール）は
             // ブロック仕様が無いため、claw-hooks 側で Block を検出しても {} に倒す（公式仕様準拠）。
             (HookEvent::AfterFileEdit, _) | (HookEvent::Passthrough, _) => serde_json::json!({}),
@@ -5696,12 +5706,12 @@ mod tests {
     }
 
     #[test]
-    fn test_agy_output_stop_allow_is_empty() {
+    fn test_agy_output_stop_allow_uses_required_decision() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let output = adapter
             .format_output(&Decision::allow(), HookEvent::Stop)
             .unwrap();
-        assert_eq!(output, "{}");
+        assert_eq!(output, r#"{"decision":"stop"}"#);
     }
 
     #[test]
@@ -5811,7 +5821,7 @@ mod tests {
 
         // continue（再投入）ではなく停止許可を返す（無限ループ回避）。
         let output = adapter.format_error_for_input(&error, input);
-        assert_eq!(output, "{}");
+        assert_eq!(output, r#"{"decision":"stop"}"#);
     }
 
     #[test]

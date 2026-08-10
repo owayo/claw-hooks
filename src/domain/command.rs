@@ -36,6 +36,18 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// 出力が保持上限を超えた場合に末尾へ付けるマーカー。
 const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[output truncated by claw-hooks]\n";
 
+/// 実行ファイルのパスから、ログやエラー表示に使用できるファイル名だけを返す。
+///
+/// 設定された絶対パスにはユーザー名や非公開のディレクトリ構成が含まれ得るため、
+/// Unix/Windows のどちらの区切り文字も取り除く。実行不能な空文字やルートだけの
+/// 値には、内容を露出しない固定ラベルを使用する。
+pub(crate) fn program_label(program: &str) -> &str {
+    program
+        .rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
+        .unwrap_or("<unknown>")
+}
+
 /// Unix で子プロセスを新しいプロセスグループに配置する。
 /// `Command::process_group(0)` 相当の挙動を `pre_exec` 経由で安定 API のみで実現する。
 /// （`process_group` は Rust 1.64 以降で安定化済みだが、明示的な意図を残すため pre_exec を使う）
@@ -338,7 +350,7 @@ pub fn spawn_piped_with_env(
     #[cfg(unix)]
     configure_unix_process_group(&mut cmd);
     cmd.spawn()
-        .map_err(|e| format!("Failed to execute '{}': {}", program, e))
+        .map_err(|e| format!("Failed to execute '{}': {}", program_label(program), e))
 }
 
 /// stdout/stderr/stdin を切り離してコマンドを起動する。
@@ -382,7 +394,7 @@ pub fn spawn_detached_with_env(
             });
             pid
         })
-        .map_err(|e| format!("Failed to execute '{}': {}", program, e))
+        .map_err(|e| format!("Failed to execute '{}': {}", program_label(program), e))
 }
 
 /// 任意の `Command` ビルダーに対して、Unix では新しいプロセスグループに配置する設定を施す。
@@ -403,6 +415,14 @@ pub fn configure_process_group(cmd: &mut Command) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn test_program_label_removes_unix_and_windows_directories() {
+        assert_eq!(program_label("/Users/private/bin/tool"), "tool");
+        assert_eq!(program_label(r"C:\\Users\\private\\tool.exe"), "tool.exe");
+        assert_eq!(program_label("cargo"), "cargo");
+        assert_eq!(program_label("/"), "<unknown>");
+    }
 
     /// テストヘルパー：追加の環境変数なしでspawnする。
     fn spawn_piped(program: &str, args: &[String]) -> Result<std::process::Child, String> {
@@ -452,6 +472,18 @@ mod tests {
         assert!(
             child.unwrap_err().contains("Failed to execute"),
             "Error should indicate execution failure"
+        );
+    }
+
+    #[test]
+    fn test_spawn_piped_error_hides_program_directory() {
+        let error = spawn_piped("/private/claw-hooks-secret/nonexistent-command", &[])
+            .expect_err("存在しないコマンドは起動に失敗すべき");
+
+        assert!(error.contains("nonexistent-command"));
+        assert!(
+            !error.contains("/private/claw-hooks-secret"),
+            "実行ファイルのディレクトリをエラーへ含めるべきではない: {error}"
         );
     }
 
@@ -700,6 +732,22 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_detached_error_hides_program_directory() {
+        let error = spawn_detached_with_env(
+            "/private/claw-hooks-secret/nonexistent-detached-command",
+            &[],
+            &[],
+        )
+        .expect_err("存在しないデタッチコマンドは起動に失敗すべき");
+
+        assert!(error.contains("nonexistent-detached-command"));
+        assert!(
+            !error.contains("/private/claw-hooks-secret"),
+            "実行ファイルのディレクトリをエラーへ含めるべきではない: {error}"
+        );
+    }
+
+    #[test]
     fn test_spawn_detached_with_env_passes_env_vars() {
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-detached-env-{}", std::process::id()));
@@ -734,7 +782,7 @@ mod tests {
         let mut reaped = false;
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(20));
-            // SAFETY: ここでは pid に対してシグナル 0 を送って存在確認するだけで、
+            // 安全性: ここでは pid に対してシグナル 0 を送って存在確認するだけで、
             // プロセス自体には影響しない。
             let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
             if rc == -1 {

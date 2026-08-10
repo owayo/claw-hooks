@@ -7,7 +7,8 @@ use tracing::{debug, info, warn};
 use super::Filter;
 use crate::config::StopHook;
 use crate::domain::command::{
-    TimedOutput, run_with_timeout_tracked, spawn_detached_with_env, spawn_piped_with_env,
+    TimedOutput, program_label, run_with_timeout_tracked, spawn_detached_with_env,
+    spawn_piped_with_env,
 };
 use crate::domain::{Decision, HookEvent, HookInput, StopSessionKind};
 
@@ -39,6 +40,25 @@ impl StopHookFilter {
     /// git-sc などのツールがエージェントのコンテキストを使用してコミットメッセージを生成できるようにする。
     const AGENT_MESSAGE_ENV: &'static str = "CLAW_HOOKS_AGENT_MESSAGE";
 
+    /// Stop hook のコマンドから、引数やディレクトリを含まない表示ラベルを作る。
+    ///
+    /// コマンド引数にはトークンなどの機密値が含まれ得るため、永続ログと
+    /// エージェント向けエラーには実行ファイル名だけを使用する。
+    fn command_label(command: &str) -> String {
+        crate::domain::parse_shell_tokens(command)
+            .first()
+            .map(|program| program_label(program).to_string())
+            .unwrap_or_else(|| "<empty>".to_string())
+    }
+
+    /// 複数コマンドを安全な表示ラベルへ変換する。
+    fn command_labels(commands: &[String]) -> Vec<String> {
+        commands
+            .iter()
+            .map(|command| Self::command_label(command))
+            .collect()
+    }
+
     /// タイムアウト付きで単一コマンド文字列を安全に実行する。
     /// シェル対応のトークナイザーでクォートされた引数を適切に処理する。
     /// 再帰ループ防止のため子プロセスに `CLAW_HOOKS_STOP_ACTIVE=1` を設定する。
@@ -55,8 +75,13 @@ impl StopHookFilter {
 
         let program = &parts[0];
         let args = &parts[1..];
+        let label = program_label(program);
 
-        debug!("🛑 Executing stop hook: {} {:?}", program, args);
+        debug!(
+            "🛑 Executing stop hook: program={} arg_count={}",
+            label,
+            args.len()
+        );
 
         let mut envs: Vec<(&str, &str)> = vec![(STOP_ACTIVE_ENV, "1")];
         if let Some(msg) = agent_message {
@@ -65,12 +90,12 @@ impl StopHookFilter {
 
         let start = std::time::Instant::now();
         let child = spawn_piped_with_env(program, args, &envs)
-            .map_err(|e| format!("Failed to execute stop hook '{}': {}", command, e))?;
-        let result = run_with_timeout_tracked(child, timeout_secs, command);
+            .map_err(|e| format!("Failed to execute stop hook '{}': {}", label, e))?;
+        let result = run_with_timeout_tracked(child, timeout_secs, label);
         let elapsed = start.elapsed();
         info!(
             "⏰️ Stop hook [{}] completed in {:.2}s",
-            command,
+            label,
             elapsed.as_secs_f64()
         );
         result
@@ -98,10 +123,12 @@ impl StopHookFilter {
 
         let program = &parts[0];
         let args = &parts[1..];
+        let label = program_label(program);
 
         debug!(
-            "🚀 Executing stop hook (fire-and-forget): {} {:?}",
-            program, args
+            "🚀 Executing stop hook (fire-and-forget): program={} arg_count={}",
+            label,
+            args.len()
         );
 
         let mut envs: Vec<(&str, &str)> = vec![(STOP_ACTIVE_ENV, "1")];
@@ -110,14 +137,11 @@ impl StopHookFilter {
         }
 
         match spawn_detached_with_env(program, args, &envs) {
-            Ok(pid) => info!(
-                "🚀 Detached stop hook [{}] started with pid={}",
-                command, pid
-            ),
+            Ok(pid) => info!("🚀 Detached stop hook [{}] started with pid={}", label, pid),
             Err(e) => {
                 warn!(
                     "❌ Failed to spawn fire-and-forget stop hook '{}': {}",
-                    command, e
+                    label, e
                 );
             }
         }
@@ -128,23 +152,23 @@ impl StopHookFilter {
     /// lint/typecheck のツール出力にはソース行の断片や file path などの機密が含まれ得るため、
     /// 永続ログにはサイズ（バイト数）のみを残す。
     /// 本文の確認は `--trace` フラグ（stderr 出力、ディスク非永続）で行う。
-    fn log_output(command: &str, output: &Output) {
+    fn log_output(label: &str, output: &Output) {
         let stdout_len = output.stdout.len();
         let stderr_len = output.stderr.len();
         if stdout_len > 0 {
-            info!("Stop hook [{}] stdout: {} bytes", command, stdout_len);
+            info!("Stop hook [{}] stdout: {} bytes", label, stdout_len);
         }
         if stderr_len > 0 {
-            info!("Stop hook [{}] stderr: {} bytes", command, stderr_len);
+            info!("Stop hook [{}] stderr: {} bytes", label, stderr_len);
         }
     }
 
     /// コマンド出力（stdout + stderr）からブロック理由を構築する。
-    fn build_reason(command: &str, output: &Output) -> String {
+    fn build_reason(label: &str, output: &Output) -> String {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let mut reason = format!("Stop hook failed: {}\n", command);
+        let mut reason = format!("Stop hook failed: {}\n", label);
         if !stdout.trim().is_empty() {
             reason.push_str(&stdout);
         }
@@ -209,16 +233,24 @@ impl StopHookFilter {
             if !hook.session_scope.includes(session_kind) {
                 debug!(
                     "Stop hook session_scope {:?} excludes {:?} session, skipping: {:?}",
-                    hook.session_scope, session_kind, hook.commands
+                    hook.session_scope,
+                    session_kind,
+                    Self::command_labels(&hook.commands)
                 );
                 continue;
             }
             if let Some(ref condition) = hook.condition {
                 if !condition.is_satisfied(&cwd) {
-                    debug!("Stop hook condition not met, skipping: {:?}", hook.commands);
+                    debug!(
+                        "Stop hook condition not met, skipping: {:?}",
+                        Self::command_labels(&hook.commands)
+                    );
                     continue;
                 }
-                debug!("Stop hook condition met, queuing: {:?}", hook.commands);
+                debug!(
+                    "Stop hook condition met, queuing: {:?}",
+                    Self::command_labels(&hook.commands)
+                );
             }
 
             let stage = hook.stage_value();
@@ -227,6 +259,7 @@ impl StopHookFilter {
             for cmd in &hook.commands {
                 entry.push(QualifiedCommand {
                     command: cmd.clone(),
+                    label: Self::command_label(cmd),
                     report,
                 });
             }
@@ -254,21 +287,22 @@ impl StopHookFilter {
             }
 
             let command = qc.command.clone();
+            let label = qc.label.clone();
             let agent_msg = agent_message.map(|s| s.to_string());
             let handle = std::thread::spawn(move || -> Option<String> {
                 match Self::execute_command_tracked(&command, timeout_secs, agent_msg.as_deref()) {
                     Ok(result) => {
-                        Self::log_output(&command, &result.output);
+                        Self::log_output(&label, &result.output);
                         if result.timed_out {
                             // タイムアウトは異常終了 — 成功として扱わない
                             Some(format!(
                                 "⏱ Stop hook timed out after {}s: {}",
-                                timeout_secs, command
+                                timeout_secs, label
                             ))
                         } else if result.output.status.success() {
                             None
                         } else {
-                            Some(Self::build_reason(&command, &result.output))
+                            Some(Self::build_reason(&label, &result.output))
                         }
                     }
                     Err(e) => Some(e),
@@ -302,6 +336,8 @@ enum LoopCheck {
 /// 条件チェックを通過したコマンドと report フラグ。
 struct QualifiedCommand {
     command: String,
+    /// 引数とディレクトリを除いたログ・エラー表示用ラベル。
+    label: String,
     report: bool,
 }
 
@@ -438,6 +474,21 @@ mod tests {
     #[test]
     fn test_execute_command_empty_is_error() {
         assert!(StopHookFilter::execute_command("   ", 60, None).is_err());
+    }
+
+    #[test]
+    fn test_command_label_does_not_expose_arguments_or_directories() {
+        assert_eq!(
+            StopHookFilter::command_label(
+                "/Users/private/bin/tool --token top-secret --path /private/project"
+            ),
+            "tool"
+        );
+        assert_eq!(
+            StopHookFilter::command_label("sh -c 'curl -H Authorization:top-secret'"),
+            "sh"
+        );
+        assert_eq!(StopHookFilter::command_label("   "), "<empty>");
     }
 
     #[test]

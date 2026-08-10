@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use tracing::{debug, info, warn};
 
 use super::Filter;
-use crate::domain::command::{configure_process_group, run_with_timeout};
+use crate::domain::command::{configure_process_group, program_label, run_with_timeout};
 use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, FileOperationInput, HookEvent, HookInput, ToolInput};
 
@@ -169,6 +169,7 @@ impl ExtensionHookFilter {
 
         // コマンドテンプレートのパース
         let parsed = Self::parse_command_template(command_template)?;
+        let display_label = program_label(&parsed.program).to_string();
 
         // '-' をフラグと解釈するツール向けに ./ プレフィックスを付与
         let safe_path = if file_path.starts_with('-') {
@@ -183,7 +184,7 @@ impl ExtensionHookFilter {
         // 詳細確認は `--trace` （stderr 出力、ディスク非永続）に委ねる。
         debug!(
             "🪛 Executing extension hook: program={} args_before={} args_after={} path_bytes={} inline={}",
-            parsed.program,
+            display_label,
             parsed.args_before.len(),
             parsed.args_after.len(),
             safe_path.len(),
@@ -220,7 +221,7 @@ impl ExtensionHookFilter {
         // 展開済みファイルパスを含めない。
         let sanitized_command = format!(
             "{} args_before={} args_after={} inline={} path_bytes={}",
-            parsed.program,
+            display_label,
             parsed.args_before.len(),
             parsed.args_after.len(),
             parsed.inline_template.is_some(),
@@ -237,7 +238,7 @@ impl ExtensionHookFilter {
         // プログラム名と所要時間のサマリのみを記録する（機密非永続化方針）。
         info!(
             "⏰️ Extension hook [{}] completed in {:.2}s",
-            parsed.program,
+            display_label,
             elapsed.as_secs_f64()
         );
         let output = result?;
@@ -276,7 +277,7 @@ impl ExtensionHookFilter {
         }
 
         Ok(CommandResult {
-            display_label: parsed.program,
+            display_label,
             success: output.status.success(),
             output: combined_output,
         })
@@ -887,6 +888,40 @@ mod tests {
                 );
             }
             _ => panic!("Expected Allow decision"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_extension_hook_failure_context_hides_program_directory() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            ".txt".to_string(),
+            vec!["/bin/sh -c 'printf failed >&2; exit 1 #ignore {file}'".to_string()],
+        );
+        let filter = ExtensionHookFilter::new(hooks, false, 60);
+
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: "/tmp/test.txt".to_string(),
+                content: None,
+            }),
+            session_id: None,
+        };
+
+        match filter.execute(&input) {
+            Decision::Allow {
+                additional_context: Some(context),
+            } => {
+                assert!(context.starts_with("[sh]"));
+                assert!(
+                    !context.contains("/bin/sh"),
+                    "実行ファイルのディレクトリを表示すべきではない: {context}"
+                );
+            }
+            other => panic!("失敗時は安全なラベルのコンテキストが付くべき: {other:?}"),
         }
     }
 

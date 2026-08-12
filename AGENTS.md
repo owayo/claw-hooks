@@ -125,8 +125,8 @@ cargo run -- version     # Show version
 - PostToolUse Block: `{"decision":"block","reason":"..."}`
 - Stop output: Allow = `{}`, Block = `{"decision":"block","reason":"..."}`
 - Stop 入力の空白でない `agent_id` と `agent_type` が両方ある場合だけ teammate（別プロセスの委譲エージェントセッション）と判定する。`--agent` で起動したメインセッションにも `agent_type` は入るが、サブエージェント固有の `agent_id` は入らない。claw-hooks はこの組で `StopSessionKind::Primary / Delegated` を判別し、`session_scope` によるフック選別と NanoBuddy 通知の抑止を行う。どちらかの欠落・空白・非文字列は Primary 扱い（フェイルセーフ方向）。インプロセスのサブエージェント（Task tool）は Stop を発火せず `SubagentStop` のみ
-- 通常の許可/ブロック判定は stdout JSON + exit code 0 で返す（Claude は exit 0 のときだけ stdout JSON を解析する）
-- Fail-closed errors: exit code 2 + stderr にメッセージ本文をプレーンテキストで出力（Claude は exit 2 のとき stdout/JSON を解析せず stderr 本文をエラーメッセージとして扱うため、`{"decision":...}` のような JSON ではなく本文のみを出す。exit 2 自体がブロックを意味するためフェイルクローズドは維持される）
+- 通常の許可/ブロック判定は stdout JSON + exit code 0 で返す（構造化制御の推奨経路）。Claude は現在、exit 2 を含む全終了コードで有効な stdout JSON を読むが、exit 2 のブロック効果を JSON で上書きすることはできない
+- Fail-closed errors: exit code 2 + stderr にメッセージ本文をプレーンテキストで出力。JSON 判定を組み立てられないパース/起動エラーでも exit 2 自体がブロックを保証し、有効なブロック JSON が無い場合は stderr 本文が理由として使われる
 - ただし `Stop` / `SubagentStop` のパースエラーは例外で `{}` + exit 0（停止許可）を返す。これらのイベントでの exit 2 / `decision:"block"` は「拒否」ではなく「停止させず reason を継続プロンプトにする」意味なので、壊れたペイロードに対して返すと無限ループになる（Fail-Closed Security 参照）
 - 未対応イベント（`StopFailure`, `PermissionRequest`, `PreCompact` 等）は allow でパススルー（Cursor / Codex と同じ挙動）
 
@@ -137,7 +137,7 @@ cargo run -- version     # Show version
 - Supported events: `preToolUse` for `Shell`/`Bash`, `beforeShellExecution`, `afterFileEdit`, `afterTabFileEdit`, `stop`, `subagentStart`, `subagentStop`
 - Unsupported events (e.g., `afterShellExecution`, non-shell `preToolUse`, `postToolUse`) are passed through as allow
 - Allow / パススルーはいずれも `{}` を返す。`permission: "allow"` は返さない。Cursor は複数ソースのフック応答をマージし優先度の高いソースが勝つ仕様なので、中身を検査していないイベント（`beforeReadFile` / `beforeMCPExecution` / `beforeTabFileRead` 等、いずれも `permission` が有効な判定フィールド）に allow を返すと他フックの deny を上書きし得る。`beforeSubmitPrompt` のように `permission` フィールドを持たないスキーマもある
-- 判定はすべて stdout JSON + exit code 0 で返す（Block も exit 0）。公式仕様は「exit 0 = 成功、JSON 出力を使う」「exit 2 = アクションをブロック（`permission: "deny"` と等価。Claude Code の挙動に合わせている）」であり、Claude Code は exit 2 のとき stdout の JSON を無視する。そのため deny JSON + exit 2 だとブロック自体は成立しても `user_message`（safe-rm 等の代替案）がエージェントに届かない。意図的なポリシー拒否は JSON 契約に統一し、判定系が壊れたパースエラーだけを exit code 契約（`error_exit_code`）に回す
+- 判定はすべて stdout JSON + exit code 0 で返す（Block も exit 0）。Cursor の公式仕様は「exit 0 = 成功、JSON 出力を使う」「exit 2 = アクションをブロック（`permission: "deny"` と等価）」であり、deny JSON + exit 2 だとブロック自体は成立しても `user_message`（safe-rm 等の代替案）がエージェントに届かない。意図的なポリシー拒否は JSON 契約に統一し、判定系が壊れたパースエラーだけを exit code 契約（`error_exit_code`）に回す
 - `stop` / `subagentStop` の Output スキーマは公式に `{ followup_message?: string }` のみ（`permission` フィールドは存在しない）。Allow は `{}`、Block は `followup_message` に修正指示を入れて返す
 - `stop` / `subagentStop` のパースエラーは `{}` + exit 0（停止許可）を返す。`followup_message` は「次のユーザーメッセージとして自動送信される」= 継続指示なので、壊れたペイロードで返すと同じ失敗を繰り返す（Fail-Closed Security 参照）
 - `stop` の `loop_count`（stop hook 由来の自動フォローアップ発火回数、0 始まり）が 1 以上の場合は全 stop hook をスキップする。Cursor は `stop_hook_active` を持たないため、`loop_count` が無限フォローアップループ防止の役割を担う（Cursor 側の `loop_limit`(デフォルト5) に頼らず 1 回で止める）

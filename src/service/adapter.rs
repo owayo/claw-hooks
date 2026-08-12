@@ -5965,6 +5965,21 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_event_name_handles_multibyte_prefix_boundary() {
+        let mut input = r#"{"event":"Stop","padding":""#.to_string();
+        while input.len() <= EVENT_NAME_SCAN_PREFIX_BYTES {
+            input.push('あ');
+        }
+
+        // 走査上限が UTF-8 文字の途中でも、直前の文字境界まで安全に戻る。
+        assert!(!input.is_char_boundary(EVENT_NAME_SCAN_PREFIX_BYTES));
+        assert_eq!(
+            scan_event_name_in_malformed_input(&input, &["\"event\""]),
+            Some("Stop".to_string())
+        );
+    }
+
+    #[test]
     fn test_scan_event_name_prefers_earliest_key() {
         let input = r#"{"hook_event_name":"Stop","event":"PreToolUse""#;
         assert_eq!(

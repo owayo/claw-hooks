@@ -844,7 +844,7 @@ Uses the `hook_event_name` field for event detection:
 
 Unsupported Cursor events, including non-shell `preToolUse` tools, pass through as an empty object (`{}`) rather than `{"permission":"allow"}`. Cursor merges hook responses from several sources and a higher-priority `allow` can override another hook's `deny`, so claw-hooks never votes to approve an event it did not inspect (`beforeReadFile`, `beforeMCPExecution`, `beforeTabFileRead`, `sessionStart`, `postToolUse`, …). Allowed commands return `{}` for the same reason.
 
-Blocks are returned as `{"permission":"deny", …}` on stdout with exit code `0`. Cursor — like Claude Code — only consumes the stdout JSON when the hook exits `0`, so exiting `2` would discard the `user_message` that carries the "use safe-rm instead" guidance.
+Blocks are returned as `{"permission":"deny", …}` on stdout with exit code `0`. Cursor only consumes the stdout JSON when the hook exits `0`, so exiting `2` would discard the `user_message` that carries the "use safe-rm instead" guidance. Claude Code differs here: its current hook contract reads valid stdout JSON on every exit code, while exit `2` remains unconditionally blocking.
 
 For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
 

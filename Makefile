@@ -17,8 +17,16 @@ release: ## リリース版をビルド
 
 ## インストール
 
+# 上書きコピーではなく一時ファイル + rename で置き換える。
+# macOS はコード署名の検証結果をパス/inode 単位でキャッシュするため、実行中または
+# 直前に実行されたバイナリへ cp で上書きすると、キャッシュ済みの CDHash と中身が
+# 食い違って新しいバイナリが起動直後に SIGKILL される (exit 137)。claw-hooks は
+# フックイベントのたびに起動するので署名は常にキャッシュに載っており、これを
+# 確実に踏む。rename はディレクトリエントリを差し替えて新しい inode を与えるため、
+# 古い inode のキャッシュが適用されない。
 install: release ## リリース版をビルドして /usr/local/bin にインストール
-	cp target/release/$(BINARY_NAME) $(INSTALL_PATH)/
+	cp target/release/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME).new
+	mv -f $(INSTALL_PATH)/$(BINARY_NAME).new $(INSTALL_PATH)/$(BINARY_NAME)
 
 ## 開発
 

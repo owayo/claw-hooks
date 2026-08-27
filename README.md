@@ -36,16 +36,17 @@
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
 - 🌳 **AST-based Parsing** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
 - 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes; lint output flows back to Claude Code / Codex CLI via `additionalContext`. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
+- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`; lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
 - ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
 - ⏱️ **Hook Timeout** - Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
 - 📏 **Output Truncation** - Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
 - 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved. The no-op test runs on the *normalized* text, so a tool that pairs a success line with per-run config warnings (e.g. `ruff check --select D…`, which writes ruleset-incompatibility warnings to stderr on every run) is still recognised as a no-op instead of returning a bare `All checks passed!` after every edit. Biome's `Checked N file(s) in <duration>. No fixes applied.` counter and its closing `check ━` / `× Some errors were emitted while running checks.` block are dropped when diagnostics accompany them, and kept when they are the whole output. ANSI stripping also covers the general `ESC` + intermediate-byte escape form (terminfo's `sgr0`, e.g. `\E(B\E[m`) and bare `SO`/`SI`, which otherwise leak a stray character onto every colored `cargo fmt --check` diff line and defeat all the rules above
-- ♻️ **Repeated Source Excerpt Removal** - Within a single diagnostic, source-excerpt lines (`3 │ code`, `> 3 │ code`, `12 | code`) that repeat verbatim are dropped after the first occurrence: biome re-prints the same excerpt once per sub-block (the `!` message, the `i` note, the `i Safe fix:` block) and ruff re-prints context inside its fix diff, and those repeats carry no information. Diff lines (`- old` / `+ new`) survive because they *are* the fix, and the dedup scope resets at every diagnostic header, so separate diagnostics keep their own context. Measured on real output: ruff −6%, biome −14%
+- ♻️ **Repeated Source Excerpt Removal** - Within a single diagnostic, source-excerpt lines (`3 │ code`, `> 3 │ code`, `12 | code`) that repeat verbatim are dropped after the first occurrence: biome re-prints the same excerpt once per sub-block (the `!` message, the `i` note, the `i Safe fix:` block) and ruff re-prints context inside its fix diff, and those repeats carry no information. Diff lines (`- old` / `+ new`) survive because they *are* the fix. Measured on real output: ruff −6%, biome −14%
+- 🔁 **Cross-Diagnostic Excerpt Removal** - Consecutive diagnostics that point at the same place re-print the *whole* excerpt each time — one function definition draws `ANN201` / `D103` / `ANN001` / `ANN001`, one `let` draws `useConst` / `noUnusedVariables`. When a diagnostic's excerpt is byte-identical to the previous diagnostic's, the whole block is dropped; each diagnostic keeps its own header, so the file, line, and column are never lost, and a diagnostic separated by a different excerpt keeps its own copy. Measured on real output: a further ruff −15%, biome −8%. This directly buys information rather than just tokens, since the default 1000-character cap was otherwise spent re-printing the same code instead of showing the diagnostics that followed
 - 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata, executable basenames, argument counts, and byte-size summaries. Stop/extension hook arguments and executable directories are stripped, so raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
 - 🛑 **Bounded I/O** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
-- 🔒 **Fail-Closed Gates** - Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` can no longer switch protection off: a config error now returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) instead of exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Stop events are the deliberate exception — there a "block" means "keep going", so claw-hooks allows the stop rather than looping forever
+- 🔒 **Fail-Closed Gates** - Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` can no longer switch protection off: a config error now returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) instead of exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
 - 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
 
@@ -122,11 +123,11 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 | Block dangerous commands | 25+ lines Python per command | 1 line TOML |
 | Custom filters | New script per filter | Add to `[[custom_filters]]` |
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
-| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Codex CLI); Antigravity CLI via Stop hooks*; not available on Grok CLI (post-hook stdout is ignored) |
+| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Codex CLI); Windsurf via exit 2 + stderr*; Antigravity CLI via Stop hooks*; not available on Grok CLI (post-hook stdout is ignored) |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
 | Stop hooks (lint, notifications, etc.) | Custom scripts per use case | `[[stop_hooks]]` config |
 
-\* Lint/formatter output is automatically passed via `additionalContext` where the agent hook runtime supports it, enabling the agent to fix warnings.
+\* Lint/formatter output is automatically passed via `additionalContext` where the agent hook runtime supports it, enabling the agent to fix warnings. Windsurf has no equivalent JSON field, so post-edit diagnostics are delivered as exit code 2 with the body on stderr — per the official spec only `pre_*` hooks can block, so this surfaces the diagnostics to the agent without reverting the edit (and to the user as well when `show_output` is `true`).
 
 ## Requirements
 
@@ -193,7 +194,8 @@ Download `claw-hooks-x86_64-pc-windows-msvc.zip` from [Releases](https://github.
 ## Quickstart
 
 ```bash
-# Generate default configuration
+# Generate default configuration (never overwrites an existing config;
+# pass --path/--config to write somewhere else)
 claw-hooks init
 
 # Test with a safe command (allowed)
@@ -271,7 +273,7 @@ Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
       }
     ],
@@ -624,7 +626,7 @@ dd_block = false  # Allow dd in this project
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "PostToolUse": [{
-      "matcher": "Write|Edit|MultiEdit",
+      "matcher": "Write|Edit|MultiEdit|NotebookEdit",
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "Stop": [{
@@ -1004,6 +1006,7 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 | Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}` (exit 0 — Cursor reads the stdout JSON only on exit 0) |
 | Cursor | stop | `{}` | `{"followup_message":"…"}` |
 | Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** plain text (not JSON) |
+| Windsurf | post_write_code | `{}` (no findings) | exit code 2 + **stderr** plain text (lint findings; post-hooks cannot block, so the edit stands) |
 | Windsurf | post_cascade_response | `{}` | `{}` (best-effort post-hook; cannot block) |
 | Antigravity | PreToolUse | `{"decision":"allow"}` | `{"decision":"deny","reason":"…"}` |
 | Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}` (spec defines no block path) |
@@ -1012,7 +1015,7 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
 | Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
 
-`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
+`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
 
 claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's event schemas require explicit decisions: safe `PreToolUse` returns `"allow"`, while an allowed Stop returns the non-continuing value `"stop"`.
 
@@ -1022,12 +1025,12 @@ claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI.
 |---|---|---|---|
 | Claude Code | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `2` + **stderr** plain text |
 | Cursor | `0` | `0` (deny JSON in stdout; exit `2` would make Cursor discard the message) | `2` |
-| Windsurf | `0` | `2` (BeforeCommand writes plain text to stderr; Stop stays `0`) | `2` |
+| Windsurf | `0` | `2` (BeforeCommand writes plain text to stderr; AfterFileEdit uses the same channel to report lint findings without blocking; Stop stays `0`) | `2` (`pre_run_command` only; post-hooks return `{}` + `0`) |
 | Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny JSON |
 | Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny/block JSON (non-zero is treated as hook infra failure and discarded) |
 | Grok CLI | `0` | `2` + deny JSON in stdout (PreToolUse only; other events return `0`) | `2` (never `1` — Grok treats anything other than `2` as fail-open) |
 
-Across every agent, a parse error on a stop event (`Stop`, Cursor's `stop`, Windsurf's `post_cascade_response`) returns `{}` + exit `0` instead of the deny shown above — see below.
+The "fail-closed parse error" column applies to the pre-execution gates only. Every other event — stop events, post-edit hooks, and the lifecycle events claw-hooks passes through — returns a neutral `{}` + exit `0` instead of the deny shown above. See below.
 
 ### Fail-Closed Behavior
 
@@ -1036,6 +1039,10 @@ Across every agent, a parse error on a stop event (`Stop`, Cursor's `stop`, Wind
 **A broken config denies too, instead of disabling protection.** If the TOML config fails to load or validate, claw-hooks answers with that same deny response, writes the diagnostic to stderr, and suggests running `claw-hooks check`. It no longer exits `1` with empty stdout — Codex CLI and Antigravity CLI read that as "the hook failed, ignore its decision", so one typo in `config.toml` used to switch off command blocking entirely. Logging is diagnostics rather than a control, so a logger that cannot be initialized only prints a warning and claw-hooks keeps running without logs.
 
 **Stop events allow instead.** On a stop event, "block" does not mean deny — it means *don't stop, here is a new prompt*: `decision:"block"` for Claude Code and Codex CLI, `decision:"continue"` for Antigravity CLI, and Cursor's `followup_message` is auto-submitted as the next user message. Returning that for a malformed payload or a broken config is self-sustaining: fail → continue → `Stop` fires again → same failure. None of the loop guards (`stop_hook_active`, `loop_count`, `CLAW_HOOKS_STOP_ACTIVE`) can break the cycle, because all of them only engage after a successful parse. Stop is not a pre-execution gate, so claw-hooks returns the event-specific stop-allow response + exit `0` (`{"decision":"stop"}` for Antigravity, `{}` for the other agents). This adds no new side effects, whereas auto-continuing would invite more tool calls.
+
+**Events claw-hooks never inspects allow too.** Denying an event whose contents claw-hooks never looks at buys no safety and costs real work: a `UserPromptSubmit` deny erases the user's prompt, a Codex `PostToolUse` deny replaces the actual tool output with the hook's message, and Cursor's `beforeReadFile` carries the whole file body — so a large file trivially exceeds the 4 MiB stdin limit and the read would be blocked by a tool that has no opinion on reads. Windsurf's post-hooks and every Grok event except `PreToolUse` cannot block at all, so a deny there only injects a spurious error. These all return `{}` + exit `0`.
+
+**An unidentifiable payload still blocks.** The rules above are keyed on the event name. When the payload is damaged badly enough that claw-hooks cannot recover the event name, it falls back to the deny response — so a truncated or oversized `PreToolUse` is still blocked.
 
 ## Performance
 

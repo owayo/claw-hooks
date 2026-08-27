@@ -355,7 +355,11 @@ impl Filter for ExtensionHookFilter {
             return false;
         }
 
-        if !matches!(input.tool_name.as_str(), "Write" | "Edit" | "MultiEdit") {
+        // NotebookEdit を含めるのは `.ipynb` の保存後フックを発火させるため。
+        if !matches!(
+            input.tool_name.as_str(),
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+        ) {
             return false;
         }
 

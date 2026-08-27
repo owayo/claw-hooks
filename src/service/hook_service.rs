@@ -322,12 +322,15 @@ impl HookService {
             debug!("AfterFileEdit: {}", summarize_parsed_hook_input(input));
         }
 
-        // Write/Edit/MultiEdit の場合、拡張子フック用にフィルターチェーンを実行
+        // Write/Edit/MultiEdit/NotebookEdit の場合、拡張子フック用にフィルターチェーンを実行
         // 対応エージェント:
-        // - Claude Code: PostToolUse (Write)
+        // - Claude Code: PostToolUse (Write / NotebookEdit)
         // - Cursor: afterFileEdit (AfterFileEdit + Write にマッピング)
         // - Windsurf: post_write_code (AfterFileEdit + Write にマッピング)
-        if matches!(input.tool_name.as_str(), "Write" | "Edit" | "MultiEdit") {
+        if matches!(
+            input.tool_name.as_str(),
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+        ) {
             return self.filter_chain.execute(input);
         }
 

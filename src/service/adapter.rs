@@ -218,6 +218,11 @@ impl FormatAdapter {
                 // Windsurf の post_cascade_response は事後フックなのでブロックできない。
                 0
             }
+            Format::Windsurf if Self::windsurf_reports_edit_diagnostics(decision, event) => {
+                // post_write_code の lint 診断を stderr でエージェントに見せるため exit 2 を返す。
+                // 事後フックなので編集はブロックされず、メッセージだけが届く（公式仕様）。
+                2
+            }
             _ => decision.exit_code(),
         }
     }
@@ -228,10 +233,16 @@ impl FormatAdapter {
     /// が公式仕様）。ただし Stop は post_cascade_response に対応する事後フックで
     /// ブロック不可のため対象外。
     pub fn use_stderr(&self, decision: &Decision, event: HookEvent) -> bool {
+        if self.format != Format::Windsurf {
+            return false;
+        }
+        // 保存後フックの lint 診断も stderr 経由でエージェントに届ける。
+        if Self::windsurf_reports_edit_diagnostics(decision, event) {
+            return true;
+        }
         matches!(
-            (&self.format, event, decision),
+            (event, decision),
             (
-                &Format::Windsurf,
                 HookEvent::BeforeCommand | HookEvent::AfterFileEdit,
                 Decision::Block { .. }
             )
@@ -267,12 +278,13 @@ impl FormatAdapter {
                 error_message
             }
             Format::Cursor => {
-                // Cursorはpermissionとuser_messageを使用
+                // Cursor は permission で判定し、user_message をユーザーへ、
+                // agent_message をエージェントへ提示する。原因が伝わるよう両方に本文を入れる。
                 // セキュリティ: パースエラー時は拒否（フェイルクローズド設計）
                 serde_json::json!({
                     "permission": "deny",
                     "user_message": error_message,
-                    "agent_message": "Hook system encountered an error and blocked for safety"
+                    "agent_message": error_message
                 })
                 .to_string()
             }
@@ -325,38 +337,68 @@ impl FormatAdapter {
     /// 発生しない。むしろ自動継続する方が新しいツール実行を誘発する。
     /// そのためフェイルクローズドの原則よりループ回避を優先する。
     ///
-    /// Windsurf の `post_cascade_response` と Grok の PreToolUse 以外は、そもそも
-    /// ブロック不可の事後フックであり、拒否を返しても無視されるだけ（Windsurf では
-    /// エージェントに無用なエラーが注入される）ため同様に扱う。
+    /// 同じ理屈は「claw-hooks がそもそも中身を検査していないイベント」にも当てはまる。
+    /// 判定が破棄されるイベントや、claw-hooks が実行前ゲートとして働かないイベントで
+    /// 拒否を返しても、セキュリティ上の利得はゼロで害だけが残る:
+    /// - Claude / Codex の `UserPromptSubmit` の deny は**ユーザーのプロンプト自体**を拒否する
+    /// - Codex の `PostToolUse` の deny は**実際のツール出力をフックのメッセージで置き換える**
+    /// - Cursor の `beforeReadFile` はファイル全文を入力に含むため、大きなファイルで
+    ///   容易に `MAX_INPUT_BYTES` を超え、claw-hooks が意見を持たない読み取りを止めてしまう
+    /// - Windsurf は事後フックがそもそもブロック不可で、無用なエラーが注入されるだけ
+    ///
+    /// そこで判定は許可リスト方式にする。claw-hooks が実行前ゲートとして働くイベント
+    /// （各エージェントの PreToolUse 相当、Codex の `PermissionRequest`）だけを
+    /// フェイルクローズドの対象として残し、それ以外は中立応答に倒す。
+    ///
+    /// **イベント名を判別できない場合は必ずフェイルクローズドを維持する**（`None => false`）。
+    /// 切り詰めや過大入力で名前が読めない PreToolUse は、従来どおりブロックされる。
     fn blocks_would_loop_or_be_ignored(&self, input: &str) -> bool {
         match self.format {
-            Format::Claude => matches!(
-                Self::raw_hook_event_name(input).as_deref(),
-                Some("Stop" | "SubagentStop")
-            ),
-            Format::Codex => matches!(
-                Self::raw_hook_event_name(input).as_deref(),
-                Some("Stop" | "stop" | "SubagentStop" | "subagent_stop")
-            ),
-            Format::Cursor => matches!(
-                Self::raw_hook_event_name(input).as_deref(),
-                Some("stop" | "subagentStop")
-            ),
+            Format::Claude => match Self::raw_hook_event_name(input).as_deref() {
+                // 実行前ゲートは PreToolUse だけ。
+                Some("PreToolUse") => false,
+                Some(_) => true,
+                None => false,
+            },
+            Format::Codex => match Self::raw_hook_event_name(input).as_deref() {
+                // PreToolUse と PermissionRequest はどちらも実行前の許可判断。
+                Some(
+                    "PreToolUse" | "pre_tool_use" | "PermissionRequest" | "permission_request",
+                ) => false,
+                Some(_) => true,
+                None => false,
+            },
+            Format::Cursor => match Self::raw_hook_event_name(input).as_deref() {
+                // シェル実行前のゲートだけを残す。
+                Some("beforeShellExecution" | "preToolUse") => false,
+                Some(_) => true,
+                None => false,
+            },
             Format::Agy => {
-                self.event_override.as_deref() == Some("Stop")
-                    || matches!(
-                        Self::agy_hook_event_name_from_input(input).as_deref(),
-                        Some("Stop")
-                    )
+                // `--event` 指定があればそれを優先し、無ければ形状から推定する。
+                let event = self
+                    .event_override
+                    .clone()
+                    .or_else(|| Self::agy_hook_event_name_from_input(input));
+                match event.as_deref() {
+                    Some("PreToolUse") => false,
+                    Some(_) => true,
+                    // 形状推定が PreToolUse に倒れる設計なので、判別不能も同様に扱う。
+                    None => false,
+                }
             }
             Format::Windsurf => {
                 // Windsurf のイベント名フィールドは agent_action_name。
-                Self::windsurf_action_name_from_input(input).as_deref()
-                    == Some("post_cascade_response")
+                // ブロックできるのは pre_* フックだけで、claw-hooks が扱うのは
+                // pre_run_command のみ。
+                match Self::windsurf_action_name_from_input(input).as_deref() {
+                    Some("pre_run_command") => false,
+                    Some(_) => true,
+                    None => false,
+                }
             }
             Format::Grok => {
                 // Grok でブロックできるのは PreToolUse だけ。
-                // イベント名が読めない場合はフェイルクローズドを維持する（false）。
                 match Self::grok_hook_event_name_from_input(input) {
                     Some(event) => event != "PreToolUse",
                     None => false,
@@ -375,7 +417,16 @@ impl FormatAdapter {
         // 詳細は `blocks_would_loop_or_be_ignored` のドキュメントを参照。
         if self.blocks_would_loop_or_be_ignored(input) {
             if self.format == Format::Agy {
-                return serde_json::json!({"decision": "stop"}).to_string();
+                // Antigravity は Stop の出力でのみ `decision` が必須。
+                // PostToolUse / PreInvocation / PostInvocation の出力は仕様上 `{}` 固定なので、
+                // そちらに `decision` を混ぜない。
+                let event = self
+                    .event_override
+                    .clone()
+                    .or_else(|| Self::agy_hook_event_name_from_input(input));
+                if event.as_deref() == Some("Stop") {
+                    return serde_json::json!({"decision": "stop"}).to_string();
+                }
             }
             return "{}".to_string();
         }
@@ -557,11 +608,21 @@ impl FormatAdapter {
                     timeout: raw_tool_input.get("timeout").and_then(|v| v.as_u64()),
                 }))
             }
-            "Write" | "Edit" | "MultiEdit" => {
-                let file = serde_json::from_value::<crate::domain::FileOperationInput>(
-                    raw_tool_input.clone(),
-                )
-                .map_err(|e| anyhow!("Failed to parse {} tool_input: {}", agent, e))?;
+            // NotebookEdit は `.ipynb` の編集ツール。ファイルパスのキーが `file_path` ではなく
+            // `notebook_path` なので、ここで読み替えてから通常のファイル編集として扱う。
+            // これを拾わないと `.ipynb` の保存後フック（formatter/linter）が発火しない。
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+                let mut raw_tool_input = raw_tool_input.clone();
+                if let Some(object) = raw_tool_input.as_object_mut() {
+                    if !object.contains_key("file_path") {
+                        if let Some(notebook_path) = object.get("notebook_path").cloned() {
+                            object.insert("file_path".to_string(), notebook_path);
+                        }
+                    }
+                }
+                let file =
+                    serde_json::from_value::<crate::domain::FileOperationInput>(raw_tool_input)
+                        .map_err(|e| anyhow!("Failed to parse {} tool_input: {}", agent, e))?;
                 if file.file_path.trim().is_empty() {
                     return Err(anyhow!("Missing tool_input.file_path field"));
                 }
@@ -1065,10 +1126,15 @@ impl FormatAdapter {
             // 空オブジェクトを返し、Cursor 本来の権限設定と他フックの判定を尊重する。
             Decision::Allow { .. } => Ok("{}".to_string()),
             Decision::Block { message } => {
+                // 公式仕様では `user_message` が「拒否時にユーザーへ表示する文言」、
+                // `agent_message` が「拒否時にエージェントへ返す文言」。
+                // claw-hooks の主目的は代替コマンド（safe-rm 等）をエージェントに教えることなので、
+                // 理由本文は必ず `agent_message` に入れる。ここを取り違えると、
+                // エージェントは理由も代替手段も分からないまま同じコマンドを再試行する。
                 let output = CursorOutput {
                     permission: "deny".to_string(),
                     user_message: Some(message.clone()),
-                    agent_message: Some("Command blocked by claw-hooks".to_string()),
+                    agent_message: Some(message.clone()),
                 };
                 serde_json::to_string(&output)
                     .map_err(|e| anyhow!("Failed to serialize Cursor output: {}", e))
@@ -1206,12 +1272,36 @@ impl FormatAdapter {
         //   他エージェントと同様に ANSI/空白の正規化を行ってからトリムする。
         //   stderr に ANSI エスケープが混入すると Windsurf UI の表示が壊れるため。
         match decision {
+            // 保存後フック（post_write_code）の formatter/linter の診断は、
+            // exit code 2 + stderr でエージェントに提示する。
+            // 公式仕様では「exit 2 = Cascade エージェントが stderr のメッセージを見る」で、
+            // かつ「ブロックできるのは pre_* フックだけ」なので、事後フックでの exit 2 は
+            // 編集を巻き戻さずに診断だけを伝える経路になる。
+            // `show_output: true` を設定していればユーザーにも同じ本文が表示される。
+            Decision::Allow {
+                additional_context: Some(context),
+            } if event == HookEvent::AfterFileEdit && !context.trim().is_empty() => {
+                Ok(self.normalize_and_truncate(context))
+            }
             Decision::Allow { .. } => Ok("{}".to_string()),
             Decision::Block { message } => {
                 let truncated = self.normalize_and_truncate(message);
                 Ok(truncated)
             }
         }
+    }
+
+    /// Windsurf の保存後フックで、エージェントへ渡す診断本文を持つ Allow かどうか。
+    ///
+    /// この場合だけ stdout ではなく stderr + exit 2 の経路を使う。
+    fn windsurf_reports_edit_diagnostics(decision: &Decision, event: HookEvent) -> bool {
+        event == HookEvent::AfterFileEdit
+            && matches!(
+                decision,
+                Decision::Allow {
+                    additional_context: Some(context),
+                } if !context.trim().is_empty()
+            )
     }
 }
 
@@ -1960,17 +2050,26 @@ impl FormatAdapter {
             // run_command 以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
             // view_file / list_dir / find_by_name / grep_search / invoke_subagent / ...）は
             // claw-hooks のコマンドブロックの対象外。Allow パスとして素通しする。
+            //
+            // ここで `HookEvent::Passthrough` に落としてはいけない。Antigravity の PreToolUse は
+            // 出力の `decision` が必須なのに、Passthrough は全フォーマット共通で `{}` を返すため、
+            // 必須フィールドを欠いた未定義の応答になる（matcher を `""` / `"*"` にすると
+            // run_command 以外の全ツールでこれが起きる）。
+            // `BeforeCommand` + `ToolInput::Other` にすると、組み込み/カスタムフィルターは
+            // どちらも `is_shell_tool()`（Bash / PowerShell）しか見ないため無害に Allow へ落ち、
+            // Antigravity 用の `{"decision":"allow"}` が返る。Codex が未知のツール名を
+            // `ToolInput::Other` で素通しするのと同じ手法。
             other => {
                 debug!(
                     agent = self.format.label(),
                     raw_event = "PreToolUse",
-                    mapped_event = ?HookEvent::Passthrough,
+                    mapped_event = ?HookEvent::BeforeCommand,
                     raw_tool_name = other,
                     "{} tool out of scope for claw-hooks, passing through", self.log_prefix()
                 );
 
                 Ok(HookInput {
-                    event: HookEvent::Passthrough,
+                    event: HookEvent::BeforeCommand,
                     tool_name: other.to_string(),
                     tool_input: crate::domain::ToolInput::Other(
                         raw_args.cloned().unwrap_or_else(|| serde_json::json!({})),
@@ -3020,18 +3119,40 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_output_allow_after_file_edit() {
+    fn test_windsurf_output_after_file_edit_reports_diagnostics_via_stderr() {
         let adapter = FormatAdapter::new(Format::Windsurf, 0);
-        // WindsurfはadditionalContextをサポートしないため、コンテキストは無視される
+        // Windsurf は JSON の additionalContext を持たないが、公式仕様上
+        // 「exit 2 で Cascade エージェントが stderr のメッセージを見る」「事後フックは
+        // ブロックできない」ため、保存後 lint の診断はこの経路で届けられる。
         let decision = Decision::allow_with_context("Some lint warning".to_string());
         let output = adapter
             .format_output(&decision, HookEvent::AfterFileEdit)
             .unwrap();
-        // Allow: 空 JSON（decision 省略）
-        assert_eq!(output, "{}");
-        // Windsurf は additionalContext をサポートしない
+
+        assert_eq!(output, "Some lint warning");
+        // JSON ではなく本文そのものを返す（Windsurf は stdout/stderr を JSON 解析しない）。
         assert!(!output.contains("hookSpecificOutput"));
         assert!(!output.contains("additionalContext"));
+        // 本文は stderr へ、終了コードは 2（事後フックなので編集はブロックされない）。
+        assert!(adapter.use_stderr(&decision, HookEvent::AfterFileEdit));
+        assert_eq!(adapter.exit_code(&decision, HookEvent::AfterFileEdit), 2);
+    }
+
+    #[test]
+    fn test_windsurf_output_after_file_edit_without_diagnostics_is_silent() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        // 診断が無いときまで exit 2 を返すと、編集のたびに無用なエラー表示が出る。
+        for decision in [
+            Decision::allow(),
+            Decision::allow_with_context("   \n".to_string()),
+        ] {
+            let output = adapter
+                .format_output(&decision, HookEvent::AfterFileEdit)
+                .unwrap();
+            assert_eq!(output, "{}");
+            assert!(!adapter.use_stderr(&decision, HookEvent::AfterFileEdit));
+            assert_eq!(adapter.exit_code(&decision, HookEvent::AfterFileEdit), 0);
+        }
     }
 
     #[test]
@@ -5455,9 +5576,10 @@ mod tests {
     }
 
     #[test]
-    fn test_agy_input_parsing_pre_tool_use_write_to_file_is_passthrough() {
+    fn test_agy_input_parsing_pre_tool_use_write_to_file_is_allowed() {
         // Antigravity の write_to_file は claw-hooks のコマンドブロックの対象外。
-        // Passthrough（パススルー）にマップされる。
+        // ただし PreToolUse の出力は `decision` が必須なので、`{}` になる Passthrough では
+        // なく BeforeCommand + ToolInput::Other にマップして `{"decision":"allow"}` を返す。
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"PreToolUse",
@@ -5465,12 +5587,19 @@ mod tests {
             "toolCall":{"name":"write_to_file","args":{"TargetFile":"/workspace/foo.rs","Overwrite":false,"CodeContent":"fn main(){}"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::Passthrough);
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "write_to_file");
+        // シェルツールではないので、組み込み/カスタムフィルターの対象にはならない。
+        assert!(!result.is_shell_tool());
+
+        let output = adapter
+            .format_output(&Decision::allow(), HookEvent::BeforeCommand)
+            .unwrap();
+        assert_eq!(output, r#"{"decision":"allow"}"#);
     }
 
     #[test]
-    fn test_agy_input_parsing_pre_tool_use_replace_file_content_passthrough() {
+    fn test_agy_input_parsing_pre_tool_use_replace_file_content_is_allowed() {
         let adapter = FormatAdapter::new(Format::Agy, 0);
         let input = r#"{
             "hook_event_name":"PreToolUse",
@@ -5478,8 +5607,9 @@ mod tests {
             "toolCall":{"name":"replace_file_content","args":{"TargetFile":"/workspace/foo.rs"}}
         }"#;
         let result = adapter.parse_input(input).unwrap();
-        assert_eq!(result.event, HookEvent::Passthrough);
+        assert_eq!(result.event, HookEvent::BeforeCommand);
         assert_eq!(result.tool_name, "replace_file_content");
+        assert!(!result.is_shell_tool());
     }
 
     #[test]

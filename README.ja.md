@@ -36,16 +36,17 @@
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - 🌳 **AST解析** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - 🔧 **カスタムコマンドフィルター** - 正規表現サポート付きのカスタムフィルターを定義
-- 📁 **拡張子フック** - ファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext` で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
+- 📁 **拡張子フック** - `Write` / `Edit` / `MultiEdit` / `NotebookEdit` のファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext`、Windsurf に exit 2 + stderr で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
 - ⏹️ **Stopフック** - エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - 🧹 **Stop時プロジェクト全体Lint** - プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf と Grok CLI はベストエフォート）
 - ⏱️ **フックタイムアウト** - フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - 📏 **出力長制限** - エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
 - 🗜️ **出力圧縮** - 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持。no-op 判定は**正規化後**の文字列で行うため、成功メッセージと毎回同じ設定警告を同時に出すツール（`ruff check --select D…` は毎回 stderr にルールセット非互換警告を出す）でも no-op と判定され、編集のたびに `All checks passed!` だけが返る事象を防ぐ。biome の `Checked N file(s) in <時間>. No fixes applied.` 集計行と、締めの `check ━` / `× Some errors were emitted while running checks.` は診断が併記されているときのみ除去し、出力全体がそれだけの場合は保持。ANSI 除去は `ESC` + 中間バイト形式（terminfo の `sgr0`、例: `\E(B\E[m`）と生の `SO`/`SI` にも対応（未対応だと色付き `cargo fmt --check` の差分行の先頭に文字が残り、上記の圧縮が一切効かなくなる）
-- ♻️ **ソース抜粋の再掲除去** - 同一診断の中で逐語一致するソース抜粋行（`3 │ code`、`> 3 │ code`、`12 | code`）は2回目以降を除去。biome は 1 件の診断をサブブロック（`!` メッセージ、`i` 補足、`i Safe fix:`）ごとに分けて同じ抜粋を再掲し、ruff も修正差分の中でコンテキストを再掲するが、これらの再掲には情報量が無い。差分行（`- old` / `+ new`）は修正内容そのものなので保持し、重複判定のスコープは診断ヘッダごとにリセットするため、別の診断は自分のコンテキストを保持する。実出力での計測値: ruff −6%、biome −14%
+- ♻️ **ソース抜粋の再掲除去** - 同一診断の中で逐語一致するソース抜粋行（`3 │ code`、`> 3 │ code`、`12 | code`）は2回目以降を除去。biome は 1 件の診断をサブブロック（`!` メッセージ、`i` 補足、`i Safe fix:`）ごとに分けて同じ抜粋を再掲し、ruff も修正差分の中でコンテキストを再掲するが、これらの再掲には情報量が無い。差分行（`- old` / `+ new`）は修正内容そのものなので保持する。実出力での計測値: ruff −6%、biome −14%
+- 🔁 **診断をまたぐ抜粋の再掲除去** - 同じ箇所を指す診断が連続すると、抜粋が**まるごと**毎回再掲される（1 つの関数定義に `ANN201` / `D103` / `ANN001` / `ANN001`、1 つの `let` に `useConst` / `noUnusedVariables` が付くケース）。直前の診断と逐語一致する抜粋はブロックごと除去する。各診断のヘッダは残るのでファイル・行・列は失われず、間に別の抜粋を挟む診断は自分の抜粋を保持する。実出力での計測値: さらに ruff −15%、biome −8%。既定の 1000 文字の上限が同じコードの再掲で埋まって後続の診断が切り捨てられていたため、これはトークン量だけでなく**エージェントに届く情報量**を増やす
 - 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッション、実行ファイルの basename、引数数、バイト数サマリーのみ。Stop/拡張子フックの引数と実行ファイルのディレクトリを除去し、生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
 - 🛑 **入出力サイズ上限** - stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
-- 🔒 **フェイルクローズドのゲート** - コマンドブロックはパースエラー、読み取り不能な入力、設定の破損時に拒否を返す。`config.toml` のタイポ 1 つで保護が無効化されることはもう無い。設定エラーでは（従来のように exit `1` + stdout 空で終了せず）エージェント固有の拒否応答を返し、診断は stderr へ、あわせて `claw-hooks check` を案内する（exit 1 + stdout 空は一部のエージェントで「フック失敗＝判定を無視」と解釈されるため）。Stop 系だけは意図的な例外で、そこでの「ブロック」は「停止せず継続」を意味するので、無限ループを避けて停止を許可する
+- 🔒 **フェイルクローズドのゲート** - コマンドブロックはパースエラー、読み取り不能な入力、設定の破損時に拒否を返す。`config.toml` のタイポ 1 つで保護が無効化されることはもう無い。設定エラーでは（従来のように exit `1` + stdout 空で終了せず）エージェント固有の拒否応答を返し、診断は stderr へ、あわせて `claw-hooks check` を案内する（exit 1 + stdout 空は一部のエージェントで「フック失敗＝判定を無視」と解釈されるため）。ただしフェイルクローズドにするのは実行前ゲートだけ。Stop 系での「ブロック」は「停止せず継続」を意味し、claw-hooks が中身を検査しないイベントでの拒否はユーザーのプロンプトを消去したり実際のツール出力を置き換えたりするだけで安全性を上げないため、いずれも許可に倒す。イベントを特定できないほど壊れたペイロードは従来どおりブロックする
 - 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLI、Grok CLIに対応
 
@@ -122,11 +123,11 @@ sys.exit(0)
 | 危険なコマンドをブロック | コマンドごとに25行以上のPython | TOML 1行 |
 | カスタムフィルター | フィルターごとに新しいスクリプト | `[[custom_filters]]`に追加 |
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
-| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Codex CLI）、Antigravity CLI は Stop hooks 経由*、Grok CLI は不可（事後フックの stdout が無視されるため） |
+| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Codex CLI）、Windsurf は exit 2 + stderr 経由*、Antigravity CLI は Stop hooks 経由*、Grok CLI は不可（事後フックの stdout が無視されるため） |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
 | Stopフック（lint、通知等） | ユースケースごとにスクリプト作成 | `[[stop_hooks]]`設定 |
 
-\* lint/フォーマッターの出力は、対応するフックランタイムでは `additionalContext` 経由で自動送信され、エージェントが警告を修正できます。
+\* lint/フォーマッターの出力は、対応するフックランタイムでは `additionalContext` 経由で自動送信され、エージェントが警告を修正できます。Windsurf には相当する JSON フィールドが無いため、保存後の診断は終了コード 2 + stderr 本文で渡します。公式仕様ではブロックできるのは `pre_*` フックだけなので、この経路は編集を巻き戻さずに診断だけをエージェントへ届けます（`show_output` が `true` ならユーザーにも表示されます）。
 
 ## 動作要件
 
@@ -193,7 +194,8 @@ sudo mv claw-hooks /usr/local/bin/
 ## クイックスタート
 
 ```bash
-# デフォルト設定を生成
+# デフォルト設定を生成（既存の設定は決して上書きしない。
+# 別の場所へ書き出すには --path / --config を渡す）
 claw-hooks init
 
 # 安全なコマンドでテスト（許可）
@@ -271,7 +273,7 @@ claw-hooks hook --config /path/to/config.toml
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
       }
     ],
@@ -624,7 +626,7 @@ dd_block = false  # このプロジェクトでは dd を許可
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "PostToolUse": [{
-      "matcher": "Write|Edit|MultiEdit",
+      "matcher": "Write|Edit|MultiEdit|NotebookEdit",
       "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
     }],
     "Stop": [{
@@ -1022,12 +1024,12 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 |---|---|---|---|
 | Claude Code | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `2` + **stderr** プレーンテキスト |
 | Cursor | `0` | `0`（stdout の deny JSON。exit `2` だとメッセージが破棄される） | `2` |
-| Windsurf | `0` | `2`（BeforeCommand は stderr にプレーンテキストを書き込み、Stop は `0` のまま） | `2` |
+| Windsurf | `0` | `2`（BeforeCommand は stderr にプレーンテキストを書き込み、AfterFileEdit も同じ経路で lint 診断をブロックせずに伝え、Stop は `0` のまま） | `2`（`pre_run_command` のみ。事後フックは `{}` + `0`） |
 | Antigravity CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有の deny JSON |
 | Codex CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有の deny/block JSON（非ゼロはフックインフラ失敗扱いで判定が無視される） |
 | Grok CLI | `0` | `2` + stdout の deny JSON（PreToolUse のみ。他のイベントは `0`） | `2`（`1` は使わない — Grok は `2` 以外をすべてフェイルオープン扱いにするため） |
 
-全エージェント共通で、Stop 系イベント（`Stop`、Cursor の `stop`、Windsurf の `post_cascade_response`）のパースエラーだけは上記の拒否ではなく `{}` + exit `0` を返します（次節を参照）。
+「フェイルクローズドのパースエラー」列が当てはまるのは実行前ゲートだけです。それ以外のイベント（Stop 系、保存後フック、claw-hooks がパススルーするライフサイクル系）は、上記の拒否ではなく中立の `{}` + exit `0` を返します（次節を参照）。
 
 ### フェイルクローズド動作
 
@@ -1036,6 +1038,10 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 **設定の破損時も、保護を無効化せず拒否します。** TOML 設定の読み込み・検証に失敗した場合も同じ拒否応答を返し、診断は stderr に出して `claw-hooks check` の実行を案内します。従来のように exit `1` + stdout 空で終了することはありません（Codex CLI / Antigravity CLI はこれを「フック失敗＝判定を無視」と解釈するため、`config.toml` のタイポ 1 つでコマンドブロックが丸ごと無効化されていました）。ロギングはセキュリティ制御ではなく診断機能なので、ログの初期化に失敗しても警告を出すだけでログ無しのまま処理を続行します。
 
 **Stop 系イベントは逆に許可します。** Stop イベントにおける「ブロック」は拒否ではなく *停止せずに新しいプロンプトを渡す* 指示です（Claude Code / Codex CLI は `decision:"block"`、Antigravity CLI は `decision:"continue"`、Cursor の `followup_message` は次のユーザーメッセージとして自動送信される）。壊れたペイロードや設定エラーに対してこれを返すと、失敗 → 継続 → `Stop` 再発火 → 同じ失敗、という自己維持ループになります。ループ防止層（`stop_hook_active` / `loop_count` / `CLAW_HOOKS_STOP_ACTIVE`）はいずれもパース成功後にしか働かないため、この循環を断てません。Stop は危険操作の実行前ゲートではないので、イベント固有の停止許可 + exit `0`（Antigravity は `{"decision":"stop"}`、他エージェントは `{}`）を返します。これは新しい副作用を発生させず、自動継続による追加のツール実行を避けます。
+
+**claw-hooks が中身を見ないイベントも許可します。** 検査していないイベントを拒否しても安全性は 1 ミリも上がらず、害だけが残ります。`UserPromptSubmit` の拒否は**ユーザーのプロンプト自体を消去**し、Codex の `PostToolUse` の拒否は**実際のツール出力をフックのメッセージで置き換え**ます。Cursor の `beforeReadFile` はファイル全文を入力に含むため、大きなファイルでは容易に stdin の 4 MiB 上限を超え、ファイル読み取りに何の意見も持たない claw-hooks がその読み取りを止めてしまいます。Windsurf の事後フックと Grok の `PreToolUse` 以外のイベントはそもそもブロック不可なので、拒否は無用なエラーを注入するだけです。これらはすべて `{}` + exit `0` を返します。
+
+**イベントを特定できないペイロードはブロックを維持します。** 上記の判断はイベント名を基準にしています。ペイロードの破損が激しくイベント名すら復元できない場合は拒否応答に倒すため、切り詰められた / 上限を超えた `PreToolUse` は従来どおりブロックされます。
 
 ## パフォーマンス
 

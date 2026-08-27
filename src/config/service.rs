@@ -44,10 +44,8 @@ impl ConfigService {
         let path = path.map(PathBuf::from).unwrap_or_else(Self::default_path);
         let config_dir = path.parent();
 
-        if !path.exists() {
-            // デフォルト設定ファイルを作成
-            Self::generate_at(&path)?;
-        }
+        // 設定ファイルが無ければデフォルトを作成する（既にあればそのまま読む）。
+        Self::ensure_config_file(&path)?;
 
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
@@ -149,7 +147,35 @@ impl ConfigService {
     }
 
     /// 指定パスにデフォルト設定ファイルを生成する。
+    ///
+    /// **既存ファイルは決して上書きしない。** 設定ファイルは利用者が育てるもので、
+    /// カスタムフィルター・拡張子フック・Stop フックを失うと復元手段が無い。
+    /// 既に存在する場合はエラーを返し、呼び出し側で明示的に扱わせる。
     pub fn generate_at(path: &Path) -> Result<()> {
+        if !Self::create_config_file(path)? {
+            bail!(
+                "Configuration file already exists: {}\n\
+                 Refusing to overwrite it. Remove it first, or use `--path` to write elsewhere.",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// 設定ファイルが無ければ生成する。既にある場合は何もしない。
+    ///
+    /// 読み込み経路（`load_inner`）用。生成と読み込みの間に他プロセスが
+    /// 同じファイルを作った場合でも、既存の内容をそのまま読めばよい。
+    fn ensure_config_file(path: &Path) -> Result<()> {
+        Self::create_config_file(path)?;
+        Ok(())
+    }
+
+    /// 設定ファイルを新規作成する。作成できた場合のみ `true` を返す。
+    ///
+    /// `create_new` は `O_EXCL` 相当なので、存在チェックと作成の間に別プロセスが
+    /// 割り込む余地（TOCTOU）が無く、既存ファイルを取り違えて壊すことがない。
+    fn create_config_file(path: &Path) -> Result<bool> {
         // 必要に応じて親ディレクトリを作成
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -157,11 +183,21 @@ impl ConfigService {
             })?;
         }
 
-        let content = Self::default_config_content();
-        fs::write(path, content)
-            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
-
-        Ok(())
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(Self::default_config_content().as_bytes())
+                    .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(anyhow::Error::new(error))
+                .with_context(|| format!("Failed to create config file: {}", path.display())),
+        }
     }
 
     /// コメント付きのデフォルト設定内容を返す。

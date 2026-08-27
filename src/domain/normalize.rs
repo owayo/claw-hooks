@@ -194,6 +194,7 @@ pub fn normalize_lint_output(output: &str) -> String {
 
     let lines = dedup_repeated_explanation_lines(lines);
     let lines = dedup_repeated_source_context_lines(lines);
+    let lines = drop_duplicate_excerpt_blocks_across_diagnostics(lines);
     let lines = drop_redundant_tool_summary_lines(lines);
     let lines = collapse_repeated_prefix_lines(lines);
 
@@ -280,6 +281,91 @@ fn dedup_repeated_source_context_lines(lines: Vec<String>) -> Vec<String> {
             seen.clear();
         }
         if is_source_context_line(&line) && !seen.insert(line.clone()) {
+            continue;
+        }
+        // 抜粋の除去でブロックが空になると空行が連続し得るため1行に圧縮する。
+        if line.is_empty() && result.last().is_some_and(|l| l.is_empty()) {
+            continue;
+        }
+        result.push(line);
+    }
+    while result.last().is_some_and(|l| l.is_empty()) {
+        result.pop();
+    }
+    result
+}
+
+/// 直前の診断と逐語一致するソース抜粋ブロックを除去する。
+///
+/// ruff / biome は、同じ箇所を指す診断が連続すると診断ごとに同一のソース抜粋を
+/// 丸ごと再掲する。例えば 1 つの関数定義に対する `ANN201` / `D103` / `ANN001` や、
+/// 1 つの `let` 文に対する `useConst` / `noUnusedVariables` がこれにあたる。
+///
+/// 抜粋が指す位置は各診断のヘッダ行（`-> file:line:col` /
+/// `file:line:col <rule> ━`）に数値で残るため、直前の診断と逐語一致する抜粋は
+/// 情報を持たない。[`dedup_repeated_source_context_lines`] は 1 件の診断の内側しか
+/// 見ないため、診断をまたいだこの再掲は取り除けない。
+///
+/// 実測では正規化後の ruff 出力の約 13%、biome 出力の約 7% がこの重複だった。
+/// 出力は既定 1000 文字で切り詰められるので、除去した分だけ後続の診断が
+/// 切り捨てられずにエージェントへ届くようになる。
+///
+/// 比較対象は「直前の診断が持っていた抜粋」に限定する（その抜粋を除去したかどうかに
+/// 関わらず元の値と比較する）。これにより同一抜粋が3件以上連続する場合も2件目以降を
+/// すべて除去でき、かつ離れた診断は自分の抜粋を保持する。
+///
+/// 対象は純粋なコンテキスト行の並びだけで、`- old` / `+ new` の差分行は
+/// [`is_source_context_line`] が除外するため抜粋ブロックに含まれない。
+/// 適用すべき修正内容が失われることはない。
+fn drop_duplicate_excerpt_blocks_across_diagnostics(lines: Vec<String>) -> Vec<String> {
+    let mut drop_flags = vec![false; lines.len()];
+    // 直前の診断が持っていた抜粋ブロック（除去の有無に関わらず元の値を保持する）。
+    let mut previous_excerpt: Option<Vec<String>> = None;
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        if !is_diagnostic_header_line(&lines[index]) {
+            index += 1;
+            continue;
+        }
+
+        // ヘッダ以降、次の診断が始まる前に現れる最初のコンテキスト行を探す。
+        let mut scan = index + 1;
+        let mut block_start = None;
+        while scan < lines.len() && !is_diagnostic_header_line(&lines[scan]) {
+            if is_source_context_line(&lines[scan]) {
+                block_start = Some(scan);
+                break;
+            }
+            scan += 1;
+        }
+
+        let Some(block_start) = block_start else {
+            // 抜粋を持たない診断。連鎖はここで途切れる。
+            previous_excerpt = None;
+            index = scan;
+            continue;
+        };
+
+        // 連続するコンテキスト行の並びを抜粋ブロックとして切り出す。
+        let mut block_end = block_start;
+        while block_end < lines.len() && is_source_context_line(&lines[block_end]) {
+            block_end += 1;
+        }
+
+        let block = lines[block_start..block_end].to_vec();
+        if previous_excerpt.as_ref() == Some(&block) {
+            for flag in &mut drop_flags[block_start..block_end] {
+                *flag = true;
+            }
+        }
+        previous_excerpt = Some(block);
+        index = block_end;
+    }
+
+    let mut result: Vec<String> = Vec::with_capacity(lines.len());
+    for (position, line) in lines.into_iter().enumerate() {
+        if drop_flags[position] {
             continue;
         }
         // 抜粋の除去でブロックが空になると空行が連続し得るため1行に圧縮する。
@@ -2931,9 +3017,9 @@ undocumented-public-module: Missing docstring in public module\n\
     }
 
     #[test]
-    fn test_dedup_scope_resets_per_diagnostic() {
-        // 別の診断で同じソース行が出るのは「その診断の位置情報」として意味があるため、
-        // 全体で一意化してはいけない。
+    fn test_consecutive_diagnostics_drop_duplicate_excerpt_block() {
+        // 連続する診断が逐語一致する抜粋を再掲する場合、2件目以降は情報を持たない。
+        // 位置は各診断のヘッダ (`-> sample.py:2:1`) に数値で残る。
         let input = "rule-a: first problem\n\
              --> sample.py:1:1\n\
              1 | import os\n\
@@ -2948,9 +3034,67 @@ undocumented-public-module: Missing docstring in public module\n\
 
         assert_eq!(
             result.matches("1 | import os").count(),
-            2,
-            "different diagnostics keep their own context: {result}"
+            1,
+            "consecutive duplicate excerpt should be dropped: {result}"
         );
+        // 各診断のメッセージと位置情報は必ず残す。
+        assert!(result.contains("rule-a: first problem"), "{result}");
+        assert!(result.contains("rule-b: second problem"), "{result}");
+        assert!(result.contains("-> sample.py:1:1"), "{result}");
+        assert!(result.contains("-> sample.py:2:1"), "{result}");
+    }
+
+    #[test]
+    fn test_non_adjacent_diagnostics_keep_their_own_excerpt() {
+        // 間に別の抜粋を持つ診断が挟まると連鎖が切れる。離れた診断は
+        // 「その診断の位置情報」として自分の抜粋を保持する。
+        let input = "rule-a: first problem\n\
+             --> sample.py:1:1\n\
+             1 | import os\n\
+             \n\
+             rule-b: other place\n\
+             --> sample.py:9:1\n\
+             9 | print(1)\n\
+             \n\
+             rule-c: back to the top\n\
+             --> sample.py:1:5\n\
+             1 | import os\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("1 | import os").count(),
+            2,
+            "non-adjacent diagnostics keep their own context: {result}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_excerpt_drop_preserves_diff_lines() {
+        // 差分行は「適用すべき修正」そのものなので、抜粋を落としても必ず残す。
+        let input = "rule-a: first problem\n\
+             --> sample.py:1:1\n\
+             1 | import os\n\
+             2 | import sys\n\
+             help: remove it\n\
+             - import os\n\
+             \n\
+             rule-b: second problem\n\
+             --> sample.py:2:1\n\
+             1 | import os\n\
+             2 | import sys\n\
+             help: remove it too\n\
+             - import sys\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("1 | import os").count(),
+            1,
+            "duplicate excerpt dropped: {result}"
+        );
+        assert!(result.contains("- import os"), "fix kept: {result}");
+        assert!(result.contains("- import sys"), "fix kept: {result}");
     }
 
     #[test]

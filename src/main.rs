@@ -24,7 +24,9 @@ fn main() -> Result<()> {
     // 設定を使用しないコマンドは先に処理する。設定ファイルが壊れていても
     // `init` で再生成でき、`version` で実行ファイルの情報を確認できるようにする。
     match &cli.command {
-        Commands::Init { path } => return run_init(path.as_deref(), cli.quiet),
+        Commands::Init { path } => {
+            return run_init(path.as_deref(), cli.config.as_deref(), cli.quiet);
+        }
         Commands::Version => {
             println!("claw-hooks {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -54,8 +56,19 @@ fn main() -> Result<()> {
 }
 
 /// `init` サブコマンド: デフォルト設定ファイルを生成する。
-fn run_init(path: Option<&std::path::Path>, quiet: bool) -> Result<()> {
-    let config_path = match path {
+///
+/// `--config` はグローバルオプションなので `init` でも受理される。これを無視して
+/// デフォルトパスに書くと、`init --config <別のパス>` が既存のグローバル設定を
+/// 壊すという事故になるため、書き込み先として解釈する。
+///
+/// 書き込み先を明示する `--path` の方が意図が強いので、両方あるときは `--path` を採る
+/// (`--config <壊れた設定> init --path <新しい設定>` という使い方ができる)。
+fn run_init(
+    path: Option<&std::path::Path>,
+    config: Option<&std::path::Path>,
+    quiet: bool,
+) -> Result<()> {
+    let config_path = match path.or(config) {
         Some(path) => {
             ConfigService::generate_at(path)?;
             path.to_path_buf()

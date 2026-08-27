@@ -2240,3 +2240,247 @@ fn test_config_error_does_not_loop_stop_event() {
         }
     }
 }
+
+/// テスト用に一時ディレクトリへ設定ファイルを書き出す。
+fn write_temp_config(dir: &tempfile::TempDir, contents: &str) -> std::path::PathBuf {
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, contents).expect("Failed to write config");
+    path
+}
+
+#[test]
+fn test_cursor_block_reason_reaches_the_agent() {
+    // Cursor の公式仕様では user_message が「ユーザーへの表示」、
+    // agent_message が「エージェントへのフィードバック」。claw-hooks の主目的は
+    // 代替コマンドをエージェントに教えることなので、理由本文は agent_message に入る。
+    let input =
+        r#"{"hook_event_name":"beforeShellExecution","command":"rm -rf /tmp/x","cwd":"/tmp"}"#;
+    let (stdout, _stderr, exit_code) = run_hook_with_format(input, "cursor");
+
+    assert_eq!(exit_code, 0, "Cursor の判定は exit 0 + JSON で返す");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["permission"], "deny");
+
+    let agent_message = parsed["agent_message"].as_str().unwrap();
+    assert!(
+        agent_message.contains("safe-rm") || agent_message.contains("rm"),
+        "agent_message にブロック理由が入ること: {stdout}"
+    );
+    assert_eq!(
+        parsed["user_message"], parsed["agent_message"],
+        "ユーザーとエージェントに同じ理由を提示する: {stdout}"
+    );
+}
+
+#[test]
+fn test_agy_pre_tool_use_non_command_tool_returns_required_decision() {
+    // Antigravity の PreToolUse は出力の `decision` が必須。
+    // run_command 以外のツールでも `{}` を返してはいけない。
+    for tool in [
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+        "view_file",
+        "list_dir",
+    ] {
+        let input = format!(
+            r#"{{"toolCall":{{"name":"{tool}","args":{{"TargetFile":"/tmp/a.rs"}}}},"stepIdx":0}}"#
+        );
+        let (stdout, _stderr, exit_code) =
+            run_hook_with_format_and_event(&input, "agy", "PreToolUse");
+
+        assert_eq!(exit_code, 0, "{tool}: 判定は exit 0 で返す");
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"decision": "allow"}),
+            "{tool}: PreToolUse の decision は必須 (stdout={stdout})"
+        );
+    }
+}
+
+#[test]
+fn test_windsurf_post_write_code_reports_lint_output_to_agent() {
+    // Windsurf は事後フックをブロックできないが、exit 2 の stderr は
+    // Cascade エージェントに提示される。保存後 lint の診断はこの経路で届ける。
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("sample.zzz");
+    std::fs::write(&target, "x").unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\".zzz\" = [\"sh -c 'echo LINT-FINDING {file}; exit 1'\"]\n",
+    );
+
+    let input = format!(
+        r#"{{"agent_action_name":"post_write_code","tool_info":{{"file_path":"{}"}}}}"#,
+        target.display()
+    );
+    let (stdout, stderr, exit_code) = run_hook_with_config_and_format(&input, "windsurf", &config);
+
+    assert_eq!(
+        exit_code, 2,
+        "診断ありの保存後フックは exit 2 (stdout={stdout})"
+    );
+    assert!(
+        stderr.contains("LINT-FINDING"),
+        "診断本文が stderr に出ること: stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("hookSpecificOutput"),
+        "Windsurf には JSON ではなく本文を返す: stderr={stderr}"
+    );
+}
+
+#[test]
+fn test_windsurf_post_write_code_stays_silent_without_findings() {
+    // 診断が無いときに exit 2 を返すと、編集のたびに無用なエラー表示が出る。
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("sample.zzz");
+    std::fs::write(&target, "x").unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\".zzz\" = [\"sh -c 'true {file}'\"]\n",
+    );
+
+    let input = format!(
+        r#"{{"agent_action_name":"post_write_code","tool_info":{{"file_path":"{}"}}}}"#,
+        target.display()
+    );
+    let (stdout, stderr, exit_code) = run_hook_with_config_and_format(&input, "windsurf", &config);
+
+    assert_eq!(exit_code, 0, "診断が無ければ通常終了 (stderr={stderr})");
+    assert_eq!(stdout.trim(), "{}");
+}
+
+#[test]
+fn test_notebook_edit_triggers_extension_hooks() {
+    // NotebookEdit のファイルパスは `notebook_path` に入る。これを読まないと
+    // `.ipynb` の保存後フック (formatter/linter) が発火しない。
+    let dir = tempfile::TempDir::new().unwrap();
+    let target = dir.path().join("analysis.ipynb");
+    std::fs::write(&target, "{}").unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\".ipynb\" = [\"sh -c 'echo NOTEBOOK-CHECKED {file}; exit 1'\"]\n",
+    );
+
+    let input = format!(
+        r#"{{"hook_event_name":"PostToolUse","tool_name":"NotebookEdit","tool_input":{{"notebook_path":"{}","new_source":"x = 1"}}}}"#,
+        target.display()
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_config_and_format(&input, "claude", &config);
+
+    assert_eq!(exit_code, 0);
+    assert!(
+        stdout.contains("NOTEBOOK-CHECKED"),
+        "NotebookEdit で拡張子フックが走ること: {stdout}"
+    );
+}
+
+#[test]
+fn test_pre_tool_use_still_fails_closed_on_malformed_payload() {
+    // 実行前ゲートは従来どおりフェイルクローズドを維持する。
+    let truncated =
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"#;
+    let (_stdout, stderr, exit_code) = run_hook_with_format(truncated, "claude");
+    assert_eq!(exit_code, 2, "壊れた PreToolUse はブロックする");
+    assert!(stderr.contains("fail-closed"), "stderr={stderr}");
+}
+
+#[test]
+fn test_unidentifiable_event_still_fails_closed() {
+    // イベント名すら読めない入力は、何が起きるか不明なのでブロックを維持する。
+    let (_stdout, stderr, exit_code) = run_hook_with_format(r#"{"garb"#, "claude");
+    assert_eq!(exit_code, 2, "イベント不明はフェイルクローズド");
+    assert!(stderr.contains("fail-closed"), "stderr={stderr}");
+}
+
+#[test]
+fn test_out_of_scope_events_do_not_block_on_malformed_payload() {
+    // claw-hooks が中身を検査しないイベントで拒否を返しても、セキュリティ上の
+    // 利得はゼロで害だけが残る (プロンプト消去 / ツール出力の置き換え /
+    // ファイル読み取りの阻止)。中立応答に倒すこと。
+    let cases: [(&str, &str); 4] = [
+        // Claude: UserPromptSubmit の deny はユーザーのプロンプト自体を拒否する
+        (
+            "claude",
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello"#,
+        ),
+        // Codex: PostToolUse の deny は実際のツール出力を置き換えてしまう
+        (
+            "codex",
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":"out"#,
+        ),
+        // Cursor: beforeReadFile はファイル全文を含むため入力過大になりやすい
+        (
+            "cursor",
+            r#"{"hook_event_name":"beforeReadFile","content":"aaa"#,
+        ),
+        // Windsurf: 事後フックはそもそもブロックできない
+        (
+            "windsurf",
+            r#"{"agent_action_name":"post_run_command","tool_info":{"command_line":"ls"#,
+        ),
+    ];
+
+    for (format, payload) in cases {
+        let (stdout, _stderr, exit_code) = run_hook_with_format(payload, format);
+        assert_eq!(
+            exit_code, 0,
+            "{format}: スコープ外イベントをブロックしないこと (stdout={stdout})"
+        );
+        let body = stdout.trim();
+        assert!(
+            body.is_empty() || body == "{}",
+            "{format}: 中立応答を返すこと: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_init_refuses_to_overwrite_existing_config() {
+    // 設定ファイルは利用者が育てるもので、上書きすると復元手段が無い。
+    let dir = tempfile::TempDir::new().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let original = "rm_block = false\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("init")
+        .arg("--path")
+        .arg(&config_path)
+        .output()
+        .expect("Failed to run init");
+
+    assert!(!output.status.success(), "既存ファイルがあれば失敗すること");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        original,
+        "既存の設定内容が保持されること"
+    );
+}
+
+#[test]
+fn test_init_writes_to_the_config_flag_target() {
+    // `--config` はグローバルオプションなので init でも受理される。
+    // これを無視してデフォルトパスへ書くと、利用者のグローバル設定を壊す事故になる。
+    let dir = tempfile::TempDir::new().unwrap();
+    let requested = dir.path().join("requested.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&requested)
+        .arg("init")
+        .output()
+        .expect("Failed to run init");
+
+    assert!(
+        output.status.success(),
+        "init should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        requested.exists(),
+        "--config で指定した場所に生成されること"
+    );
+}

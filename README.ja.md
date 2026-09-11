@@ -903,9 +903,11 @@ Antigravity の公式ペイロードにはイベント名フィールドが無�
 
 非ファイル系ツール（例: `Bash`）の `PostToolUse` も厳密検証せずパススルーします。Codex の `PostToolUse` では `decision:"block"` が**実際のツール出力をフックのメッセージで置き換える**動作になるため、ここでフェイルクローズドにするとモデルは本来のコマンド出力を一切見られなくなり、しかも保存後フックに必要なのはファイルパスだけなので得るものがありません。claw-hooks が実際に読むフィールドについては、欠落・型不正なら従来どおりイベント固有の deny/block 応答でフェイルクローズドになります。
 
+`Interrupt` と、`mcp__*` など claw-hooks が検査しない MCP / 関数ツールはスコープ外です。他のフックや Codex 本来の権限判断を上書きしないよう、明示的な allow ではなく中立応答 `{}` でパススルーします。
+
 | hook_event_name | 内部マッピング |
 |-----------------|------------------|
-| `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | パススルー allow |
+| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PreCompact` / `PostCompact` / `Interrupt` | パススルー allow |
 | `PreToolUse` | BeforeCommand |
 | `PermissionRequest` | 承認プロンプト前のコマンドガード（危険な Bash は deny、安全なら `{}`） |
 | `PostToolUse` | AfterFileEdit（`Bash` パススルー、`apply_patch` → MultiEdit） |

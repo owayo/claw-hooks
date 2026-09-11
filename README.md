@@ -903,9 +903,11 @@ Validation is limited to the fields claw-hooks actually reads: the event name, `
 
 `PostToolUse` for non-file tools (for example `Bash`) is also passed through without strict validation, because a Codex `PostToolUse` block *replaces the real tool output* with the hook message: failing closed there would hide the command's own output from the model while gaining nothing, since only file paths matter for post-edit hooks. Fields that claw-hooks does read still fail closed with the event's native deny/block response when they are missing or mistyped.
 
+`Interrupt` and MCP/function tools that claw-hooks does not inspect, including `mcp__*`, are out of scope. They pass through with the neutral `{}` response rather than an explicit allow, so claw-hooks does not override Codex's own permission flow or another hook's decision.
+
 | hook_event_name | Internal Mapping |
 |-----------------|------------------|
-| `SessionStart` / `UserPromptSubmit` / `PreCompact` / `PostCompact` | pass-through allow |
+| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PreCompact` / `PostCompact` / `Interrupt` | pass-through allow |
 | `PreToolUse` | BeforeCommand |
 | `PermissionRequest` | command guard before approval prompts (deny for dangerous Bash, `{}` for safe) |
 | `PostToolUse` | AfterFileEdit (`Bash` pass-through; `apply_patch` → MultiEdit) |

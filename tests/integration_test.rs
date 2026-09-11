@@ -1979,6 +1979,38 @@ fn test_codex_user_prompt_submit_passthrough() {
     );
 }
 
+#[test]
+fn test_codex_interrupt_passthrough() {
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"Interrupt","session_id":"test-session","cwd":"/tmp"}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
+
+    assert_eq!(exit_code, 0, "Codex Interrupt は中立応答で通過させる");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "対象外の Interrupt で判断トークンを返してはいけない"
+    );
+}
+
+#[test]
+fn test_codex_mcp_tool_pre_tool_use_passthrough() {
+    let input = complete_codex_input(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__github__get_issue","tool_input":{"owner":"example","repo":"project","issue_number":1}}"#,
+    );
+    let (stdout, _stderr, exit_code) = run_hook_with_format(&input, "codex");
+
+    assert_eq!(exit_code, 0, "対象外の MCP ツールは中立応答で通過させる");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!({}),
+        "MCP ツールの権限判断を claw-hooks が上書きしてはいけない"
+    );
+}
+
 // === Antigravity CLI フォーマット ===
 
 #[test]

@@ -175,7 +175,7 @@ cargo run -- version     # Show version
 - Official docs: https://antigravity.google/docs/customizations/hooks
 
 ### Codex CLI
-- Supports these hook events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Stop`
+- Supports these hook events: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Stop`, `Interrupt`
 - Use `--format codex` when testing
 - Allow output: `{}` (empty JSON, exit 0)
 - PreToolUse Block output: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式。legacy の `{"decision":"block"}` も受理されるが使用しない）
@@ -188,10 +188,10 @@ cargo run -- version     # Show version
 - PermissionRequest の parse error も PermissionRequest 専用 deny schema で返す
 - PreToolUse の parse error も PreToolUse 推奨形式（`hookSpecificOutput.permissionDecision="deny"`）で返す。イベント名が判別できない入力は legacy block 形式（全イベント共通で受理される）にフォールバック
 - PostToolUse の追加コンテキストは `hookSpecificOutput.additionalContext` で返す
-- Codex `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PreCompact` / `PostCompact` は claw-hooks のスコープ外として allow パススルー
+- Codex `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PreCompact` / `PostCompact` / `Interrupt` は claw-hooks のスコープ外として中立応答 `{}` でパススルー
 - Codex `PreToolUse` / `PermissionRequest` / `PostToolUse` は `Bash` と `apply_patch` を受け取る。`apply_patch` は `MultiEdit` にマップし、patch コマンドから変更ファイルパスを抽出する。旧版互換のエイリアスは `shell` / `run_command` / `execute` → `Bash` のみで、未知のツール名は写像せずそのまま渡す（`Write` に寄せると `file_path` が必須化され、引数キーが `path` / `filename` 等の関数ツールに PreToolUse の誤 deny が発生する。未知名は `ToolInput::Other` になり、組み込みフィルターは `tool_name == "Bash"` しか見ないので無害に素通しされる）
 - Codex `SubagentStart` / `SubagentStop` は内部通知イベントとして扱う。NanoBuddy 用に `ToolInput::Subagent` へマップするが、README.md / README.ja.md には記載しない
-- Official docs: https://developers.openai.com/codex/hooks
+- Official docs: https://learn.chatgpt.com/docs/hooks
 
 ### Grok CLI
 - Use `--format grok` when testing。設定は JSON で個人が `~/.grok/hooks/*.json`、プロジェクトが `<project>/.grok/hooks/*.json`。Grok は Claude Code (`.claude/settings.json`) と Cursor (`.cursor/hooks.json`) のフック設定も読み込む。プロジェクトフックは `/hooks-trust` または `--trust` による信頼付与が必要

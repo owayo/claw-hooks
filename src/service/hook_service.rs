@@ -32,6 +32,49 @@ fn read_stdin_bounded(stdin: io::Stdin) -> Result<Vec<u8>> {
     Ok(raw)
 }
 
+/// フェイルクローズ応答を、終了コードに応じた正しいストリームへ書き出す。
+///
+/// 不変条件はひとつだけ: **エラー本文を stderr に出してよいのは、実際にブロックする
+/// （exit != 0）ときだけ**。Claude / Windsurf は exit 2 のとき stdout の JSON を読まず
+/// stderr 本文を理由として扱うため、ブロック時は stderr に書く必要がある。
+/// 一方 Stop 系のフェイルクローズは無限ループ回避のため「停止許可 + exit 0」に倒れるが、
+/// これは判定 JSON であってエラー本文ではない。stderr に出すと本来 stdout で返すべき
+/// JSON がデバッグログ側へ流れ、stdout が空のままになる。
+///
+/// 設定エラー / ランタイムエラー / 入力のフェイルクローズの 3 経路すべてが同じ判断を
+/// 必要とするため、分岐をここに集約する。分散していると片方だけ直して残りが取り残され、
+/// 実際に `emit_config_error` / `emit_runtime_error` は終了コードを見ない分岐のまま
+/// Stop の停止許可 JSON を stderr へ流していた。
+fn write_fail_closed_response(
+    adapter: &FormatAdapter,
+    output: &str,
+    exit_code: i32,
+) -> io::Result<()> {
+    if exit_code != 0 && adapter.format_uses_stderr_for_errors() {
+        let stderr = io::stderr();
+        let mut stderr = stderr.lock();
+        writeln!(stderr, "{}", output)?;
+        stderr.flush()
+    } else {
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        writeln!(stdout, "{}", output)?;
+        // パイプ越しに読まれるため exit 前にフラッシュする。
+        stdout.flush()
+    }
+}
+
+/// フェイルクローズ応答を書き出す。書き込み自体に失敗しても終了コードで意思を表明する。
+///
+/// 出力先が壊れている（パイプ切断・ディスクフル）場合、本文を届ける手段はもう無い。
+/// ここでエラーを呼び出し元へ返すと「フェイルクローズのつもりが汎用ブロックに化ける」
+/// 経路を再び作ってしまうため、診断だけ stderr に出して終了コードに委ねる。
+fn emit_fail_closed_response(adapter: &FormatAdapter, output: &str, exit_code: i32) {
+    if let Err(e) = write_fail_closed_response(adapter, output, exit_code) {
+        eprintln!("claw-hooks failed to write fail-closed response: {}", e);
+    }
+}
+
 /// フックイベント処理サービス。
 pub struct HookService {
     config: Config,
@@ -54,78 +97,82 @@ impl HookService {
     /// Stop 系は `format_error_for_input` 側でイベント固有の停止許可に倒れるため、
     /// 設定エラーで継続ループに陥ることはない。
     ///
+    /// `event` には `--event` の明示指定をそのまま渡す。正常経路
+    /// （`HookService::with_event_override`）だけに渡して設定エラー経路で落とすと、
+    /// 設定が壊れているときだけイベント判別が別物になる。Antigravity は入力に
+    /// イベント名フィールドが無く、PreToolUse と PostToolUse は形状も同一
+    /// （どちらも `toolCall` + `stepIdx`）なので `--event` が唯一の判別手段であり、
+    /// 渡さないと PostToolUse（仕様上 `{}` 固定）や Stop（`decision` 語彙に `deny` は
+    /// 存在しない）に対して PreToolUse 用の `{"decision":"deny"}` を返してしまう。
+    ///
     /// 終了コードを返す（`main` 側でログガードを drop してから終了するため）。
-    pub fn emit_config_error(format: Format, trace: bool, error: &anyhow::Error) -> i32 {
+    pub fn emit_config_error(
+        format: Format,
+        trace: bool,
+        event: Option<String>,
+        error: &anyhow::Error,
+    ) -> i32 {
         // 設定内容そのもの（パスやフィルター定義）はエージェントへ返す本文に含めない。
         // 診断の詳細は stderr に出し、ユーザーが `claw-hooks check` で確認できるようにする。
         eprintln!("claw-hooks configuration error: {:#}", error);
 
-        let adapter = FormatAdapter::new(format, 0);
+        let adapter = FormatAdapter::new(format, 0).with_event_override(event);
         let message = "claw-hooks configuration is invalid. Run `claw-hooks check`.";
 
         // イベント別の拒否形式を選ぶため、生入力からイベント名だけを読み取る。
         // 上限超過の入力も捨てずに渡す。捨てると Stop を判別できず、設定エラー時に
         // Stop へブロック（= 継続プロンプト）を返して無限ループを招く。
         // 先頭は読めているため、イベント名の走査フォールバックで判別できる。
+        // 読めない / 空のときも `None` ではなく空文字列として判定経路に載せる。
+        // `None` だと `format_error` の汎用形式に直行し、`--event` の明示指定まで
+        // 無視されてしまう（空文字列ならイベント名を持たないフォーマットは従来どおり
+        // 汎用形式へフォールバックする）。
         let raw_input = read_stdin_bounded(io::stdin())
             .ok()
-            .filter(|raw| !raw.is_empty())
-            .map(|raw| String::from_utf8_lossy(&raw).into_owned());
+            .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+            .unwrap_or_default();
 
         if trace {
             eprintln!("🔍 [TRACE] Config error fail-closed: {:#}", error);
         }
 
-        let output = match raw_input.as_deref() {
-            Some(input) => adapter.format_error_for_input(message, input),
-            None => adapter.format_error(message),
-        };
+        let output = adapter.format_error_for_input(message, &raw_input);
+        let exit_code = adapter.error_exit_code(Some(&raw_input));
+        emit_fail_closed_response(&adapter, &output, exit_code);
 
-        let write_result = if adapter.format_uses_stderr_for_errors() {
-            let stderr = io::stderr();
-            let mut stderr = stderr.lock();
-            writeln!(stderr, "{}", output).and_then(|()| stderr.flush())
-        } else {
-            let stdout = io::stdout();
-            let mut stdout = stdout.lock();
-            writeln!(stdout, "{}", output).and_then(|()| stdout.flush())
-        };
-        if let Err(e) = write_result {
-            // 書き込み自体が失敗した場合は終了コードだけでブロックを表明する。
-            eprintln!("claw-hooks failed to write fail-closed response: {}", e);
-        }
-
-        adapter.error_exit_code(raw_input.as_deref())
+        exit_code
     }
 
-    /// `run` の内部エラー（出力の書き込み失敗など）に対するフェイルクローズ応答を出力する。
+    /// `run` の残余の内部エラーに対するフェイルクローズ応答を出力する。
     ///
     /// `emit_config_error` と同じ理由でエラーを `?` で伝播させられないが、
-    /// この時点では stdin を読み切っているためイベント名を判別できない。
-    /// そのため各フォーマットの汎用拒否形式で返す。
-    pub fn emit_runtime_error(format: Format, trace: bool, error: &anyhow::Error) -> i32 {
+    /// この時点では stdin を読み切っており、ペイロードからイベント名を取り直せない。
+    /// 判別材料は `--event` の明示指定だけなので、それをアダプターへ渡した上で
+    /// 空入力として整形する（Antigravity の Stop / PostToolUse はこれで正しい応答に倒れる。
+    /// イベント名をペイロードに持つ他フォーマットは、空入力なら従来どおり汎用形式になる）。
+    ///
+    /// イベント名が既知の状態で起きるエラー（出力の整形・書き込み失敗）は、ここまで
+    /// 上げずに `run` 側でイベント別のフェイルクローズへ倒す。汎用ブロックに化けると、
+    /// Stop では「ブロック = 停止させず reason を継続プロンプトにする」意味になり、
+    /// 「失敗 → 継続 → Stop 再発火 → 同じ失敗」の自己維持ループになるため
+    /// （パイプ切断やディスクフルのように原因が持続するほど確実にループする）。
+    pub fn emit_runtime_error(
+        format: Format,
+        trace: bool,
+        event: Option<String>,
+        error: &anyhow::Error,
+    ) -> i32 {
         eprintln!("claw-hooks internal error: {:#}", error);
         if trace {
             eprintln!("🔍 [TRACE] Runtime error fail-closed: {:#}", error);
         }
 
-        let adapter = FormatAdapter::new(format, 0);
-        let output = adapter.format_error("claw-hooks encountered an internal error");
+        let adapter = FormatAdapter::new(format, 0).with_event_override(event);
+        let output = adapter.format_error_for_input("claw-hooks encountered an internal error", "");
+        let exit_code = adapter.error_exit_code(Some(""));
+        emit_fail_closed_response(&adapter, &output, exit_code);
 
-        let write_result = if adapter.format_uses_stderr_for_errors() {
-            let stderr = io::stderr();
-            let mut stderr = stderr.lock();
-            writeln!(stderr, "{}", output).and_then(|()| stderr.flush())
-        } else {
-            let stdout = io::stdout();
-            let mut stdout = stdout.lock();
-            writeln!(stdout, "{}", output).and_then(|()| stdout.flush())
-        };
-        if let Err(e) = write_result {
-            eprintln!("claw-hooks failed to write fail-closed response: {}", e);
-        }
-
-        adapter.error_exit_code(None)
+        exit_code
     }
 
     /// 指定フォーマットで新しい HookService を作成する。
@@ -156,8 +203,6 @@ impl HookService {
     /// 終了できるようにする（ガード未 drop だと終了直前のログが欠落する）。
     pub fn run(&self) -> Result<i32> {
         let stdin = io::stdin();
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
 
         // stdin から全入力を読み取り（改行を保持して正確なJSONを維持）。
         // サイズ制限を設け、悪意ある/暴走エージェントによる OOM 攻撃を防ぐ。
@@ -175,12 +220,11 @@ impl HookService {
             Ok(raw) => raw,
             Err(e) => {
                 let log_message = format!("Failed to read stdin: {}", e);
-                return self.fail_closed(
-                    &mut stdout,
-                    &log_message,
-                    "Failed to read hook input",
-                    None,
-                );
+                // 本文が 1 バイトも無くても空文字列を渡す。`None` を渡すと
+                // イベント名の判定経路自体が飛ばされ、`--event` による明示指定
+                // （Antigravity でイベントを一意に決める唯一の手段）まで無視されて、
+                // Stop に対して PreToolUse 用の deny を返してしまう。
+                return Ok(self.fail_closed(&log_message, "Failed to read hook input", Some("")));
             }
         };
         // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
@@ -203,7 +247,7 @@ impl HookService {
                 raw.len(),
                 MAX_INPUT_BYTES
             );
-            return self.fail_closed(&mut stdout, &log_message, "Input too large", Some(&input));
+            return Ok(self.fail_closed(&log_message, "Input too large", Some(&input)));
         }
 
         // トレースモード: 生の入力を即座に stderr に出力
@@ -214,13 +258,14 @@ impl HookService {
         }
 
         if input.is_empty() {
-            // セキュリティ: フェイルクローズ - 入力がない場合はブロック
-            return self.fail_closed(
-                &mut stdout,
+            // セキュリティ: フェイルクローズ - 入力がない場合はブロック。
+            // ただし空文字列を渡してイベント判定経路には載せる（`--event` の明示指定を
+            // 活かすため）。判別できないフォーマットでは従来どおりブロックに倒れる。
+            return Ok(self.fail_closed(
                 "No input received from stdin",
                 "No input received from stdin",
-                None,
-            );
+                Some(&input),
+            ));
         }
 
         debug!("Received input: {}", summarize_hook_input(&input));
@@ -242,7 +287,7 @@ impl HookService {
                 // パース失敗経路は元入力からイベント名を判定し、エージェント別の
                 // 適切な deny フォーマット（format_error_for_input）で返す。
                 let error_msg = format!("Failed to parse input: {}", e);
-                return self.fail_closed(&mut stdout, &error_msg, &error_msg, Some(&input));
+                return Ok(self.fail_closed(&error_msg, &error_msg, Some(&input)));
             }
         };
 
@@ -255,8 +300,26 @@ impl HookService {
             eprintln!("🔍 [TRACE] Exit code: {}", exit_code);
         }
 
-        // フォーマットアダプターで出力を書き込み
-        let output = self.adapter.format_output(&decision, hook_input.event)?;
+        // フォーマットアダプターで出力を整形する。
+        //
+        // 整形失敗を `?` で投げ捨ててはいけない。`main` 側の `emit_runtime_error` は
+        // stdin を読み切った後で呼ばれるためペイロードからイベント名を取り直せず、
+        // 汎用ブロックに化ける。Stop の「ブロック」は拒否ではなく
+        // 「停止させず reason を継続プロンプトにする」意味なので、
+        // 「失敗 → 継続 → Stop 再発火 → 同じ失敗」の自己維持ループになる
+        // （ループ防止層は 3 層ともこの経路をすり抜ける）。
+        // イベントが分かっているこの場でイベント別のフェイルクローズへ倒す。
+        let output = match self.adapter.format_output(&decision, hook_input.event) {
+            Ok(output) => output,
+            Err(e) => {
+                let log_message = format!("Failed to format output: {}", e);
+                return Ok(self.fail_closed(
+                    &log_message,
+                    "Failed to format hook output",
+                    Some(&input),
+                ));
+            }
+        };
 
         if self.trace {
             eprintln!("🔍 [TRACE] Output:");
@@ -277,14 +340,26 @@ impl HookService {
         // Windsurf は pre_run_command / post_write_code のブロック時に stderr を使う
         // （exit 2 のエラーメッセージは stderr から読まれるのが公式仕様）。
         // post_cascade_response は事後フックのため、Stop の失敗も stdout 側の許可応答に丸める。
-        if self.adapter.use_stderr(&decision, hook_input.event) {
+        let write_result = if self.adapter.use_stderr(&decision, hook_input.event) {
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
-            writeln!(stderr, "{}", output)?;
-            stderr.flush()?;
+            writeln!(stderr, "{}", output).and_then(|()| stderr.flush())
         } else {
-            writeln!(stdout, "{}", output)?;
-            stdout.flush()?; // パイプのためexit前にフラッシュ
+            let stdout = io::stdout();
+            let mut stdout = stdout.lock();
+            // パイプのためexit前にフラッシュ
+            writeln!(stdout, "{}", output).and_then(|()| stdout.flush())
+        };
+
+        if let Err(e) = write_result {
+            // 判定が確定した後の書き込み失敗（パイプ切断・ディスクフル）も `?` で返さない。
+            // 返すと Allow に決まった判定まで `emit_runtime_error` の汎用ブロックに化け、
+            // Stop では「停止させず継続」と解釈されて自己維持ループになる。
+            // 書き込み失敗の原因は持続的なことが多く、再発火のたびに同じ失敗を繰り返す。
+            // イベントが既知のここで、イベント別のフェイルクローズ
+            // （Stop なら停止許可 + exit 0、実行前ゲートならブロック）へ倒す。
+            let log_message = format!("Failed to write hook output: {}", e);
+            return Ok(self.fail_closed(&log_message, "Failed to write hook output", Some(&input)));
         }
 
         Ok(exit_code)
@@ -363,27 +438,26 @@ impl HookService {
 
     /// フェイルクローズ（ブロック）でエラー応答を返す共通処理。
     ///
-    /// 3 つのフェイルクローズ経路（入力過大 / 空入力 / パース失敗）で重複していた
+    /// 5 つのフェイルクローズ経路（stdin 読み取り失敗 / 入力過大 / 空入力 / パース失敗 /
+    /// 判定確定後の出力整形・書き込み失敗）で重複していた
     /// 「トレース出力 → error! ログ → エラー整形 → 出力書き込み → 終了コード返却」を集約する。
     ///
     /// - `log_message`: トレース（stderr）と `error!` ログに残す診断メッセージ。
     /// - `emit_message`: エージェントへ返す整形済みエラーの本文。通常は `log_message`
     ///   と同一だが、入力過大時のみ短い定型文（"Input too large"）を用いる。
-    /// - `raw_input`: パース失敗経路のみ元入力を渡す。イベント名を判定して
+    /// - `raw_input`: 元入力（読めなかった場合も空文字列）を渡す。イベント名を判定して
     ///   エージェント別の適切な deny フォーマット（`format_error_for_input`）で返すため。
     ///   `None` の場合は汎用フォーマット（`format_error`）を用いる。
+    ///
+    /// 出力の書き込み失敗はここで握り潰して終了コードだけを返す。`?` で返すと
+    /// `main` 側の `emit_runtime_error` が汎用ブロックに差し替えてしまい、
+    /// せっかくイベント別に選んだ応答（Stop の停止許可など）が失われるため。
     ///
     /// プロセスを直接終了せず終了コードを返すのは、非同期ログ（tracing-appender）の
     /// フラッシュ用ガードを呼び出し側（main）で確実に drop してから終了するため
     /// （`process::exit` はスタックローカルの drop を実行しないため、ここで直接終了すると
     /// 診断ログが欠落し得る）。
-    fn fail_closed(
-        &self,
-        stdout: &mut io::StdoutLock,
-        log_message: &str,
-        emit_message: &str,
-        raw_input: Option<&str>,
-    ) -> Result<i32> {
+    fn fail_closed(&self, log_message: &str, emit_message: &str, raw_input: Option<&str>) -> i32 {
         if self.trace {
             eprintln!("🔍 [TRACE] ERROR: {}", log_message);
         }
@@ -394,35 +468,8 @@ impl HookService {
             None => self.adapter.format_error(emit_message),
         };
         let exit_code = self.adapter.error_exit_code(raw_input);
-        self.write_error_output(stdout, &output_json, exit_code)?;
-        Ok(exit_code)
-    }
-
-    /// フェイルクローズ時のエラー出力を適切なストリームに書き込む。
-    ///
-    /// Windsurf / Claude はブロック時に exit code 2 + stderr からメッセージを読むため、
-    /// フェイルクローズパスでも stderr に書く必要がある。
-    ///
-    /// ただし終了コードが 0 の場合は「ブロックではない」応答なので stdout に書く。
-    /// Stop 系のパースエラーは無限ループ回避のためイベント固有の停止許可 + exit 0 を返すが、
-    /// これは判定 JSON であってエラー本文ではない。stderr に出すと本来 stdout で
-    /// 返すべき JSON がデバッグログ側へ流れ、stdout が空のままになる。
-    fn write_error_output(
-        &self,
-        stdout: &mut io::StdoutLock,
-        output_json: &str,
-        exit_code: i32,
-    ) -> Result<()> {
-        if exit_code != 0 && self.adapter.format_uses_stderr_for_errors() {
-            let stderr = io::stderr();
-            let mut stderr = stderr.lock();
-            writeln!(stderr, "{}", output_json)?;
-            stderr.flush()?;
-        } else {
-            writeln!(stdout, "{}", output_json)?;
-            stdout.flush()?;
-        }
-        Ok(())
+        emit_fail_closed_response(&self.adapter, &output_json, exit_code);
+        exit_code
     }
 
     /// SubagentStart/SubagentStop イベントの処理。

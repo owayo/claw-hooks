@@ -342,7 +342,7 @@ claw-hooks hook --config /path/to/config.toml
   "claw-hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command",
+        "matcher": "run_command|manage_task",
         "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PreToolUse" }]
       }
     ],
@@ -431,7 +431,6 @@ Codex hooks はデフォルトで有効です。明示的に機能フラグを�
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
         "hooks": [{ "type": "command", "command": "claw-hooks hook --format grok", "timeout": 10 }]
       }
     ],

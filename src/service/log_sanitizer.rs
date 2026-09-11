@@ -14,8 +14,14 @@ pub(crate) fn summarize_hook_input(input: &str) -> String {
         return format!("invalid_json bytes={bytes}");
     };
 
+    // 各エージェントのフィールド名を網羅する。Grok は camelCase（`hookEventName` /
+    // `toolName` / `sessionId`）、Antigravity はイベント名フィールド自体を持たず
+    // `toolCall.name` にツール名が入る。ここを取りこぼすと、その 2 つのエージェントでは
+    // ログが `event=<unknown> tool=- session_id=-` だけになり、
+    // 「イベント種別と入力サイズだけを残す」というこのログの唯一の存在意義が失われる。
     let event = raw
         .get("hook_event_name")
+        .or_else(|| raw.get("hookEventName"))
         .or_else(|| raw.get("event"))
         .or_else(|| raw.get("agent_action_name"))
         .and_then(Value::as_str)
@@ -23,15 +29,26 @@ pub(crate) fn summarize_hook_input(input: &str) -> String {
 
     let tool = raw
         .get("tool_name")
+        .or_else(|| raw.get("toolName"))
         .and_then(Value::as_str)
         .or_else(|| {
             raw.get("tool_info")
                 .and_then(|tool_info| tool_info.get("tool_name"))
                 .and_then(Value::as_str)
         })
+        .or_else(|| {
+            raw.get("toolCall")
+                .and_then(|tool_call| tool_call.get("name"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or("-");
 
-    let session_id = raw.get("session_id").and_then(Value::as_str).unwrap_or("-");
+    let session_id = raw
+        .get("session_id")
+        .or_else(|| raw.get("sessionId"))
+        .or_else(|| raw.get("conversationId"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
 
     format!("event={event} tool={tool} session_id={session_id} bytes={bytes}")
 }

@@ -2,6 +2,7 @@
 
 use std::io::Read;
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -35,6 +36,20 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 /// 出力が保持上限を超えた場合に末尾へ付けるマーカー。
 const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[output truncated by claw-hooks]\n";
+
+/// 子プロセスの終了・リーダースレッドの完了を待つポーリングの初期間隔。
+///
+/// 以前は固定 100ms（`try_wait`）/ 20ms（リーダー join）の `sleep` だったため、
+/// 数ミリ秒で終わる formatter/linter でも 1 コマンドあたり必ず 100ms 以上待たされ、
+/// 拡張子フックを 3 本設定すると 1 回のファイル編集でエージェントが 0.35 秒
+/// ブロックされていた。短命なコマンドを取りこぼさないよう 1ms から始める。
+const POLL_BACKOFF_INITIAL: Duration = Duration::from_millis(1);
+
+/// ポーリング間隔の上限。
+///
+/// 長時間動くコマンドで 1ms ポーリングを続けると無駄に CPU を焼くため、
+/// 指数的に伸ばしてここで頭打ちにする。タイムアウト判定の粒度もこの値になる。
+const POLL_BACKOFF_MAX: Duration = Duration::from_millis(50);
 
 /// 実行ファイルのパスから、ログやエラー表示に使用できるファイル名だけを返す。
 ///
@@ -91,9 +106,71 @@ pub struct TimedOutput {
     pub timed_out: bool,
 }
 
+/// リーダースレッドの join 結果。
+///
+/// 出力自体は共有バッファ（`SharedOutput`）側に蓄積されるため、ここでは
+/// 「EOF まで読み切れたか」だけを返す。
 enum ReaderJoin {
-    Finished(Vec<u8>),
+    Finished,
     TimedOut,
+}
+
+/// リーダースレッドがパイプから読み出した内容を、上限付きで蓄積するバッファ。
+///
+/// スレッドの戻り値ではなく共有バッファへ逐次追記するのは、join を諦めた場合でも
+/// 「そこまでに読めた分」を親スレッドから回収するため。戻り値方式では join できないと
+/// 出力が丸ごと失われ、正常終了したフックの診断結果まで捨ててしまう。
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CapturedOutput {
+    /// 読み出したチャンクを上限内で追記する。上限超過分は捨て、切り詰めた事実だけ残す。
+    fn push(&mut self, chunk: &[u8]) {
+        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(self.bytes.len());
+        let retained = chunk.len().min(remaining);
+        self.bytes.extend_from_slice(&chunk[..retained]);
+        self.truncated |= retained < chunk.len();
+    }
+
+    /// 蓄積した出力を取り出す。切り詰めが発生していた場合は末尾にマーカーを付ける。
+    fn take(&mut self) -> Vec<u8> {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        if std::mem::take(&mut self.truncated) {
+            let content_limit =
+                MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
+            bytes.truncate(content_limit);
+            bytes.extend_from_slice(OUTPUT_TRUNCATED_MARKER);
+        }
+        bytes
+    }
+}
+
+/// リーダースレッドと親スレッドで共有する出力バッファ。
+type SharedOutput = Arc<Mutex<CapturedOutput>>;
+
+/// 共有バッファから、その時点までに読めた出力を取り出す。
+///
+/// リーダースレッドは `read` でブロックしている間ロックを握らないため、join を
+/// 諦めた後でもここで安全に回収できる。ロックが毒されていても出力を失わないよう
+/// `into_inner` で中身を救う（出力の欠落は誤ブロックに直結するため）。
+fn take_shared_output(shared: &SharedOutput) -> Vec<u8> {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+/// deadline を超えない範囲でポーリング間隔だけ待ち、次の間隔（2 倍・上限あり）を返す。
+///
+/// deadline 直前に上限いっぱい眠ると実際の待ち時間が設定値を超えてしまうため、
+/// 残り時間で頭打ちにする。
+fn sleep_with_backoff(backoff: Duration, deadline: Instant) -> Duration {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    std::thread::sleep(backoff.min(remaining));
+    (backoff * 2).min(POLL_BACKOFF_MAX)
 }
 
 #[cfg(unix)]
@@ -121,53 +198,75 @@ pub fn is_timeout_output(output: &Output) -> bool {
 /// 無期限にブロックし、設定したタイムアウトが無効化される。これを防ぐため、
 /// deadline 超過時は未完了として返し、呼び出し元でプロセスグループ kill へ進める。
 fn join_reader_before_deadline(
-    handle: std::thread::JoinHandle<Vec<u8>>,
+    handle: std::thread::JoinHandle<()>,
     deadline: Instant,
 ) -> ReaderJoin {
+    let mut backoff = POLL_BACKOFF_INITIAL;
     while !handle.is_finished() {
         if Instant::now() >= deadline {
             return ReaderJoin::TimedOut;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        backoff = sleep_with_backoff(backoff, deadline);
     }
-    ReaderJoin::Finished(handle.join().unwrap_or_default())
+    // is_finished が true なので join は即座に返る。
+    let _ = handle.join();
+    ReaderJoin::Finished
 }
 
-/// リーダーを EOF まで排出しつつ、メモリへ保持する出力を上限内に収める。
-fn read_output_bounded(mut reader: impl Read) -> Vec<u8> {
-    let mut output = Vec::new();
+/// リーダーを EOF まで排出しつつ、共有バッファへ上限内で蓄積する。
+fn read_output_bounded(mut reader: impl Read, sink: &SharedOutput) {
     let mut buffer = [0u8; 8192];
-    let mut truncated = false;
 
     loop {
         let read = match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(read) => read,
+            // EINTR はシグナル割り込みによる中断でパイプはまだ生きている。ここで
+            // 打ち切るとパイプを排出しきれず、大量出力する子プロセスがパイプ満杯で
+            // ブロックしたまま誤タイムアウトになるため、読み取りを継続する。
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         };
-        let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(output.len());
-        let retained = read.min(remaining);
-        output.extend_from_slice(&buffer[..retained]);
-        truncated |= retained < read;
+        sink.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(&buffer[..read]);
     }
+}
 
-    if truncated {
-        let content_limit = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
-        output.truncate(content_limit);
-        output.extend_from_slice(OUTPUT_TRUNCATED_MARKER);
-    }
-
-    output
+/// タイムアウト通知の stderr 本文を組み立てる。
+fn timeout_notice(timeout_secs: u64, command_desc: &str) -> Vec<u8> {
+    format!(
+        "{} {}s: {}]\n",
+        TIMEOUT_STDERR_PREFIX, timeout_secs, command_desc
+    )
+    .into_bytes()
 }
 
 fn timeout_output(timeout_secs: u64, command_desc: &str) -> Output {
-    let msg = format!(
-        "{} {}s: {}]\n",
-        TIMEOUT_STDERR_PREFIX, timeout_secs, command_desc
-    );
     Output {
         status: timeout_exit_status(),
         stdout: Vec::new(),
-        stderr: msg.into_bytes(),
+        stderr: timeout_notice(timeout_secs, command_desc),
+    }
+}
+
+/// パイプ排出の猶予切れをタイムアウトとして返す `Output` を組み立てる。
+///
+/// `timeout_output` と違い、猶予までに読めた出力を捨てずに残す。失敗したフックの
+/// 診断内容がそのまま手掛かりになるうえ、`is_timeout_output` は stderr の前方一致で
+/// 判定するため、通知を先頭に置けばタイムアウト判定も従来どおり成立する。
+fn drain_timeout_output(
+    grace_secs: u64,
+    command_desc: &str,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> Output {
+    let mut notice = timeout_notice(grace_secs, command_desc);
+    notice.extend_from_slice(&stderr);
+    Output {
+        status: timeout_exit_status(),
+        stdout,
+        stderr: notice,
     }
 }
 
@@ -197,25 +296,33 @@ pub fn run_with_timeout_tracked(
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
 
+    // 読み取り結果は共有バッファへ逐次追記する。join できなかった場合でも
+    // 親スレッドが「そこまでに読めた分」を回収できるようにするため。
+    let stdout_buf: SharedOutput = Arc::default();
+    let stderr_buf: SharedOutput = Arc::default();
+
     // スレッドでstdoutを読み取る（パイプバッファのデッドロックを防止）
-    let stdout_thread = std::thread::spawn(move || {
-        if let Some(stdout) = stdout_handle {
-            read_output_bounded(stdout)
-        } else {
-            Vec::new()
-        }
-    });
+    let stdout_thread = {
+        let sink = Arc::clone(&stdout_buf);
+        std::thread::spawn(move || {
+            if let Some(stdout) = stdout_handle {
+                read_output_bounded(stdout, &sink);
+            }
+        })
+    };
 
     // スレッドでstderrを読み取る
-    let stderr_thread = std::thread::spawn(move || {
-        if let Some(stderr) = stderr_handle {
-            read_output_bounded(stderr)
-        } else {
-            Vec::new()
-        }
-    });
+    let stderr_thread = {
+        let sink = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            if let Some(stderr) = stderr_handle {
+                read_output_bounded(stderr, &sink);
+            }
+        })
+    };
 
     // try_waitポーリングでタイムアウト付きの子プロセス待機
+    let mut wait_backoff = POLL_BACKOFF_INITIAL;
     let (status, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status, false),
@@ -238,7 +345,7 @@ pub fn run_with_timeout_tracked(
                     warn!("💀 Process killed (SIGKILL): {}", command_desc);
                     break (timeout_exit_status(), true);
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                wait_backoff = sleep_with_backoff(wait_backoff, deadline);
             }
             Err(e) => {
                 return Err(format!(
@@ -270,35 +377,57 @@ pub fn run_with_timeout_tracked(
     let drain_deadline = Instant::now()
         .checked_add(Duration::from_secs(OUTPUT_DRAIN_GRACE_SECS))
         .unwrap_or(deadline);
-    let stdout = join_reader_before_deadline(stdout_thread, drain_deadline);
-    let stderr = join_reader_before_deadline(stderr_thread, drain_deadline);
+    let stdout_join = join_reader_before_deadline(stdout_thread, drain_deadline);
+    let stderr_join = join_reader_before_deadline(stderr_thread, drain_deadline);
 
-    if matches!(&stdout, ReaderJoin::TimedOut) || matches!(&stderr, ReaderJoin::TimedOut) {
-        warn!(
-            "⏰ Command output pipe timed out after {}s: {}",
-            timeout_secs, command_desc
-        );
+    // join を諦めた場合でも、共有バッファにはそこまでに読めた出力が入っている。
+    // 子プロセスは既に終了しているので、子が書いた分はこの時点で読み切れており、
+    // 以降パイプへ流れ込むのは孫プロセスの出力だけ（＝回収する必要がない）。
+    let stdout = take_shared_output(&stdout_buf);
+    let stderr = take_shared_output(&stderr_buf);
+
+    if matches!(stdout_join, ReaderJoin::TimedOut) || matches!(stderr_join, ReaderJoin::TimedOut) {
         // 直接の子プロセスが正常終了していても、バックグラウンドの孫プロセスが
-        // stdout/stderr を保持している限り Hook は完了していない。Unix では同じ
-        // プロセスグループを停止して、`sh -c 'sleep ... &'` のような timeout 回避を防ぐ。
+        // stdout/stderr を保持している限りパイプは EOF にならない。Unix では同じ
+        // プロセスグループを停止して、`sh -c 'sleep ... &'` のようなプロセスリークと
+        // timeout 回避を防ぐ（ここは判定結果によらず常に実施する）。
         #[cfg(unix)]
         kill_process_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
+
+        if status.success() {
+            // フック本体は exit 0 で完了しており、出力も取得済み。孫プロセスが
+            // パイプを握っていただけなので、これをタイムアウト扱いにすると
+            // 「成功したフックが偽のブロックを返す」ことになる。Claude/Codex の Stop で
+            // block は「拒否」ではなく「停止させず reason を継続プロンプトにする」意味なので、
+            // 成功したフックのせいでエージェントが作業へ引き戻されてしまう。
+            // よって読めた出力とともに正常終了として返す。
+            warn!(
+                "🧹 Killed background grandchild holding the output pipe after {}s (command succeeded): {}",
+                OUTPUT_DRAIN_GRACE_SECS, command_desc
+            );
+            return Ok(TimedOutput {
+                output: Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                timed_out: false,
+            });
+        }
+
+        // 子が失敗終了した場合のみタイムアウト扱いにする。ここで待ったのは
+        // drain 猶予であって hook_timeout ではないため、実際に待った秒数を通知に出す。
+        warn!(
+            "⏰ Command output pipe timed out after {}s: {}",
+            OUTPUT_DRAIN_GRACE_SECS, command_desc
+        );
         return Ok(TimedOutput {
-            output: timeout_output(timeout_secs, command_desc),
+            output: drain_timeout_output(OUTPUT_DRAIN_GRACE_SECS, command_desc, stdout, stderr),
             timed_out: true,
         });
     }
-
-    let stdout = match stdout {
-        ReaderJoin::Finished(output) => output,
-        ReaderJoin::TimedOut => unreachable!("timeout branch returned above"),
-    };
-    let stderr = match stderr {
-        ReaderJoin::Finished(output) => output,
-        ReaderJoin::TimedOut => unreachable!("timeout branch returned above"),
-    };
 
     Ok(TimedOutput {
         output: Output {
@@ -343,7 +472,13 @@ pub fn spawn_piped_with_env(
         c.args(args);
         c
     };
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin は明示的に閉じる。継承したままだと、入力を読むコマンド
+    // （`-m` なしの `git commit`、`cat` を含むパイプライン等）が端末からの入力を
+    // 待ち続け、タイムアウトまでフック全体がハングする。閉じておけば即座に EOF を
+    // 受け取って終了する。detached 側（`spawn_detached_with_env`）と挙動も揃う。
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for &(key, value) in envs {
         cmd.env(key, value);
     }
@@ -440,19 +575,66 @@ mod tests {
         path.exists()
     }
 
+    /// テストヘルパー：`read_output_bounded` は共有バッファへ書き込む形になったため、
+    /// 従来どおり「読み取り結果の Vec」で検証できるよう包む。
+    fn read_to_vec(reader: impl Read) -> Vec<u8> {
+        let sink: SharedOutput = Arc::default();
+        read_output_bounded(reader, &sink);
+        take_shared_output(&sink)
+    }
+
+    /// EINTR を 1 度返してから本来のデータを返すリーダー。
+    struct InterruptOnceReader {
+        interrupted: bool,
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl Read for InterruptOnceReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "signal",
+                ));
+            }
+            let remaining = self.data.len() - self.pos;
+            if remaining == 0 {
+                return Ok(0);
+            }
+            let n = remaining.min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
     #[test]
     fn test_read_output_bounded_preserves_small_output() {
         let input = b"small output".to_vec();
-        assert_eq!(read_output_bounded(Cursor::new(&input)), input);
+        assert_eq!(read_to_vec(Cursor::new(&input)), input);
     }
 
     #[test]
     fn test_read_output_bounded_truncates_large_output() {
         let input = vec![b'x'; MAX_CAPTURED_OUTPUT_BYTES + 1];
-        let output = read_output_bounded(Cursor::new(input));
+        let output = read_to_vec(Cursor::new(input));
 
         assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_BYTES);
         assert!(output.ends_with(OUTPUT_TRUNCATED_MARKER));
+    }
+
+    #[test]
+    fn test_read_output_bounded_continues_after_interrupted() {
+        // EINTR で打ち切るとパイプを排出しきれず、大量出力する子プロセスが
+        // パイプ満杯でブロックして誤タイムアウトになる。中断後も読み続けること。
+        let reader = InterruptOnceReader {
+            interrupted: false,
+            data: b"after-eintr".to_vec(),
+            pos: 0,
+        };
+        assert_eq!(read_to_vec(reader), b"after-eintr".to_vec());
     }
 
     // === spawn_piped テスト ===
@@ -900,20 +1082,124 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
 
         // シェル自体はすぐ終了するが、バックグラウンドの sleep は stdout/stderr を
-        // 継承しているため、プロセスグループを止めないと Hook の timeout を回避できる。
+        // 継承しているため、プロセスグループを止めないとプロセスがリークする。
         let cmd = format!("sleep 30 && touch {} &", marker_path);
         let child = spawn_piped("sh", &["-c".to_string(), cmd.clone()]).unwrap();
         let result = run_with_timeout_tracked(child, 1, &cmd).unwrap();
 
-        assert!(result.timed_out);
-        assert_eq!(result.output.status.code(), Some(TIMEOUT_EXIT_CODE));
-        assert!(is_timeout_output(&result.output));
+        // 期待値の変更（旧: timed_out=true / exit 124）:
+        // 旧実装はこのケースをタイムアウト扱いにしていたが、シェル自体は exit 0 で
+        // 成功しており、これを Stop フックで返すと `decision:"block"` = 継続プロンプトになり、
+        // 成功したフックのせいでエージェントが作業へ引き戻される（偽ブロック）。
+        // このテストが本来固定したい不変条件は「孫プロセスを確実に kill すること」なので、
+        // 判定は成功のまま、孫の停止だけを検証する。
+        assert!(
+            !result.timed_out,
+            "成功した子プロセスを偽タイムアウトにしない"
+        );
+        assert!(result.output.status.success());
 
         std::thread::sleep(Duration::from_secs(2));
         assert!(
             !marker.exists(),
             "バックグラウンド孫プロセスがタイムアウト後も動作した: {} が作成された",
             marker_path
+        );
+    }
+
+    /// 孫プロセスがパイプを保持していても、正常終了した子プロセスの出力は
+    /// 捨てずに返す。捨てると Stop フックの lint 結果がエージェントへ届かない。
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_preserves_output_when_grandchild_holds_pipe() {
+        let cmd = "echo IMPORTANT-LINT-RESULT; (sleep 20 &)";
+        let child = spawn_piped("sh", &["-c".to_string(), cmd.to_string()]).unwrap();
+        let result = run_with_timeout_tracked(child, 60, cmd).unwrap();
+
+        assert!(!result.timed_out, "成功したフックを偽タイムアウトにしない");
+        assert!(result.output.status.success());
+        let stdout = String::from_utf8_lossy(&result.output.stdout);
+        assert!(
+            stdout.contains("IMPORTANT-LINT-RESULT"),
+            "取得済みの出力を捨てるべきではない: {}",
+            stdout
+        );
+    }
+
+    /// 子プロセスが失敗終了した場合は従来どおりタイムアウト扱いにするが、
+    /// 通知の秒数は hook_timeout ではなく実際に待った drain 猶予にする。
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_drain_timeout_reports_grace_and_keeps_output() {
+        let cmd = "echo partial-output; (sleep 20 &); exit 1";
+        let child = spawn_piped("sh", &["-c".to_string(), cmd.to_string()]).unwrap();
+        // hook_timeout は 60s だが、実際に待つのは drain 猶予だけ。
+        let result = run_with_timeout_tracked(child, 60, cmd).unwrap();
+
+        assert!(result.timed_out, "失敗終了 + パイプ保持はタイムアウト扱い");
+        assert_eq!(result.output.status.code(), Some(TIMEOUT_EXIT_CODE));
+        assert!(is_timeout_output(&result.output));
+
+        let stderr = String::from_utf8_lossy(&result.output.stderr);
+        assert!(
+            stderr.contains(&format!("{}s", OUTPUT_DRAIN_GRACE_SECS)),
+            "実際に待った drain 猶予の秒数を通知すべき: {}",
+            stderr
+        );
+        assert!(
+            !stderr.contains("60s"),
+            "待っていない hook_timeout の秒数を出すべきではない: {}",
+            stderr
+        );
+        let stdout = String::from_utf8_lossy(&result.output.stdout);
+        assert!(
+            stdout.contains("partial-output"),
+            "猶予までに読めた出力は診断のために残すべき: {}",
+            stdout
+        );
+    }
+
+    /// 入力を読むコマンドは stdin を継承していると端末待ちでハングする。
+    /// `Stdio::null()` を指定していれば即座に EOF を受け取って終了する。
+    #[test]
+    fn test_spawn_piped_closes_stdin() {
+        let child = spawn_piped(
+            "sh",
+            &[
+                "-c".to_string(),
+                "cat >/dev/null; echo STDIN-EOF".to_string(),
+            ],
+        )
+        .unwrap();
+        let start = Instant::now();
+        let output = run_with_timeout(child, 10, "cat").unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("STDIN-EOF"), "stdout: {}", stdout);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "stdin を閉じていれば入力待ちでハングしない: {:?}",
+            elapsed
+        );
+    }
+
+    /// 固定 100ms スリープのポーリングを指数バックオフへ置き換えたことの回帰テスト。
+    /// 旧実装は即終了するコマンドでも最低 100ms（`try_wait` の固定スリープ）待っていた。
+    /// 90ms は「旧実装の下限を確実に下回る」かつ「実測 2〜7ms に対して十分な余裕がある」値。
+    #[test]
+    fn test_run_with_timeout_returns_without_fixed_poll_delay() {
+        let child = spawn_piped("true", &[]).unwrap();
+        let start = Instant::now();
+        let result = run_with_timeout(child, 60, "true").unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(result.status.success());
+        assert!(
+            elapsed < Duration::from_millis(90),
+            "即終了するコマンドで固定ポーリング遅延を払うべきではない: {:?}",
+            elapsed
         );
     }
 }

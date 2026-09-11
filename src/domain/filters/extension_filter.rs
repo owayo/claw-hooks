@@ -217,8 +217,13 @@ impl ExtensionHookFilter {
         // 孫プロセス (例: `sh -c 'sleep'` の `sleep`) も含めて確実に停止できるようにする。
         configure_process_group(&mut cmd);
 
-        // 永続ログ・タイムアウト理由・エージェント返却用ラベルには
-        // 展開済みファイルパスを含めない。
+        // 永続ログには展開済みファイルパスを含めない（機密非永続化方針）。
+        // ただしこの文字列は**ログ専用**で、エージェントへ返すラベルには使わない。
+        // `run_with_timeout` の第 3 引数はタイムアウト本文へそのまま埋め込まれ、
+        // それが `additionalContext` としてエージェントに届くため、ここに
+        // `args_before=... path_bytes=...` のような内部カウンタを渡すと
+        // 「エージェント向けラベルは設定されたプログラム名だけ」という
+        // 設計上の不変条件（AGENTS.md）を破り、無意味なトークンを消費する。
         let sanitized_command = format!(
             "{} args_before={} args_after={} inline={} path_bytes={}",
             display_label,
@@ -232,7 +237,9 @@ impl ExtensionHookFilter {
         let child = cmd
             .spawn()
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
-        let result = run_with_timeout(child, self.timeout_secs, &sanitized_command);
+        // タイムアウト本文はエージェントへ返るので、プログラム名だけを渡す
+        // （stop_filter 側と同じ扱い）。
+        let result = run_with_timeout(child, self.timeout_secs, display_label);
         let elapsed = start.elapsed();
         // 完了ログには展開済みコマンド全文（ファイルパスを含む）を残さず、
         // プログラム名と所要時間のサマリのみを記録する（機密非永続化方針）。

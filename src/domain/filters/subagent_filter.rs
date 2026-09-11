@@ -40,15 +40,22 @@ impl Filter for SubagentFilter {
         if let Some(subagent_type) = Self::subagent_type(input) {
             let session_id = input.session_id.as_deref();
             match input.event {
+                // サブエージェント名は社内プロジェクト名・チーム名を含みやすいため
+                // ディスクへ残さない（log_sanitizer が同じフィールドを意図的に伏せており、
+                // そのユニットテストで「エージェント名がログ要約に出ない」ことを固定している）。
+                // 通知そのものには実名が必要なので、ログ側だけ長さに置き換える。
                 HookEvent::SubagentStart => {
                     debug!(
-                        "🐱 NanoBuddy subagent.start notification: {}",
-                        subagent_type
+                        "🐱 NanoBuddy subagent.start notification: type_bytes={}",
+                        subagent_type.len()
                     );
                     crate::notify::nano_buddy::notify_subagent_start(subagent_type, session_id);
                 }
                 HookEvent::SubagentStop => {
-                    debug!("🐱 NanoBuddy subagent.stop notification: {}", subagent_type);
+                    debug!(
+                        "🐱 NanoBuddy subagent.stop notification: type_bytes={}",
+                        subagent_type.len()
+                    );
                     crate::notify::nano_buddy::notify_subagent_stop(subagent_type, session_id);
                 }
                 _ => {}

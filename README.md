@@ -342,7 +342,7 @@ Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (p
   "claw-hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command",
+        "matcher": "run_command|manage_task",
         "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PreToolUse" }]
       }
     ],
@@ -431,7 +431,6 @@ Add a JSON file under `~/.grok/hooks/` (personal) or `<project>/.grok/hooks/` (p
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
         "hooks": [{ "type": "command", "command": "claw-hooks hook --format grok", "timeout": 10 }]
       }
     ],

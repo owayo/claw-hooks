@@ -56,19 +56,37 @@ pub fn strip_ansi_codes(input: &str) -> String {
                     chars.next(); // ']' を消費
                     // OSCシーケンス: ESC ] ... (BEL または ESC \ で終端)
                     // 例: ハイパーリンク \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
-                    while let Some(c) = chars.next() {
+                    //
+                    // 走査は `peek` で行い、終端と判定したものだけを消費する。
+                    // `next()` で先に取ってしまうと、ST 以外の ESC（次のシーケンスの開始）
+                    // まで消費してしまい、続く `[31m` が CSI として認識されずに
+                    // 本文へリテラル混入する。混入した終端バイトは差分行・ソース行・枠線の
+                    // 判定を全て外し、その行以降の正規化を無効化する。
+                    while let Some(&c) = chars.peek() {
                         if c == '\x07' {
+                            chars.next();
                             break;
                         }
                         if c == '\x1b' {
-                            // ST (ESC \) なら '\' まで消費する。
-                            // それ以外のESCは不正なOSC終端とみなし、後続文字は
-                            // 消費せず外側のループで通常文字として再処理する。
-                            if chars.peek() == Some(&'\\') {
+                            // ST (ESC \) のときだけ 2 文字消費して OSC を閉じる。
+                            // それ以外の ESC は消費せず外側ループへ返し、新しい
+                            // エスケープシーケンスとして解釈させる。
+                            let mut lookahead = chars.clone();
+                            lookahead.next();
+                            if lookahead.peek() == Some(&'\\') {
+                                chars.next();
                                 chars.next();
                             }
                             break;
                         }
+                        // 実端末と同様、BEL 以外の C0 制御文字でも OSC を打ち切る。
+                        // 打ち切らないと、終端の無い OSC（途中で切れたハイパーリンク等）が
+                        // 残りの出力を丸ごと飲み込み、後続の診断が全てエージェントに
+                        // 届かなくなる（lint 通過と誤認される）。
+                        if (c as u32) < 0x20 {
+                            break;
+                        }
+                        chars.next();
                     }
                 }
                 Some(&next) if ('\x20'..='\x2f').contains(&next) => {
@@ -148,6 +166,12 @@ pub fn strip_ansi_codes(input: &str) -> String {
 ///     ブロックごとに同じソース抜粋を丸ごと再掲する
 ///   - ruff は修正差分ブロックでコンテキスト行を再掲する
 ///   - `- old` / `+ new` の差分行は修正内容そのものなので対象外
+/// - 診断が併記されているときにだけ冗長になる集計行・締めの行を除去
+///   （biome の `Checked N file in Xms. No fixes applied.` / `check ━` /
+///   `× Some errors were emitted ...`、ruff の `N file would be reformatted`）
+///   - 拡張子フックが付ける `[tool] ` ラベルは判定前に剥がす
+///   - 書き換えを示す `N file reformatted` / `Fixed N file.` は対象外
+///   - 出力がその行だけの場合は「問題なし」の唯一の手掛かりなので残す
 pub fn normalize_lint_output(output: &str) -> String {
     let stripped = strip_ansi_codes(output);
     let stripped = strip_common_path_prefix(&stripped);
@@ -171,7 +195,7 @@ pub fn normalize_lint_output(output: &str) -> String {
         prev_blank = false;
         let collapsed = collapse_whitespace(trimmed);
         let collapsed = collapse_duplicate_diff_context_line_number(&collapsed);
-        let collapsed = collapse_repeated_chars(&collapsed);
+        let collapsed = collapse_repeated_chars_outside_source_body(&collapsed);
         let collapsed = collapse_space_separated_decorative(&collapsed);
         // 診断の枠線・キャレットのみで構成された行（診断テキストを含まない）は
         // トークン節約のため丸ごと除去する。指し示す列位置は直前の
@@ -212,6 +236,14 @@ pub fn normalize_lint_output(output: &str) -> String {
 /// 2. `check ━` ヘッダ + `× Some errors were emitted while running checks.`
 ///    「エラーがあった」ことの再掲。直前に列挙された診断そのものが証拠なので重複。
 ///
+/// `ruff format --check` も同種の締めを出す:
+///
+/// 3. `1 file would be reformatted`
+///    直前に `Would reformat: <path>` が 1 件ずつ列挙されているため、その件数を
+///    数え直しただけの再掲になる。`would be ` を持たない `1 file reformatted`
+///    （`--check` なしの書き換えモード）は「実際に書き換えた」唯一のシグナルなので
+///    絶対に対象にしない。Stop フックの `ruff format .` がこれを出す。
+///
 /// ただし、これらが出力の全体である場合（診断が 1 件も無い成功時）は削除しない。
 /// 「何も問題が無かった」という唯一の手掛かりを消してしまうためである。その場合の
 /// 抑制は呼び出し側の成功時 no-op 判定（`is_noop_success_output`）が担当する。
@@ -245,13 +277,62 @@ fn drop_redundant_tool_summary_lines(lines: Vec<String>) -> Vec<String> {
 fn is_redundant_tool_summary_line(line: &str) -> bool {
     // biome の集計行（`Checked N file(s) in <時間>. No fixes applied.`）。
     // `Fixed N file(s).` は「ファイルが書き換えられた」シグナルなので対象外。
+    // （`is_noop_success_line` が入口で `[tool] ` ラベルを剥がす）
     if is_noop_success_line(line) {
         return true;
     }
+    // 拡張子フックは各コマンドの出力に `[biome] ` のようなラベルを前置してから
+    // 正規化へ渡すため、ラベル付きの行でも同じ判定に載るように剥がしてから比較する。
+    let line = strip_tool_label_prefix(line);
     // biome の締めブロック。`check ━` は集計ブロックのヘッダで、ファイルパスを持つ
     // 実診断のヘッダ（`src/a.ts:3:1 lint/... ━` / `src/a.ts format ━`）とは異なる。
     // `━` は collapse_repeated_chars で 1 文字に圧縮済み。
-    line == "check ━" || line == "× Some errors were emitted while running checks."
+    if line == "check ━" || line == "× Some errors were emitted while running checks." {
+        return true;
+    }
+    // `ruff format --check` の締め行（`N file(s) would be reformatted`）。
+    // 直前の `Would reformat: <path>` の再掲でしかない。
+    is_would_be_reformatted_summary(line)
+}
+
+/// `ruff format --check` の締め行（`N file(s) would be reformatted`）かどうかを判定する。
+///
+/// 行全体の完全一致を要求する。ソース抜粋行（`3 │ 1 file would be reformatted`）や
+/// 文中に同じ語を含む行を巻き込まないためである。
+///
+/// `would be ` の有無で書き換えモードと厳密に区別する。`ruff format`（`--check` なし）が
+/// 出す `N file(s) reformatted` は「実際にファイルを書き換えた」唯一のシグナルであり、
+/// エージェントが編集内容を読み直す必要があることを示すため、絶対に除去してはならない。
+fn is_would_be_reformatted_summary(line: &str) -> bool {
+    counted_file_message_tail(line).is_some_and(|tail| tail == "would be reformatted")
+}
+
+/// 拡張子フックが付ける `[tool] ` 形式のラベル接頭辞を 1 回だけ取り除く。
+///
+/// `extension_filter` は各コマンドの出力を `format!("[{}] {}", label, output)` で
+/// 包んでから正規化へ渡すため、ラベルは出力の 1 行目に貼り付いた状態で
+/// `normalize_lint_output` に届く。ラベルを剥がさずに判定すると、
+/// `[biome] Checked 1 file in 14ms. No fixes applied.` が
+/// `Checked ` 始まりの既存判定にマッチせず、冗長な集計行の除去が
+/// 1 行目に限って無効化されていた（実測でコーパスの約 2%）。
+///
+/// 判定は手書きのパースで行う。ラベルは実行ファイルのベース名なので
+/// 「`[` で始まり、空白と `]` を含まない 1 文字以上が続き、`] ` で閉じる」形だけを
+/// 受理する。Markdown リンクや `[1, 2] = ...` のようなソース断片は空白や `]` の
+/// 位置が条件に合わないため剥がされない。
+fn strip_tool_label_prefix(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix('[') else {
+        return line;
+    };
+    let Some(close) = rest.find(']') else {
+        return line;
+    };
+    let label = &rest[..close];
+    if label.is_empty() || label.chars().any(char::is_whitespace) {
+        return line;
+    }
+    // `] ` の空白まで含めて剥がす。空白が無ければラベルとみなさない。
+    rest[close + 1..].strip_prefix(' ').unwrap_or(line)
 }
 
 /// 同一診断の中で逐語一致するソースコンテキスト行の2回目以降を除去する。
@@ -599,6 +680,49 @@ fn leading_progress_prefix(line: &str) -> Option<&str> {
 /// 例: `====` → `=`, `...............` → `.`, `text...` → `text.`, `^^^^^^` → `^`,
 ///     `············` → `·`, `→→→→` → `→`, `-->` → `->`, `---->` → `->`,
 ///     `| |_______________^` → `| |_^`
+/// 行番号付きソース抜粋行（`3 │ code` / `182 | code` / `> 3 │ code` /
+/// biome の `129 129 │ code`）について、コード本体が始まるバイトオフセットを返す。
+/// 行番号と区切りを持たない行では `None`。
+///
+/// 区切りより前が「数字と半角スペースだけ」で、かつ数字を 1 つ以上含むことを要求する。
+/// rustc のマルチライン span 下線（`| |_______^`）は区切りの前が空なので `None` になり、
+/// 従来どおり圧縮対象に残る。
+fn source_line_body_offset(line: &str) -> Option<usize> {
+    let start = if line.starts_with("> ") { 2 } else { 0 };
+    let head = &line[start..];
+    let (sep_at, sep) = head.char_indices().find(|(_, c)| *c == '|' || *c == '│')?;
+    let prefix = &head[..sep_at];
+    if !prefix.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !prefix.chars().all(|c| c.is_ascii_digit() || c == ' ') {
+        return None;
+    }
+    Some(start + sep_at + sep.len_utf8())
+}
+
+/// 装飾文字の圧縮を、ソース抜粋行の**コード本体には適用せず**行番号側だけに掛ける。
+///
+/// `collapse_repeated_chars` は行全体に働くため、lint がソース行を再掲する場面で
+/// コードそのものを書き換えてしまう。実測で壊れた例:
+/// - `3 │ <!-- TODO: fix -->` → `3 │ <!-- TODO: fix ->`（HTML/Vue/Svelte/JSX の
+///   コメント終端。`-->` ルールは位置を問わないので必ず当たる）
+/// - `4 │ MY____CONST = 1` → `4 │ MY_CONST = 1`（4 連以上の `_` を含む識別子）
+/// - `5 │ | --- | ---- |` → `5 │ | --- | - |`（Markdown テーブルの区切り行）
+///
+/// エージェントはこの断片を読んで修正を書くため、実在しない識別子や構文的に壊れた
+/// コードを根拠にしてしまう。行番号・区切りの側には装飾文字が出ないので、
+/// 圧縮を本体の手前までに限っても削減効果は落ちない。
+fn collapse_repeated_chars_outside_source_body(line: &str) -> String {
+    match source_line_body_offset(line) {
+        Some(offset) => {
+            let (head, body) = line.split_at(offset);
+            format!("{}{}", collapse_repeated_chars(head), body)
+        }
+        None => collapse_repeated_chars(line),
+    }
+}
+
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -778,6 +902,9 @@ fn is_lint_ruleset_incompatibility_warning(line: &str) -> bool {
 /// biome の `Fixed 1 file.`）は、エージェントが編集内容を再読すべきシグナル
 /// なので対象外。失敗時（exit code 非 0）は診断本文の一部であり得るため、
 /// 呼び出し側でコマンド成功時に限って適用すること。
+///
+/// 拡張子フックが付ける `[ruff] ` のようなラベル接頭辞は判定前に剥がすため、
+/// ラベル付き・ラベル無しのどちらの形でも同じ結論になる。
 pub fn is_noop_success_output(output: &str) -> bool {
     let mut has_line = false;
     for line in output.lines() {
@@ -795,6 +922,10 @@ pub fn is_noop_success_output(output: &str) -> bool {
 
 /// 1 行が no-op 完了メッセージかどうかを判定する。
 fn is_noop_success_line(line: &str) -> bool {
+    // 拡張子フックは出力の 1 行目に `[ruff] ` のようなラベルを前置してから
+    // 正規化へ渡すため、ラベルを剥がしてから既存の定型判定に掛ける。
+    // 剥がさないと 1 行目だけが定型判定をすり抜けて残っていた。
+    let line = strip_tool_label_prefix(line);
     // ruff check: 問題なし
     if line == "All checks passed!" {
         return true;
@@ -1343,11 +1474,13 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_ansi_codes_osc_invalid_escape_preserves_following_char() {
-        // OSC内でESCの後に\以外の文字が来た場合、後続文字が消費されないことを検証
+    fn test_strip_ansi_codes_osc_invalid_escape_is_reprocessed_as_escape() {
+        // OSC 内で ESC の後に `\` 以外が来た場合、その ESC は消費せず外側のループへ返す。
+        // 外側は ESC + 1 文字を通常のエスケープシーケンスとして除去するため、
+        // 本文には何も残らない（ESC だけ消えて終端バイトが本文へ漏れる旧挙動は誤り）。
         let input = "before\x1b]0;window title\x1bXafter";
         let result = strip_ansi_codes(input);
-        assert_eq!(result, "beforeXafter");
+        assert_eq!(result, "beforeafter");
     }
 
     #[test]
@@ -1360,11 +1493,58 @@ mod tests {
 
     #[test]
     fn test_strip_ansi_codes_osc_followed_by_csi() {
-        // OSC後にCSIが続く場合、OSCが終了しCSIも除去される
-        // OSC内のESCは消費されるが、後続の[0mは通常文字として残る
+        // OSC の直後に CSI が続く場合、OSC を閉じたうえで CSI も正しく除去する。
+        // OSC 側で ESC を先に消費してしまうと `[0m` が CSI と認識されず本文へ混入し、
+        // その行以降の差分行・ソース行・枠線の判定が全て外れる。
         let input = "text\x1b]0;title\x1b[0mmore";
         let result = strip_ansi_codes(input);
-        assert_eq!(result, "text[0mmore");
+        assert_eq!(result, "textmore");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes_unterminated_osc_does_not_swallow_following_lines() {
+        // 終端の無い OSC は BEL / ST 以外の C0 制御文字（ここでは改行）で打ち切る。
+        // 打ち切らないと残りの出力を丸ごと飲み込み、後続の診断がエージェントに
+        // 一切届かなくなる（lint 通過と誤認される）。
+        let input = "\x1b]8;;http://example\nerror: real diagnostic\nmore";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "\nerror: real diagnostic\nmore");
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_preserves_source_code_body() {
+        // ソース抜粋行のコード本体は装飾圧縮の対象外。
+        // HTML コメント終端 `-->` や 4 連以上の `_` を含む識別子が壊れてはいけない。
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("3 │ <!-- TODO: fix -->"),
+            "3 │ <!-- TODO: fix -->"
+        );
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("4 │ MY____CONST = 1"),
+            "4 │ MY____CONST = 1"
+        );
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("5 │ | --- | ---- |"),
+            "5 │ | --- | ---- |"
+        );
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("182 | /     loop {"),
+            "182 | /     loop {"
+        );
+        // biome の `旧行 新行 │ text` 形式でも本体を保護する。
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("12 13 │ const x = a ---> b;"),
+            "12 13 │ const x = a ---> b;"
+        );
+        // 行番号を持たない行（rustc の位置マーカー・span 下線）は従来どおり圧縮する。
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("--> src/main.rs:1:1"),
+            "-> src/main.rs:1:1"
+        );
+        assert_eq!(
+            collapse_repeated_chars_outside_source_body("| |_______^"),
+            "| |_^"
+        );
     }
 
     #[test]
@@ -3301,5 +3481,208 @@ undocumented-public-module: Missing docstring in public module\n\
             is_noop_success_output(&normalized),
             "正規化後は no-op と判定されるべき: {normalized}"
         );
+    }
+
+    // === `[tool] ` ラベル接頭辞付きの集計行 ===
+
+    #[test]
+    fn test_strip_tool_label_prefix_accepts_only_label_shape() {
+        // 実行ファイルのベース名を想定した形だけ剥がす。
+        assert_eq!(strip_tool_label_prefix("[biome] Checked"), "Checked");
+        assert_eq!(strip_tool_label_prefix("[ruff] x"), "x");
+        assert_eq!(strip_tool_label_prefix("[ERROR] boom"), "boom");
+        // ラベル内に空白があるものは対象外（ソース断片・本文の誤検出を避ける）。
+        assert_eq!(strip_tool_label_prefix("[a b] x"), "[a b] x");
+        // 閉じ括弧の直後に空白が無いものも対象外。
+        assert_eq!(strip_tool_label_prefix("[ruff]x"), "[ruff]x");
+        // 空ラベル・閉じ括弧なし・そもそも `[` で始まらない行は素通し。
+        assert_eq!(strip_tool_label_prefix("[] x"), "[] x");
+        assert_eq!(strip_tool_label_prefix("[ruff x"), "[ruff x");
+        assert_eq!(strip_tool_label_prefix("plain line"), "plain line");
+        // 剥がすのは 1 回だけ（多重ラベルを再帰的に剥がさない）。
+        assert_eq!(strip_tool_label_prefix("[a] [b] x"), "[b] x");
+    }
+
+    #[test]
+    fn test_labeled_biome_checked_summary_dropped_when_diagnostics_follow() {
+        // 拡張子フックは 1 行目にラベルを前置するため、ラベル付きでも冗長判定に載ること。
+        let input = "[biome] Checked 1 file in 14ms. No fixes applied.\n\
+                     web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("No fixes applied"),
+            "ラベル付きでも集計行は冗長: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_labeled_biome_checked_summary_kept_when_only_content() {
+        // 唯一の出力なら「問題なし」の手掛かりなので残す（ラベル付きでも同じ）。
+        let input = "[biome] Checked 1 file in 14ms. No fixes applied.\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "[biome] Checked 1 file in 14ms. No fixes applied.");
+    }
+
+    #[test]
+    fn test_labeled_reformatted_signal_is_preserved() {
+        // `would be` の無い `N file reformatted` は「書き換えた」唯一のシグナル。
+        // 他に内容があっても消してはいけない。
+        let input = "[ruff] 1 file reformatted\n\
+                     web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("[ruff] 1 file reformatted"),
+            "書き換えシグナルは保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_labeled_ruff_all_checks_passed_dropped_when_diagnostics_follow() {
+        // ラベル付きの `All checks passed!` も既存の no-op 判定に載る。
+        let input = "[ruff] All checks passed!\n\
+                     [biome] web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("All checks passed!"),
+            "他に診断があるなら定型行は冗長: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_labeled_biome_trailing_check_block_dropped() {
+        // `check ━` / `× Some errors ...` もラベル付きで来ることがある。
+        let input = "web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n\
+                     [biome] check \u{2501}\u{2501}\u{2501}\u{2501}\n\
+                     [biome] \u{d7} Some errors were emitted while running checks.\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("Some errors were emitted"),
+            "締めの再掲は冗長: {result}"
+        );
+        assert!(
+            !result.contains("check \u{2501}"),
+            "締めヘッダも不要: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "実診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_is_noop_success_output_accepts_labeled_lines() {
+        for output in [
+            "[ruff] All checks passed!",
+            "[ruff] 1 file already formatted",
+            "[biome] Checked 1 file in 53ms. No fixes applied.",
+        ] {
+            assert!(is_noop_success_output(output), "未認識の出力: {output}");
+        }
+        // 書き換えシグナルはラベル付きでも no-op ではない。
+        for output in ["[ruff] 1 file reformatted", "[biome] Fixed 1 file."] {
+            assert!(
+                !is_noop_success_output(output),
+                "誤って抑制する出力: {output}"
+            );
+        }
+    }
+
+    // === `ruff format --check` の締め行 ===
+
+    #[test]
+    fn test_ruff_would_be_reformatted_summary_dropped_when_diagnostics_follow() {
+        let input = "Would reformat: web/a.py\n1 file would be reformatted\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "Would reformat: web/a.py");
+    }
+
+    #[test]
+    fn test_ruff_would_be_reformatted_summary_dropped_with_label() {
+        // 拡張子フック経由ではラベルが 1 行目に付くため、締め行は 2 行目に来る。
+        let input = "[ruff] Would reformat: web/a.py\n2 files would be reformatted\n";
+        let result = normalize_lint_output(input);
+        assert_eq!(result, "[ruff] Would reformat: web/a.py");
+    }
+
+    #[test]
+    fn test_ruff_would_be_reformatted_summary_kept_when_only_content() {
+        // 唯一の出力なら「整形が必要」という情報を失うので残す。
+        assert_eq!(
+            normalize_lint_output("1 file would be reformatted\n"),
+            "1 file would be reformatted"
+        );
+        assert_eq!(
+            normalize_lint_output("[ruff] 1 file would be reformatted\n"),
+            "[ruff] 1 file would be reformatted"
+        );
+    }
+
+    #[test]
+    fn test_ruff_reformatted_signal_is_never_dropped() {
+        // `--check` なしの書き換えモードが出す `N file(s) reformatted` は
+        // 「実際に書き換えた」唯一のシグナルなので、他に内容があっても保持する。
+        for summary in ["1 file reformatted", "3 files reformatted"] {
+            let input = format!("Would reformat: web/a.py\n{summary}\n");
+            let result = normalize_lint_output(&input);
+            assert!(
+                result.contains(summary),
+                "書き換えシグナルを消してはいけない: {result}"
+            );
+        }
+        // no-op 判定にも載らないこと（成功時に出力ごと破棄されない）。
+        assert!(!is_noop_success_output("1 file reformatted"));
+    }
+
+    #[test]
+    fn test_would_be_reformatted_requires_full_line_match() {
+        // ソースコードや文中に同じ語が現れるだけの行は消さない（行全体一致が条件）。
+        let input = "web/a.py:1:1 E501 line too long \u{2501}\u{2501}\u{2501}\n\
+                     3 | print(\"1 file would be reformatted\")\n\
+                     note: 1 file would be reformatted when --fix is passed\n\
+                     10 files would be reformatted eventually\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("print(\"1 file would be reformatted\")"),
+            "ソース行は保持する: {result}"
+        );
+        assert!(
+            result.contains("note: 1 file would be reformatted when --fix is passed"),
+            "文中一致は保持する: {result}"
+        );
+        assert!(
+            result.contains("10 files would be reformatted eventually"),
+            "後続語がある行は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_is_would_be_reformatted_summary_boundaries() {
+        assert!(is_would_be_reformatted_summary(
+            "1 file would be reformatted"
+        ));
+        assert!(is_would_be_reformatted_summary(
+            "12 files would be reformatted"
+        ));
+        // `would be` 無し = 書き換えた。対象外。
+        assert!(!is_would_be_reformatted_summary("1 file reformatted"));
+        assert!(!is_would_be_reformatted_summary("3 files reformatted"));
+        // 件数が無い / 数字でない / 余分な語がある形も対象外。
+        assert!(!is_would_be_reformatted_summary(
+            "file would be reformatted"
+        ));
+        assert!(!is_would_be_reformatted_summary(
+            "a file would be reformatted"
+        ));
+        assert!(!is_would_be_reformatted_summary(
+            "1 file would be reformatted, 2 files already formatted"
+        ));
     }
 }

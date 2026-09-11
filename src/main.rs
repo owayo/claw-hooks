@@ -91,12 +91,23 @@ fn run_init(
 /// 解釈されるため、設定ファイルの TOML タイポ 1 つで危険コマンドのブロックが
 /// 全て無効化されてしまう（フェイルオープン）。エージェント別の拒否応答を返して
 /// そのままプロセスを終了する（ロガー未初期化なので drop すべきガードは無い）。
+///
+/// `--event` は正常経路（`with_event_override`）だけでなくこの経路にも渡す。
+/// 渡さないと「設定が壊れているときだけイベント判別が別物になる」ことになり、
+/// Antigravity では PostToolUse（仕様上 `{}` 固定）や Stop（`decision` 語彙に `deny` は
+/// 無い）に PreToolUse 用の deny を返してしまう。
 fn load_config(cli: &Cli) -> Result<Config> {
     match ConfigService::load(cli.config.as_deref()) {
         Ok(config) => Ok(config),
         Err(error) => {
-            if let Commands::Hook { format, trace, .. } = cli.command {
-                let exit_code = HookService::emit_config_error(format, trace, &error);
+            if let Commands::Hook {
+                format,
+                trace,
+                ref event,
+            } = cli.command
+            {
+                let exit_code =
+                    HookService::emit_config_error(format, trace, event.clone(), &error);
                 std::process::exit(exit_code);
             }
             Err(error)
@@ -124,14 +135,20 @@ fn init_logging(cli: &Cli, config: &Config) -> Option<LoggingGuard> {
 
 /// `hook` サブコマンド: stdin のフックイベントを処理して終了コードを返す。
 ///
-/// `HookService::run` の内部エラー（stdin の I/O 失敗、出力の書き込み失敗など）も
-/// `?` で伝播させない。伝播させると exit 1 + stdout 空になり、
-/// Codex / Antigravity ではフェイルオープンするため、汎用の拒否応答に倒す。
+/// `HookService::run` の内部エラーも `?` で伝播させない。伝播させると
+/// exit 1 + stdout 空になり、Codex / Antigravity ではフェイルオープンするため、
+/// フェイルクローズの拒否応答に倒す。
+///
+/// `--event` はこの残余エラー経路にも渡す。`run` は stdin を読み切った後なので
+/// ペイロードからイベント名を取り直せず、`--event` だけが唯一残る判別材料になる。
+/// イベントを判別できないまま汎用ブロックを返すと、Stop では
+/// 「停止させず reason を継続プロンプトにする」意味になり自己維持ループを作る
+/// （イベント名が既知の段階のエラーは `run` 側でイベント別の応答に倒している）。
 fn run_hook(config: Config, format: cli::Format, trace: bool, event: Option<String>) -> i32 {
-    let service = HookService::new(config, format, trace).with_event_override(event);
+    let service = HookService::new(config, format, trace).with_event_override(event.clone());
     match service.run() {
         Ok(exit_code) => exit_code,
-        Err(error) => HookService::emit_runtime_error(format, trace, &error),
+        Err(error) => HookService::emit_runtime_error(format, trace, event, &error),
     }
 }
 

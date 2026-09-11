@@ -113,6 +113,9 @@ const COMMAND_WRAPPERS: &[&str] = &[
     "arch",
     "systemd-run",
     "script",
+    // bash >= 4 / zsh の予約語。後続をコマンドとして非同期実行する（`time` と同種の
+    // 実行委譲キーワード）。登録しないと `coproc rm -rf /` が両経路とも素通しする。
+    "coproc",
 ];
 
 /// -c フラグでコマンド文字列を実行できるシェル / シェル相当（`su -c` 等）。
@@ -342,14 +345,22 @@ const WRAPPER_FLAG_SPECS: &[WrapperFlagSpec] = &[
             "--socket-property",
         ],
     },
-    // script の値取得フラグ。BSD/macOS は `-F <pipe>`、util-linux は
-    // `-o/-T/-I/-O/-B/-m/-E <value>` を取る。`-t` は util-linux で任意引数
-    // （`--timing[=file]`）のため、既存方針（任意引数フラグは boolean 扱い）に従い
-    // 値取得には含めない — 含めると後続の実コマンドを値として食う恐れがある。
+    // script の値取得フラグ。macOS/BSD の SYNOPSIS は `script [-aeFkqr] [-t time]
+    // [file [command ...]]` で、**`-F` は値を取らないブーリアン（クラスタ内）、
+    // `-t` が値を取る**。以前はこれが逆に書かれており、`script` が leading positional
+    // （出力ファイル名）を 1 つ消費する仕様と噛み合って実コマンドが消えていた:
+    //   - `script -F /tmp/p rm -rf /` … `-F` が `/tmp/p` を値として食い、`rm` を
+    //     ファイル名の位置引数として消費して `/tmp/x` をコマンドと誤認
+    //   - `script -t 0 /dev/null rm -rf /` … `-t` を boolean 扱いしたため `0` を
+    //     ファイル名として消費し、`/dev/null` をコマンドと誤認
+    // macOS は本プロジェクトの主要プラットフォームなので、そちらの実仕様に合わせる。
+    // util-linux 側の `-t` は任意引数（`--timing[=file]`）で `script -t file cmd` と
+    // いう書き方自体が成立しないため、値取得に含めても実害が無い。
+    // `-F` を外すのは「過剰消費をやめる」方向なので検出漏れは増えない。
     // `-c` は flock と同様に含めない（コマンド文字列は SHELL_COMMANDS 経路が再評価する）。
     WrapperFlagSpec {
         keys: &["script"],
-        short: &["-F", "-o", "-T", "-I", "-O", "-B", "-m", "-E"],
+        short: &["-t", "-o", "-T", "-I", "-O", "-B", "-m", "-E"],
         long: &[
             "--output-limit",
             "--log-timing",
@@ -900,6 +911,14 @@ impl ShellParser {
                     // （process_wrapper_args）と同じヘルパを共有し、両者の実装が乖離して
                     // 検出漏れ（fail-open）が生じるのを防ぐ。
                     self.extract_reevaluated_inner_commands(&cmd_name, &args, commands);
+
+                    // シェルに here-string / heredoc でスクリプトを流し込む形
+                    // （`bash <<< "rm -rf /"`、`sh <<EOF ... EOF`）も中身が実行される。
+                    // これらはリダイレクトなので引数ノードにも現れず、拾わないと
+                    // 素通しする。シェル相当のコマンドのときだけ再解析する。
+                    if SHELL_COMMANDS.contains(&command_key(&cmd_name).as_str()) {
+                        self.extract_heredoc_scripts(node, source, commands);
+                    }
                 }
                 // 引数内のコマンド置換を拾うために子ノードも再帰的に探索する。
                 // 例: echo $(yarn --version) から yarn を抽出する。
@@ -981,6 +1000,17 @@ impl ShellParser {
                     });
                 }
             }
+            // trap（登録した文字列をシグナル受信時にシェルが再評価する）。
+            // `eval` と同じく「引数の文字列が後でコマンドとして実行される」ため、
+            // 拾わないと `trap "rm -rf /" EXIT` が素通しする。
+            "trap" => {
+                if let Some(trap_cmd) = Self::extract_trap_command_string_from_args(args) {
+                    inners.push(ReevaluatedInner {
+                        text: trap_cmd,
+                        raw_is_command_string: false,
+                    });
+                }
+            }
             _ => {}
         }
         inners
@@ -1005,6 +1035,47 @@ impl ShellParser {
     ) {
         for inner in Self::reevaluated_inner_command_strings(cmd_name, args) {
             for nested in self.extract_commands(&inner.text) {
+                Self::push_unique_command(commands, &nested);
+            }
+        }
+    }
+
+    /// シェルへ here-string / heredoc で流し込まれるスクリプト本文を再解析する。
+    ///
+    /// `bash <<< "rm -rf /"` や `sh <<EOF ... EOF` の中身は実際に実行されるが、
+    /// これらはリダイレクトなので `command` の引数ノードには現れない。拾わないと
+    /// シェルが確実に実行するコマンドを検出できず素通しする（fail-open）。
+    #[cfg(feature = "ast-parser")]
+    fn extract_heredoc_scripts(&mut self, node: Node, source: &str, commands: &mut Vec<String>) {
+        let mut scripts = Vec::new();
+        for child in node.children(&mut node.walk()) {
+            match child.kind() {
+                // `<<< "script"`: 演算子の次に来るノードが本文。
+                "herestring_redirect" => {
+                    if let Some(body) = child
+                        .children(&mut child.walk())
+                        .find(|c| c.kind() != "<<<")
+                    {
+                        scripts.push(Self::normalize_shell_word(&source[body.byte_range()]));
+                    }
+                }
+                // `<<EOF ... EOF`: 本文は heredoc_body ノードに入る。
+                "heredoc_redirect" => {
+                    for body in child
+                        .children(&mut child.walk())
+                        .filter(|c| c.kind() == "heredoc_body")
+                    {
+                        scripts.push(source[body.byte_range()].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        for script in scripts {
+            if script.trim().is_empty() {
+                continue;
+            }
+            for nested in self.extract_commands(&script) {
                 Self::push_unique_command(commands, &nested);
             }
         }
@@ -1039,12 +1110,33 @@ impl ShellParser {
                 "command_name" => {
                     found_command_name = true;
                 }
-                // `number`（裸の整数）も引数に含める。これを欠落させると
-                // `xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm` のような
-                // 「値を取るフラグ + 数値」で数値が脱落し、フラグが後続のコマンド
-                // (rm 等) を値として消費して危険コマンド検出が漏れる。
-                "word" | "string" | "raw_string" | "simple_expansion" | "expansion"
-                | "concatenation" | "number"
+                // tree-sitter-bash が `command` の引数に取り得るノード種別を**網羅**する。
+                // 列挙から漏れた種別は引数配列から丸ごと脱落し、2 つの形で検出漏れになる。
+                //
+                // 1. 中身そのものが消える: `bash -c $'rm -rf /'` の `ansi_c_string` が
+                //    落ちると `-c` の次の要素が存在しなくなり、シェル -c の再解析が
+                //    走らずに素通しする。
+                // 2. 位置がズレる: `sudo -u $(id -un) rm -rf /` の `command_substitution`
+                //    が落ちると配列が 1 つ詰まり、値を取るフラグ (`-u`) が本来の値では
+                //    なく後続の `rm` を消費して、危険コマンドが消える。
+                //
+                // `number`（裸の整数）を含めているのも同じ理由で、
+                // `xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm` の数値が
+                // 脱落するとフラグが `rm` を値として食う。
+                "word"
+                | "string"
+                | "raw_string"
+                | "translated_string"
+                | "ansi_c_string"
+                | "simple_expansion"
+                | "expansion"
+                | "command_substitution"
+                | "process_substitution"
+                | "arithmetic_expansion"
+                | "brace_expression"
+                | "test_operator"
+                | "concatenation"
+                | "number"
                     if found_command_name =>
                 {
                     let raw = &source[child.byte_range()];
@@ -1217,6 +1309,32 @@ impl ShellParser {
         }
 
         commands
+    }
+
+    /// `trap "cmd" SIGNAL` の第 1 位置引数（シェルが後で再評価するコマンド文字列）を返す。
+    ///
+    /// `trap - EXIT`（ハンドラ解除）と `trap '' EXIT`（無視）はコマンドを実行しないので
+    /// 対象外。`-p` / `-l` は登録済みハンドラの一覧表示でコマンドを取らない。
+    fn extract_trap_command_string_from_args(args: &[String]) -> Option<String> {
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            // 明示的なオプション終端。次のトークンが無条件でコマンド文字列になる。
+            if arg == "--" {
+                return iter
+                    .next()
+                    .filter(|s| !s.trim().is_empty() && s.as_str() != "-")
+                    .cloned();
+            }
+            // 単独の `-` はハンドラ解除で、オプションではない。
+            if arg.len() > 1 && arg.starts_with('-') {
+                continue;
+            }
+            if arg.trim().is_empty() || arg.as_str() == "-" {
+                return None;
+            }
+            return Some(arg.clone());
+        }
+        None
     }
 
     /// find -exec の終端記号かどうかを判定する。
@@ -1595,10 +1713,33 @@ impl ShellParser {
                 continue;
             }
 
+            // 展開トークン（`$(...)` / `$((...))` / `` `...` ` / `$VAR`）はコマンド名に
+            // 確定できない。展開結果は実行時にしか決まらないため、ここで確定させると
+            // 後ろにある実コマンドを取りこぼす（例: `timeout $((5)) rm -rf /` の
+            // `$((5))` は duration トークン判定にも合致せず、そのままコマンドと
+            // 誤認されて `rm` が消える）。読み飛ばして走査を続ける。
+            if Self::is_expansion_token(arg) {
+                i += 1;
+                continue;
+            }
+
             return Some(i);
         }
 
         None
+    }
+
+    /// トークンがシェル展開（コマンド置換・算術展開・変数展開）かどうかを判定する。
+    ///
+    /// 展開結果は実行時にしか決まらないため、コマンド名の位置にあっても
+    /// 「そのトークンがコマンドである」とは確定できない。ラッパー配下の走査では
+    /// 読み飛ばして、後ろにある確定的なコマンド名を探す必要がある。
+    fn is_expansion_token(token: &str) -> bool {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        trimmed.starts_with('$') || trimmed.starts_with('`')
     }
 
     /// ラッパーがコマンド名の前に取る位置引数の数（オプションを除く）を返す。
@@ -1713,6 +1854,17 @@ impl ShellParser {
             {
                 index += 1;
             }
+            // リダイレクトの前置（`> file cmd` / `2>&1 cmd`）を読み飛ばす。POSIX では
+            // リダイレクトはコマンド語の前にも置けるため、読み飛ばさないと演算子自体を
+            // コマンド名と誤認して、後続の実コマンドを取りこぼす（fail-open）。
+            while index < tokens.len() {
+                let Some(consumes_target) = Self::redirection_token_target(&tokens[index]) else {
+                    break;
+                };
+                // `> file` はリダイレクト先を 1 語消費する。`2>&1` / `>&2` は
+                // トークン内で完結するため消費しない。
+                index += if consumes_target { 2 } else { 1 };
+            }
             let token = tokens.get(index)?.as_str();
 
             // グループ閉じ `}` / 制御構文の閉じ語はコマンドを含まない。
@@ -1739,6 +1891,29 @@ impl ShellParser {
                 _ => return Some((tokens[index].clone(), tokens[index + 1..].to_vec())),
             }
         }
+    }
+
+    /// トークンがリダイレクト演算子なら `Some(リダイレクト先を次トークンから取るか)` を返す。
+    ///
+    /// `>` / `>>` / `<` / `2>` / `&>` はファイル名を次のトークンから取る。
+    /// `2>&1` / `>&2` のようにトークン内で対象が完結する形は次を消費しない。
+    /// `>file` のように演算子と対象が連結している形も次を消費しない。
+    fn redirection_token_target(token: &str) -> Option<bool> {
+        // 先頭の fd 番号（`2>` の `2`）を取り除く。
+        let rest = token.trim_start_matches(|c: char| c.is_ascii_digit());
+        if !rest.starts_with('>') && !rest.starts_with('<') {
+            return None;
+        }
+        // fd 複製（`>&1` / `<&0` / `2>&1`）は対象がトークン内で完結する。
+        if let Some(after) = rest.strip_prefix(">&").or_else(|| rest.strip_prefix("<&")) {
+            return Some(after.is_empty());
+        }
+        // `&>` / `&>>`（bash の stdout+stderr リダイレクト）も演算子として扱う。
+        let operator_end = rest
+            .find(|c: char| c != '>' && c != '<' && c != '&')
+            .unwrap_or(rest.len());
+        // 演算子の後に文字が続く（`>file`）なら対象は連結済み。
+        Some(operator_end == rest.len())
     }
 
     /// セグメント全体が最上位の `( ... )` で包まれていれば中身を返す。
@@ -2133,6 +2308,11 @@ impl ShellParser {
                         // ここで2文字目の `&` を消費しておかないと、次のループ反復で
                         // 単独 `&` として誤って分割されてしまう。
                         let _ = chars.next();
+                    } else if s[..idx].ends_with('>') || s[..idx].ends_with('<') {
+                        // fd 複製リダイレクト（`2>&1` / `>&2` / `<&0`）の `&` は
+                        // バックグラウンド実行の `&` ではないので分割しない。分割すると
+                        // `2>&1 rm -rf /` が `2>` と `1 rm -rf /` に割れ、`1` を
+                        // コマンド名と誤認して後続の実コマンドを取りこぼす（fail-open）。
                     } else {
                         // 単独 `&` (バックグラウンド実行) はここで分割する。
                         let part = &s[current_start..idx];
@@ -2296,16 +2476,60 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut escape_next = false;
+    // コマンド置換 `$(...)` と算術展開 `$((...))` のネスト深さ。
+    // 内側の空白で語が割れると、値を取るフラグが展開の途中を値として食い、
+    // その後ろの実コマンドがコマンド名の位置からずれて検出漏れになる
+    // （例: `env -u $(echo FOO) rm -rf /` が `-u` → `$(echo` で 1 語ずれ、
+    // `FOO)` をコマンドと誤認して `rm` が消える）。
+    let mut substitution_depth = 0usize;
+    // バッククォート `` `...` `` は入れ子にできないので真偽値で追う。
+    let mut in_backtick = false;
+    let mut prev_was_dollar = false;
 
     for c in command.trim().chars() {
         if escape_next {
             // 分割判定ではエスケープを考慮しつつ、quote removal は後段に任せる。
             current.push(c);
             escape_next = false;
+            prev_was_dollar = false;
             continue;
         }
 
+        // 展開の内側では、クォートと空白の扱いを外側と分けて「1 トークンとして丸ごと
+        // 取り込む」。閉じ括弧に到達するまで分割しない。
+        if substitution_depth > 0 && !in_single_quote && !in_double_quote {
+            current.push(c);
+            match c {
+                '(' => substitution_depth += 1,
+                ')' => substitution_depth -= 1,
+                '\'' => in_single_quote = true,
+                '"' => in_double_quote = true,
+                _ => {}
+            }
+            prev_was_dollar = false;
+            continue;
+        }
+        if in_backtick {
+            current.push(c);
+            if c == '`' {
+                in_backtick = false;
+            }
+            prev_was_dollar = false;
+            continue;
+        }
+
+        let was_dollar = prev_was_dollar;
+        prev_was_dollar = c == '$' && !in_single_quote;
+
         match c {
+            '(' if was_dollar && !in_single_quote && !in_double_quote => {
+                current.push(c);
+                substitution_depth = 1;
+            }
+            '`' if !in_single_quote && !in_double_quote => {
+                current.push(c);
+                in_backtick = true;
+            }
             '\\' if !in_single_quote => {
                 current.push(c);
                 escape_next = true;
@@ -3793,11 +4017,15 @@ mod tests {
 
     #[test]
     fn test_wrapper_flag_takes_arg_script() {
-        // BSD の `-F <pipe>` / util-linux の `-o <size>` は値を取る。
-        assert!(ShellParser::wrapper_flag_takes_arg("script", "-F"));
+        // macOS/BSD の SYNOPSIS は `script [-aeFkqr] [-t time] [file [command ...]]`。
+        // `-t` が値を取り、`-F` はブーリアン（クラスタ内）。以前は逆に登録しており、
+        // leading positional（出力ファイル名）を 1 つ消費する仕様と噛み合って
+        // `script -F /tmp/p rm -rf /` / `script -t 0 /dev/null rm -rf /` の
+        // 実コマンドが消えていた。
+        assert!(ShellParser::wrapper_flag_takes_arg("script", "-t"));
+        // util-linux 側の値取得フラグ。
         assert!(ShellParser::wrapper_flag_takes_arg("script", "-o"));
-        // `-t` は util-linux で任意引数のため boolean 扱い（実コマンドを食わない）。
-        assert!(!ShellParser::wrapper_flag_takes_arg("script", "-t"));
+        assert!(!ShellParser::wrapper_flag_takes_arg("script", "-F"));
         assert!(!ShellParser::wrapper_flag_takes_arg("script", "-q"));
     }
 

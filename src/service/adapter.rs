@@ -57,6 +57,40 @@ fn scan_event_name_in_malformed_input(input: &str, keys: &[&str]) -> Option<Stri
         .map(|(_, value)| value)
 }
 
+/// JSON としてパースできない Antigravity ペイロードから、イベント種別を推定する。
+///
+/// Antigravity の公式入力スキーマにはイベント名フィールドが無く、構造フィールドの有無で
+/// 判別する。そのため他フォーマットのような「キーの値」ではなく、**キー名の出現位置**で
+/// 推定する必要がある。これが無いと、切り詰め・過大入力で JSON が壊れた Stop に対して
+/// `{"decision":"deny"}` を返してしまう — Antigravity の Stop の `decision` 語彙は
+/// 「`continue` なら再投入、それ以外は停止許可」であり、`deny` は PreToolUse 側の語彙で
+/// 契約上は未定義の応答になる。
+///
+/// 判別できなければ `None` を返し、呼び出し側は従来どおり PreToolUse 相当
+/// （＝危険コマンドのブロック維持）へ倒れる。
+fn scan_agy_event_in_malformed_input(input: &str) -> Option<String> {
+    let mut end = input.len().min(EVENT_NAME_SCAN_PREFIX_BYTES);
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = &input[..end];
+
+    let tool_call_at = prefix.find("\"toolCall\"");
+    let stop_at = ["\"fullyIdle\"", "\"terminationReason\"", "\"executionNum\""]
+        .iter()
+        .filter_map(|key| prefix.find(key))
+        .min();
+
+    // より手前に現れたキーを採用する。Stop 用のキー名がコマンド本文に偶然含まれていても、
+    // `toolCall` が先に現れる限りは実行前ゲート側（ブロック維持）に倒れる。
+    match (tool_call_at, stop_at) {
+        (Some(tool_at), Some(stop_at)) if stop_at < tool_at => Some("Stop".to_string()),
+        (Some(_), _) => Some("PreToolUse".to_string()),
+        (None, Some(_)) => Some("Stop".to_string()),
+        (None, None) => None,
+    }
+}
+
 /// `: "value"` の形を読み、文字列値を返す。読めなければ `None`。
 fn scan_json_string_value(after_key: &str) -> Option<String> {
     let mut chars = after_key
@@ -171,8 +205,11 @@ impl FormatAdapter {
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
             Format::Claude => {
-                // Claude Code: stdout の JSON は exit 0 のときだけ解析される。
-                // フェイルクローズのパースエラーだけは error_exit_code() で exit 2 を使う。
+                // Claude Code: 通常の判定は stdout の JSON + exit 0 で返す。
+                // 公式仕様上、Claude はすべての終了コードで有効な stdout JSON を読むが、
+                // exit 2 のブロックだけは JSON で上書きできない。判定を JSON で表す
+                // 経路ではその衝突を避けるため exit 0 に統一し、フェイルクローズの
+                // パースエラーだけ error_exit_code() で exit 2 を使う。
                 0
             }
             Format::Agy => {
@@ -264,9 +301,10 @@ impl FormatAdapter {
         let error_message = format!("🚫 Hook error (fail-closed): {}", message);
         match self.format {
             Format::Claude => {
-                // Claude: exit 2 では stdout の JSON は無視され、stderr 本文がエラーメッセージとして
-                // Claude に渡される（公式仕様: "Claude Code ignores JSON when you exit 2"）。
-                // そのため fail-closed では JSON ではなくプレーンテキスト本文のみを返す。
+                // Claude: exit 2 は JSON の有無にかかわらずブロックを成立させる。
+                // 公式仕様では JSON のブロック判定があればその reason が、無ければ
+                // stderr 本文がブロック理由として使われる。判定 JSON を組み立てられない
+                // フェイルクローズ経路では後者に寄せ、プレーンテキスト本文のみを返す。
                 // format_uses_stderr_for_errors()=true + error_exit_code()=2 により stderr + exit 2 で
                 // ブロックが成立し、フェイルクローズド設計は維持される。
                 error_message
@@ -523,11 +561,13 @@ impl FormatAdapter {
         {
             return Some("Stop".to_string());
         }
-        // PostToolUse: `toolCall` を持たず `stepIdx` を持つのは PostToolUse だけなので
-        // `stepIdx` 単独で一意に判別できる。公式仕様の `error` は
-        // 「Optional。ツール呼び出しが失敗した場合の詳細メッセージ。成功時は空」なので、
-        // これを必須条件にすると成功時のペイロードでイベント判別に失敗し、
-        // ブロック不可の事後フックに対してフェイルクローズドの deny を返してしまう。
+        // PostToolUse: 現行仕様では PostToolUse も `toolCall` を持つため、上の分岐で
+        // PreToolUse に確定する。ここへ到達するのは `toolCall` を持たない旧版の
+        // ペイロードだけで、後方互換として残している。
+        // なお公式仕様の `error` は「Optional。ツール呼び出しが失敗した場合の詳細メッセージ。
+        // 成功時は空」なので、これを判別の必須条件にはしない。必須にすると成功時の
+        // ペイロードでイベント判別に失敗し、ブロック不可の事後フックに対して
+        // フェイルクローズドの deny を返してしまう。
         if raw.get("stepIdx").is_some() {
             return Some("PostToolUse".to_string());
         }
@@ -552,9 +592,16 @@ impl FormatAdapter {
     }
 
     /// 生 JSON から Antigravity のイベント名を取得する。
+    ///
+    /// JSON として読めない入力（切り詰め・`MAX_INPUT_BYTES` 超過での打ち切り）でも
+    /// Stop を判別できるよう、キー名の走査にフォールバックする。他フォーマットが
+    /// `scan_event_name_in_malformed_input` で担っている役割と同じで、これが無いと
+    /// 壊れた Stop に PreToolUse 用の deny を返してしまう。
     fn agy_hook_event_name_from_input(input: &str) -> Option<String> {
-        let raw: serde_json::Value = serde_json::from_str(input).ok()?;
-        Self::agy_hook_event_name(&raw)
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(input) {
+            return Self::agy_hook_event_name(&raw);
+        }
+        scan_agy_event_in_malformed_input(input)
     }
 
     /// エラー時の終了コードを取得する（フェイルクローズド = ブロック）。
@@ -797,15 +844,42 @@ impl FormatAdapter {
         }
     }
 
-    /// Claude のツールイベント（Bash / Write / Edit / MultiEdit）を内部 HookInput に変換する。
+    /// Claude のツールイベント（Bash / PowerShell / Write / Edit / MultiEdit / NotebookEdit）を
+    /// 内部 HookInput に変換する。
     fn parse_claude_tool(&self, event: HookEvent, claude_input: ClaudeInput) -> Result<HookInput> {
         let tool_name = claude_input
             .tool_name
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow!("Missing tool_name field"))?;
-        let raw_tool_input = claude_input
-            .tool_input
-            .ok_or_else(|| anyhow!("Missing tool_input field"))?;
+
+        // `tool_input` の存在チェックはツール種別を判定した後に行う。公式仕様の PreToolUse は
+        // `EndConversation` を除く全ツール名にマッチし、MCP ツール（`mcp__*`）や
+        // `AskUserQuestion` のような引数を持たない組み込みツールは `tool_input` を送らない。
+        // ここで先に必須化すると、claw-hooks が中身を一切見ないツールに対して
+        // exit 2（= PreToolUse の deny）を返してしまい、`matcher: "*"` の環境では
+        // 全ツールが誤ブロックされる。Codex 側（parse_codex_tool）と同じ遅延検証に揃える。
+        let inspects_tool_input = matches!(
+            tool_name.as_str(),
+            "Bash" | "PowerShell" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+        );
+        let Some(raw_tool_input) = claude_input.tool_input else {
+            if inspects_tool_input {
+                return Err(anyhow!("Missing tool_input field"));
+            }
+            debug!(
+                agent = self.format.label(),
+                event = ?event,
+                tool_name = %tool_name,
+                "{} tool_input absent for tool outside claw-hooks' scope, passing through",
+                self.log_prefix()
+            );
+            return Ok(HookInput {
+                event,
+                tool_name,
+                tool_input: crate::domain::ToolInput::Other(serde_json::json!({})),
+                session_id: claude_input.session_id,
+            });
+        };
         let tool_input = Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input)?;
 
         debug!(
@@ -925,7 +999,14 @@ impl FormatAdapter {
         })
     }
 
-    /// Cursor の preToolUse（Shell/Bash のみ対象）をパースして内部 HookInput に変換する。
+    /// Cursor の preToolUse をパースして内部 HookInput に変換する。
+    ///
+    /// ツール名ではなく `tool_input` の形で判定する。公式仕様はこのフックを
+    /// 「すべてのツール種別に対して発火する汎用フック」と定め、ツール名の列挙も
+    /// 「Values include `Shell`, `Read`, `Write`, …」という**非網羅**の書き方をしている。
+    /// つまり Cursor がシェル実行ツールを追加・改称しても仕様違反にならないため、
+    /// 名前の等値判定に頼るとその瞬間にコマンドブロックが丸ごと素通しになる。
+    /// `toolInput` の形で判定する Grok 経路と同じ理由・同じ方式に揃える。
     fn parse_cursor_pre_tool_use(&self, raw: serde_json::Value) -> Result<HookInput> {
         let tool_name = raw
             .get("tool_name")
@@ -934,13 +1015,21 @@ impl FormatAdapter {
             .ok_or_else(|| anyhow!("Missing tool_name for Cursor preToolUse"))?
             .to_string();
 
-        if tool_name != "Shell" && tool_name != "Bash" {
+        // 空白のみ・非文字列の command は「コマンドを持たないツール」として扱う。
+        // claw-hooks が中身を見ないツールなので、fail-closed ではなくパススルーが正しい
+        // （引数を持たないツールに deny を返すと無関係なツール呼び出しを誤ブロックする）。
+        let Some(command) = raw
+            .get("tool_input")
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        else {
             debug!(
                 agent = self.format.label(),
                 hook_type = "preToolUse",
                 tool_name = %tool_name,
                 mapped_event = ?HookEvent::Passthrough,
-                "{} unsupported preToolUse tool, passing through", self.log_prefix()
+                "{} preToolUse without a shell command, passing through", self.log_prefix()
             );
 
             return Ok(HookInput {
@@ -949,14 +1038,7 @@ impl FormatAdapter {
                 tool_input: crate::domain::ToolInput::Other(raw),
                 session_id: None,
             });
-        }
-
-        let command = raw
-            .get("tool_input")
-            .and_then(|v| v.get("command"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow!("Missing tool_input.command for Cursor preToolUse"))?;
+        };
 
         debug!(
             agent = self.format.label(),
@@ -1019,7 +1101,7 @@ impl FormatAdapter {
         debug!(
             agent = self.format.label(),
             hook_type = "stop",
-            status = %parsed.status,
+            status = ?parsed.status,
             loop_count = ?parsed.loop_count,
             mapped_event = ?HookEvent::Stop,
             "{} parsed input", self.log_prefix()
@@ -1029,7 +1111,7 @@ impl FormatAdapter {
             event: HookEvent::Stop,
             tool_name: "Stop".to_string(),
             tool_input: crate::domain::ToolInput::Stop(crate::domain::StopInput {
-                status: Some(parsed.status),
+                status: parsed.status,
                 loop_count: parsed.loop_count,
                 response: None,
                 agent_message: None,
@@ -1049,7 +1131,9 @@ impl FormatAdapter {
         debug!(
             agent = self.format.label(),
             hook_type = "subagentStart",
-            subagent_type = %parsed.subagent_type,
+            // エージェント名は社内のプロジェクト名・チーム名を含みやすいため
+            // ディスクへ残さず、長さだけを記録する（log_sanitizer と同じ方針）。
+            subagent_type_bytes = parsed.subagent_type.len(),
             mapped_event = ?HookEvent::SubagentStart,
             "{} parsed input", self.log_prefix()
         );
@@ -1075,7 +1159,9 @@ impl FormatAdapter {
         debug!(
             agent = self.format.label(),
             hook_type = "subagentStop",
-            subagent_type = %parsed.subagent_type,
+            // エージェント名は社内のプロジェクト名・チーム名を含みやすいため
+            // ディスクへ残さず、長さだけを記録する（log_sanitizer と同じ方針）。
+            subagent_type_bytes = parsed.subagent_type.len(),
             status = %parsed.subagent_status,
             mapped_event = ?HookEvent::SubagentStop,
             "{} parsed input", self.log_prefix()
@@ -1384,8 +1470,14 @@ struct CursorFileEditInput {
 /// Cursor の stop 入力フォーマット。
 #[derive(Debug, Deserialize)]
 struct CursorStopInput {
-    /// 停止状態: "completed", "aborted", "error"
-    status: String,
+    /// 停止状態: "completed", "aborted", "error"。
+    ///
+    /// claw-hooks はこの値を判定に一切使わない（stop hook の実行可否は `loop_count` と
+    /// 設定側の条件だけで決まる）ため、必須にしない。Cursor の `stop` はパースエラーを
+    /// `{}` + exit 0 に倒す（ブロックすると再投入ループになる）ので、ここを必須にすると
+    /// フィールド 1 つの欠落で **エラー表示なしに全 stop hook が沈黙する**。
+    #[serde(default)]
+    status: Option<String>,
     /// この会話で発生した自動フォローアップ回数
     #[serde(default)]
     loop_count: Option<u32>,
@@ -1899,23 +1991,25 @@ impl FormatAdapter {
 // 公式仕様: docs/hooks/antigravity/antigravity_cli.md
 //
 // 入力（stdin JSON, camelCase）:
-//   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath
+//   - 共通: conversationId / workspacePaths / transcriptPath / artifactDirectoryPath / modelName
 //   - ツール実行前: toolCall { name, args }, stepIdx
-//   - PostToolUse: stepIdx, error (toolCall は含まれない)
+//   - PostToolUse: toolCall { name, args }, stepIdx, error?
+//     （PreToolUse と形が同じで区別できないため `--event` での明示指定が必要）
 //   - 呼び出し前／後: invocationNum, initialNumSteps
 //   - Stop イベント: executionNum, terminationReason, error, fullyIdle
 //
 // 出力（stdout JSON）:
-//   - ツール実行前: { decision: "allow|deny|ask|force_ask", reason?, permissionOverrides? }
+//   - ツール実行前: { decision: "allow|deny|ask|force_ask|deny_unless_prior_grant",
+//     reason?, permissionOverrides? }（claw-hooks は allow / deny の二択で運用する）
 //   - PostToolUse: {} （事後フックでありブロック不可。エラー伝達も仕様には無い）
 //   - PreInvocation / PostInvocation: { injectSteps?, terminationBehavior? } （claw-hooks スコープ外）
 //   - Stop: { decision: "continue", reason? } で再投入、それ以外（または {}）で停止許可
 //
 // claw-hooks のスコープ的制約:
-//   - PostToolUse は仕様上発火するが、ペイロードは stepIdx と error のみで toolCall を持たない。
-//     出力も {} 固定。よって「どのファイルが編集されたか」を復元できず、ファイル単位の
-//     拡張子フック（保存後の auto-format）は成立しない。代替: Stop hooks で lint/typecheck を
-//     回し、failure を Stop の "continue" で再投入する。
+//   - PostToolUse は toolCall を持つので編集対象ファイルを args.TargetFile から復元でき、
+//     拡張子フック（保存後の auto-format / lint）は成立する。ただし出力は仕様上 {} 固定
+//     なので、実行はできても診断をエージェントへ返せない。診断を届けたい場合は
+//     Stop hooks で lint/typecheck を回し、failure を Stop の "continue" で再投入する。
 //   - PreInvocation / PostInvocation はモデル呼び出し前後のオーケストレーション系で、
 //     コマンドブロック・拡張子フックの責務外なのでパススルー（{}）で素通しする。
 impl FormatAdapter {
@@ -2047,7 +2141,60 @@ impl FormatAdapter {
                     session_id,
                 })
             }
-            // run_command 以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
+            // manage_task: バックグラウンドタスクの操作ツール。`Action` が `send_input` の
+            // ときだけ `Input` が実行中プロセスの標準入力へ送られるため、コマンド本文として
+            // 検査する。`run_command` を `RunPersistent: true` で起動して永続シェルを作り、
+            // 以降は `send_input` でコマンドを流し込めば `CommandLine` を一度も通らないので、
+            // ここを見ないと rm / kill / dd フィルタが完全に迂回される。
+            // `list` / `status` / `kill` はエージェント自身のタスク管理操作であり
+            // シェルの `kill` コマンドとは別物なので、対象外として素通しする。
+            "manage_task" => {
+                let input_text = raw_args
+                    .filter(|args| {
+                        args.get("Action").and_then(|v| v.as_str()) == Some("send_input")
+                    })
+                    .and_then(|args| args.get("Input"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty());
+
+                let Some(command) = input_text else {
+                    debug!(
+                        agent = self.format.label(),
+                        raw_event = "PreToolUse",
+                        raw_tool_name = %raw_tool_name,
+                        mapped_event = ?HookEvent::BeforeCommand,
+                        "{} manage_task without send_input payload, allowing",
+                        self.log_prefix()
+                    );
+                    return Ok(HookInput {
+                        event: HookEvent::BeforeCommand,
+                        tool_name: raw_tool_name,
+                        tool_input: crate::domain::ToolInput::Other(raw.clone()),
+                        session_id,
+                    });
+                };
+
+                debug!(
+                    agent = self.format.label(),
+                    raw_event = "PreToolUse",
+                    mapped_event = ?HookEvent::BeforeCommand,
+                    raw_tool_name = %raw_tool_name,
+                    mapped_tool = "Bash",
+                    command_bytes = command.len(),
+                    "{} parsed input", self.log_prefix()
+                );
+
+                Ok(HookInput {
+                    event: HookEvent::BeforeCommand,
+                    tool_name: "Bash".to_string(),
+                    tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
+                        command: command.to_string(),
+                        timeout: None,
+                    }),
+                    session_id,
+                })
+            }
+            // 上記以外のツール（write_to_file / replace_file_content / multi_replace_file_content /
             // view_file / list_dir / find_by_name / grep_search / invoke_subagent / ...）は
             // claw-hooks のコマンドブロックの対象外。Allow パスとして素通しする。
             //
@@ -2334,17 +2481,25 @@ impl FormatAdapter {
         event: HookEvent,
         session_id: Option<String>,
     ) -> Result<HookInput> {
+        // ツール名は判定に使わない（下の形状判定だけで内部イベントが決まる）。ログと
+        // パススルー時の表示にしか使わないフィールドを必須化すると、Grok が名前を
+        // 送らない形が 1 つでもあった時点で無関係なコマンドまで deny になる。
         let raw_tool_name = raw
             .get("toolName")
             .or_else(|| raw.get("tool_name"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow!("Missing toolName field"))?
+            .unwrap_or("unknown")
             .to_string();
+        // `toolInput` の存在チェックもツール種別の判定より後に置く。引数を持たない
+        // ツール（todo_read / list 等）はキーごと送らないため、ここで必須化すると
+        // PreToolUse で誤 deny（Grok で唯一のハードブロック経路）になる。欠落は
+        // 空オブジェクト扱いとし、command もファイルパスも無い＝管轄外として素通しする。
+        let empty_tool_input = serde_json::json!({});
         let tool_input = raw
             .get("toolInput")
             .or_else(|| raw.get("tool_input"))
-            .ok_or_else(|| anyhow!("Missing toolInput field"))?;
+            .unwrap_or(&empty_tool_input);
 
         // シェル実行系: toolInput.command を持つツールはコマンドブロックの対象。
         if let Some(command) = tool_input
@@ -2385,10 +2540,14 @@ impl FormatAdapter {
 
         // ファイル編集系: PostToolUse のみ保存後フック（フォーマッタ/リンタ）の対象。
         // Grok は Claude 互換の tool_input を渡すため file_path を主に見るが、
-        // camelCase の filePath でも受理する。
+        // camelCase の filePath でも受理する。`NotebookEdit` 相当の `.ipynb` 編集は
+        // パスのキーが `notebook_path` になる（Claude 経路と同じ）ため、これも拾う。
+        // 拾わないと `.ipynb` の formatter/linter が無言でスキップされる。
         if let Some(file_path) = tool_input
             .get("file_path")
             .or_else(|| tool_input.get("filePath"))
+            .or_else(|| tool_input.get("notebook_path"))
+            .or_else(|| tool_input.get("notebookPath"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
         {
@@ -5885,7 +6044,9 @@ mod tests {
     fn test_cursor_stop_parse_errors_allow_stop_without_followup() {
         let adapter = FormatAdapter::new(Format::Cursor, 0);
         let inputs = [
-            r#"{"hook_event_name":"stop","loop_count":0}"#,
+            // `loop_count` は claw-hooks が判定に使うフィールドなので、型不正は
+            // パースエラーになる（`status` の欠落は判定に使わないので通る）。
+            r#"{"hook_event_name":"stop","loop_count":"not-a-number"}"#,
             r#"{"hook_event_name":"subagentStop","status":"completed"}"#,
         ];
 
@@ -6410,21 +6571,31 @@ mod tests {
     #[test]
     fn test_grok_missing_required_fields_fail_closed() {
         let adapter = FormatAdapter::new(Format::Grok, 0);
-        let cases = [
-            (r#"{"sessionId":"s"}"#, "hookEventName"),
-            (
-                r#"{"hookEventName":"PreToolUse","toolInput":{"command":"ls"}}"#,
-                "toolName",
-            ),
-            (
-                r#"{"hookEventName":"PreToolUse","toolName":"Bash"}"#,
-                "toolInput",
-            ),
-        ];
+        // イベント名は「どのイベントとして扱うか」を決める唯一のフィールドなので必須。
+        let err = adapter
+            .parse_input(r#"{"sessionId":"s"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("hookEventName"),
+            "イベント名欠落のエラー: {err}"
+        );
 
-        for (input, field) in cases {
-            let err = adapter.parse_input(input).unwrap_err().to_string();
-            assert!(err.contains(field), "{field} 欠落時のエラーが不適切: {err}");
+        // `toolName` / `toolInput` は判定に使わない（内部イベントは toolInput の形だけで
+        // 決まる）ため必須にしない。必須化すると、それらを送らない形が 1 つでもあった
+        // 時点で無関係なツール呼び出しまで deny になる（Grok の PreToolUse は
+        // claw-hooks で唯一のハードブロック経路）。
+        let tolerated = [
+            // toolName 欠落でもコマンドは検査される
+            r#"{"hookEventName":"PreToolUse","toolInput":{"command":"ls"}}"#,
+            // 引数を持たないツールは toolInput をキーごと送らない
+            r#"{"hookEventName":"PreToolUse","toolName":"todo_read"}"#,
+        ];
+        for input in tolerated {
+            assert!(
+                adapter.parse_input(input).is_ok(),
+                "判定に使わないフィールドの欠落でフェイルクローズしてはいけない: {input}"
+            );
         }
     }
 

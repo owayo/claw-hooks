@@ -47,7 +47,7 @@
 - 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata, executable basenames, argument counts, and byte-size summaries. Stop/extension hook arguments and executable directories are stripped, so raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
 - 🛑 **Bounded I/O** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
 - 🔒 **Fail-Closed Gates** - Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` can no longer switch protection off: a config error now returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) instead of exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
-- 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to override/extend global settings per project
+- 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension hooks are ignored with a warning
 - 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
 
 ## Why claw-hooks?
@@ -123,7 +123,7 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 | Block dangerous commands | 25+ lines Python per command | 1 line TOML |
 | Custom filters | New script per filter | Add to `[[custom_filters]]` |
 | Extension hooks (formatters) | Complex file detection script | `[extension_hooks]` map |
-| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Codex CLI); Windsurf via exit 2 + stderr*; Antigravity CLI via Stop hooks*; not available on Grok CLI (post-hook stdout is ignored) |
+| Lint output to agent | Manual JSON construction | Automatic (Claude Code, Codex CLI); Windsurf via exit 2 + stderr*; Antigravity CLI via Stop hooks*; not available on Cursor (`afterFileEdit` has no output schema) or Grok CLI (post-hook stdout is ignored) |
 | Multi-agent support | Different scripts per agent | Single binary with `--format` |
 | Stop hooks (lint, notifications, etc.) | Custom scripts per use case | `[[stop_hooks]]` config |
 
@@ -289,7 +289,7 @@ Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
 
 ### Cursor
 
-Add to `~/.cursor/hooks.json` (user) or `<project>/.cursor/hooks.json` (project):
+Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user):
 
 ```json
 {
@@ -312,6 +312,10 @@ Add to `~/.cursor/hooks.json` (user) or `<project>/.cursor/hooks.json` (project)
 ```
 
 > **`failClosed: true` on the command-blocking hooks is recommended.** Cursor is fail-open by default: a clean block (exit `0` plus `{"permission":"deny", …}` on stdout) works without it, but if claw-hooks itself crashes or times out, Cursor lets the command through unless `failClosed: true` is set. Leave it off for `afterFileEdit`/`stop` (a formatter/lint crash should not block the agent).
+
+> **Prefer project hooks when you use stop-time lint.** Cursor runs project hooks (`<project>/.cursor/hooks.json`) from the project root, but user hooks (`~/.cursor/hooks.json`) from `~/.cursor/`. claw-hooks resolves `condition = { file_exists = "Cargo.toml" }`, the `.claw-hooks.toml` lookup, and each hook's own working directory from that directory, so a user-level registration makes every project-type condition fail silently — and a hook without a condition (a `git-sc` auto-commit, say) runs in your Cursor config directory instead of the repository.
+
+> **Post-edit diagnostics can't be returned to Cursor.** `afterFileEdit` has no documented output schema, so formatters still rewrite files but linter text has nowhere to go. Run project-wide lint as a `stop` hook when you need the diagnostics — those come back through `followup_message`.
 
 ### Windsurf (Cascade)
 
@@ -360,6 +364,7 @@ Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (p
 ```
 
 Notes:
+- **The matcher covers `manage_task` as well as `run_command`.** With `Action: "send_input"`, `manage_task` writes its `Input` to a running process's stdin. Start a persistent shell with `run_command` + `RunPersistent: true` and every later command arrives through `send_input` without ever passing `CommandLine`, so leaving `manage_task` unmatched lets the rm/kill/dd filters be bypassed entirely. The other actions (`list` / `status` / `kill`) manage the agent's own background tasks — unrelated to the shell `kill` command — and pass through.
 - **Pass `--event` for Antigravity.** Antigravity payloads carry no event-name field, and `PreToolUse` and `PostToolUse` are indistinguishable by shape — both send `toolCall` plus `stepIdx`, differing only in an optional `error`. Since `hooks.json` registers each event separately, `--event` tells claw-hooks which one it is. Without it, claw-hooks infers the event and resolves the ambiguous case to `PreToolUse`, which keeps command blocking intact but leaves post-edit hooks inactive.
 - Extension hooks work on Antigravity when `--event PostToolUse` is set: the edited path is read from `toolCall.args.TargetFile`. The official `PostToolUse` output is fixed at `{}`, so formatters and linters **run** but their diagnostics cannot be returned to the agent. To surface diagnostics, run project-wide lint/typecheck as Stop hooks — those failures are injected back via `{"decision":"continue","reason":"..."}`.
 - Antigravity has no `stop_hook_active` / `loop_count` equivalent (`executionNum` is just an attempt counter and is `1` on a normal first stop), so claw-hooks cannot break a loop caused by a stop hook that fails forever. Give reported stop hooks a self-limiting exit condition.
@@ -453,6 +458,8 @@ Notes:
 - `timeout` is in **seconds** and defaults to `5`, which is short for formatters and project-wide lint. Raise it as shown above.
 - Project hooks only run after the repository is trusted: run `/hooks-trust` once, or start Grok with `--trust`.
 - Grok also loads Claude Code (`.claude/settings.json`) and Cursor (`.cursor/hooks.json`) hook files. If claw-hooks is already registered in one of those, keep a single registration so it does not run twice per event.
+- claw-hooks dispatches on the shape of `toolInput`, never on `toolName`: a `command` field means a shell command, a `file_path` / `filePath` / `notebook_path` / `notebookPath` field means a file edit, and anything else passes through. `toolName` and `toolInput` are both optional for the same reason — they are not what the decision is made from, and requiring them would deny unrelated tool calls (tools without arguments omit `toolInput` entirely).
+- claw-hooks dispatches on the shape of `toolInput`, never on `toolName`: a `command` field means a shell command, a `file_path` / `filePath` / `notebook_path` / `notebookPath` field means a file edit, and anything else passes through. `toolName` and `toolInput` are both optional for the same reason — they are not what the decision is made from, and requiring them would deny unrelated tool calls (tools without arguments omit `toolInput` entirely).
 - `PreToolUse` is Grok's only blocking event. Every other event is a post-hook whose stdout is ignored, so extension hooks still reformat files and Stop hooks still run lint, but their output cannot be reported back to the agent — the same limitation as Windsurf's `post_cascade_response`.
 - Grok is fail-open for anything that is not an explicit deny: a timeout, a crash, or malformed output is recorded as a hook failure and the tool call proceeds. claw-hooks therefore emits the deny JSON **and** exit code `2` when it blocks, and uses exit `2` (never `1`) on its fail-closed paths, so the block holds under either reading of the contract.
 
@@ -573,34 +580,35 @@ Place a `.claw-hooks.toml` in your project root. claw-hooks automatically detect
 ```toml
 # my-project/.claw-hooks.toml
 
-# Override: disable dd blocking for this project
-dd_block = false
+# Turn on a guard this project needs (enabling is always allowed)
+dd_block = true
 
-# Override: project-specific extension hooks (replaces global)
-[extension_hooks]
-".rs" = ["rustfmt {file}"]
-".ts" = ["biome check {file}"]
-
-# Merge: additional stop hooks (added to global stop hooks)
-[[stop_hooks]]
-commands = ["pnpm exec tsc --noEmit"]
-condition = { file_exists = "tsconfig.json" }
+# Add project-specific filters on top of the global ones
+[[custom_filters]]
+command = "yarn"
+message = "Use pnpm instead"
 ```
 
-**Merge rules:**
+**Merge rules.** A `.claw-hooks.toml` is also "a file inside a repository your agent just cloned", so it is treated as untrusted input: a project config may **strengthen** protection but never weaken it, and it can never introduce a new command execution.
 
 | Field | Rule | Behavior |
 |-------|------|----------|
-| `extension_hooks` | **Replace** | Project definition completely replaces global |
-| `custom_filters` | **Replace** | Project definition completely replaces global |
-| `stop_hooks` | **Merge** | Both global and project hooks are executed |
-| `rm_block`, `kill_block`, `dd_block` | **Replace** | Project value takes precedence |
-| `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence |
-| `debug`, `log_path`, `nano_buddy` | **Global only** | Not allowed in project config |
+| `rm_block`, `kill_block`, `dd_block` | **Enable only** | `true` is honored; `false` is ignored with a warning |
+| `custom_filters` | **Add only** | Project entries are appended; global entries are never removed or replaced |
+| `stop_hooks` | **Rejected** | Would run arbitrary commands when the agent stops |
+| `extension_hooks` | **Rejected** | Would run arbitrary commands on every file edit |
+| `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence (none of these weaken a decision) |
+| `debug`, `log_path`, `nano_buddy` | **Global only** | Rejected as an error |
 
-Omitted fields keep the global value. Setting an empty array (e.g., `custom_filters = []`) explicitly clears the global value.
+Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped.
 
-Validate with `claw-hooks check` — it reports if a project config was found and whether it's valid.
+Validate with `claw-hooks check` — it reports whether a project config was found, whether it's valid, which entries are ignored, and any unknown (mistyped) keys.
+
+> **Migrating per-project formatters and linters.** If you were declaring `extension_hooks` or `stop_hooks` in a `.claw-hooks.toml`, move them to the global `config.toml` and target them with `condition = { file_exists = "…" }` — that gives the same per-project behavior without letting a repository decide what runs on your machine. Anything left in a project config is ignored and reported by `claw-hooks check`.
+
+> **`hook_timeout = 0` is now rejected.** It never meant "unlimited" (only `output_max_length` uses `0` that way) — it made every hook time out instantly. Because claw-hooks fails closed on an invalid config, a config that still has it will deny every command until it is fixed; `claw-hooks check` names the problem.
+
+> **Custom filters now normalize the command name** the same way the built-in `rm`/`kill`/`dd` filters do, so `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` all match a `command = "npm"` filter. This blocks strictly more than before.
 
 **2. `--config` — Full config replacement**
 
@@ -710,7 +718,9 @@ commands = ["git-sc --all --yes --quiet"]
 
 **Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf and Grok CLI stop hooks, failures are always best-effort — the underlying hook is asynchronous (Windsurf) or its stdout is ignored (Grok).
 
-**Session scope (agent-session suppression):** Claude Code's team features spawn delegated agents (teammates) as separate processes, and each of them fires its own `Stop` event — potentially dozens per task. claw-hooks tells the two apart automatically: a delegated agent's Stop payload carries both non-blank `agent_id` and `agent_type` fields. A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity, Grok CLI) are also treated as the main session.
+**Session scope (agent-session suppression):** claw-hooks tells a delegated agent session from the main one automatically: a delegated Stop payload carries both non-blank `agent_id` and `agent_type` fields (`agent_id` is documented as present only when the hook fires inside a subagent call). A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity, Grok CLI) are also treated as the main session.
+
+> **Agent-team teammates are out of scope.** Teammates run in-process and announce completion through Claude Code's separate `TeammateIdle` event, which claw-hooks deliberately does not handle: that event carries no loop counter (no `stop_hook_active`, no `loop_count`), and its only way to report a failure is "keep the teammate working", which a permanently failing lint would turn into an endless loop. **Stop-time lint and notifications therefore do not run when a teammate goes idle.**
 
 ```toml
 # Runs only when the main session stops (default — no field needed)

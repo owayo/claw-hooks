@@ -123,31 +123,64 @@ impl Default for Config {
 impl Config {
     /// 設定を検証し、無効な場合はエラーを返す。
     /// 包括的なバリデーションモジュールに委譲。
+    ///
+    /// 警告の出力は伴わない（`validation::validate_values`）。フック実行経路から呼ばれ、
+    /// そこでの stderr はブロック理由の伝達チャネルだからである。警告を見せる
+    /// `claw-hooks check` は `validation::validate` を使う。
     pub fn validate(&self) -> Result<()> {
-        validation::validate(self)
+        validation::validate_values(self)
     }
 
     /// プロジェクトレベルの設定オーバーライドをこの設定にマージする。
     ///
-    /// - `Option<T>` が `Some` の場合のみ上書き/マージ
-    /// - `None` = 未指定 → グローバルを維持
-    /// - `Some(vec![])` = 明示的に空 → グローバルを空で上書き
-    /// - `stop_hooks` のみ `extend` でマージ（グローバル + プロジェクト両方を実行）
+    /// # 信頼境界（この関数の設計理由）
+    ///
+    /// `.claw-hooks.toml` は「AI エージェントが clone してきたリポジトリの中のファイル」
+    /// でもあり得るため、**未信頼の入力**として扱う。リポジトリに 1 ファイル置くだけで
+    /// claw-hooks 自身の防御を外したり任意コマンドを実行させたりできてはならない
+    /// （それが可能だと、危険コマンドを止めるという本ツールの存在意義と正面から衝突する）。
+    /// したがってプロジェクト設定には**防御の緩和も、新しいコマンド実行権限の付与も
+    /// 認めない**。強化方向（ブロックを増やす）だけを受け入れる:
+    ///
+    /// | 設定 | プロジェクト設定に許すこと |
+    /// |---|---|
+    /// | `rm_block` / `kill_block` / `dd_block` | 有効化のみ（`global \|\| project`。`false` への上書きは無視） |
+    /// | `custom_filters` | 追加のみ（グローバル定義の削除・置換は無視） |
+    /// | `stop_hooks` | 禁止（エージェント停止時に任意コマンドが走る = コード実行） |
+    /// | `extension_hooks` | 禁止（ファイル編集時に任意コマンドが走る = コード実行） |
+    /// | メッセージ文言 / `hook_timeout` / `output_max_length` | 従来どおり上書き可 |
+    ///
+    /// 最後の行を許すのは、ブロック判定そのものを弱めず、新しいコマンド実行も生まないため
+    /// （メッセージはブロック時にエージェントへ返す文言で、ブロック自体は成立したままになる）。
+    ///
+    /// 無視した項目は `self.warnings` に理由付きで記録する。無言で無視すると
+    /// 「設定を書いたのに効かない」理由が利用者から見えなくなるため。
     pub fn merge_project(&mut self, project: &ProjectConfig) {
-        if let Some(v) = project.rm_block {
-            self.rm_block = v;
-        }
+        // ブロック設定は「有効化のみ」。緩和方向の上書きだけを落とす。
+        Self::merge_block_flag(
+            &mut self.rm_block,
+            project.rm_block,
+            "rm_block",
+            &mut self.warnings,
+        );
+        Self::merge_block_flag(
+            &mut self.kill_block,
+            project.kill_block,
+            "kill_block",
+            &mut self.warnings,
+        );
+        Self::merge_block_flag(
+            &mut self.dd_block,
+            project.dd_block,
+            "dd_block",
+            &mut self.warnings,
+        );
+
         if let Some(ref v) = project.rm_block_message {
             self.rm_block_message = Some(v.clone());
         }
-        if let Some(v) = project.kill_block {
-            self.kill_block = v;
-        }
         if let Some(ref v) = project.kill_block_message {
             self.kill_block_message = Some(v.clone());
-        }
-        if let Some(v) = project.dd_block {
-            self.dd_block = v;
         }
         if let Some(ref v) = project.dd_block_message {
             self.dd_block_message = Some(v.clone());
@@ -158,14 +191,82 @@ impl Config {
         if let Some(v) = project.output_max_length {
             self.output_max_length = v;
         }
+
+        // カスタムフィルターは「追加のみ」。以前は置換だったため、プロジェクト設定に
+        // 1 行書くだけでグローバルのルールを全部消せてしまっていた。
         if let Some(ref v) = project.custom_filters {
-            self.custom_filters = v.clone();
+            // グローバル定義がある場合だけ知らせる。空リスト（旧挙動では「全消し」の
+            // 指定だった）でも鳴らすのは意図的で、消したつもりの利用者に効いていない
+            // ことを伝えるため。
+            if !self.custom_filters.is_empty() {
+                self.warnings.push(format!(
+                    "project config: custom_filters cannot remove or replace the {} global filter(s) \
+                     — project entries are appended to them instead",
+                    self.custom_filters.len()
+                ));
+            }
+            self.custom_filters.extend(v.iter().cloned());
         }
+
+        // 拡張子フックと Stop フックはどちらも「任意コマンドの実行」そのものなので、
+        // プロジェクト設定からは一切受け付けない（信頼確認なしのコード実行になるため）。
         if let Some(ref v) = project.extension_hooks {
-            self.extension_hooks = v.clone();
+            if !v.is_empty() {
+                self.warnings.push(format!(
+                    "project config: {} extension_hooks entr{} ignored \
+                     (extension hooks run arbitrary commands on file edits and are only accepted from the global config)",
+                    v.len(),
+                    if v.len() == 1 { "y was" } else { "ies were" }
+                ));
+            }
         }
         if let Some(ref v) = project.stop_hooks {
-            self.stop_hooks.extend(v.clone());
+            if !v.is_empty() {
+                self.warnings.push(format!(
+                    "project config: {} stop_hooks entr{} ignored \
+                     (stop hooks run arbitrary commands when the agent stops and are only accepted from the global config)",
+                    v.len(),
+                    if v.len() == 1 { "y was" } else { "ies were" }
+                ));
+            }
+        }
+    }
+
+    /// ブロック設定を「有効化のみ」でマージする。
+    ///
+    /// `global || project.unwrap_or(false)` と等価。`true` への変更（強化）は通し、
+    /// `false` への変更（緩和）は無視する。無視したときだけ警告を残すことで、
+    /// 「グローバルが元から false」の無害なケースで警告を出さない。
+    fn merge_block_flag(
+        current: &mut bool,
+        requested: Option<bool>,
+        field: &str,
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(requested) = requested else {
+            return;
+        };
+        if requested {
+            *current = true;
+            return;
+        }
+        if *current {
+            warnings.push(format!(
+                "project config: `{field} = false` was ignored \
+                 (project configs may only enable command blocking, never disable it)"
+            ));
+        }
+    }
+
+    /// 記録済みの警告をログに出力する。
+    ///
+    /// stderr ではなくログへ出す理由: Claude / Windsurf ではブロック時の stderr 本文が
+    /// そのままエージェントへのブロック理由になるため、そこへ設定警告を混ぜると
+    /// 判定メッセージが濁る。`claw-hooks check` だけは stderr に出す
+    /// （`validation::validate` 参照）。
+    pub fn log_warnings(&self) {
+        for warning in &self.warnings {
+            tracing::warn!("{}", warning);
         }
     }
 }
@@ -174,17 +275,22 @@ impl Config {
 ///
 /// すべてのフィールドは `Option<T>` — `None` は「未指定」（グローバルデフォルトを維持）を意味する。
 /// プロジェクトルートの `.claw-hooks.toml` に配置。
+///
+/// **未信頼の入力**として扱うため、ここでデシリアライズできることと実際に適用される
+/// ことは別である。適用範囲の規則は `Config::merge_project` を参照
+/// （`stop_hooks` / `extension_hooks` は受理するが適用しない。無視した理由を警告に
+/// 残すために、パースエラーにせず一度受け取っている）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
-    /// rm ブロックの上書き
+    /// rm ブロックの上書き（有効化のみ。`false` は無視）
     pub rm_block: Option<bool>,
     /// rm ブロックメッセージの上書き
     pub rm_block_message: Option<String>,
-    /// kill ブロックの上書き
+    /// kill ブロックの上書き（有効化のみ。`false` は無視）
     pub kill_block: Option<bool>,
     /// kill ブロックメッセージの上書き
     pub kill_block_message: Option<String>,
-    /// dd ブロックの上書き
+    /// dd ブロックの上書き（有効化のみ。`false` は無視）
     pub dd_block: Option<bool>,
     /// dd ブロックメッセージの上書き
     pub dd_block_message: Option<String>,
@@ -192,11 +298,11 @@ pub struct ProjectConfig {
     pub hook_timeout: Option<u64>,
     /// 出力最大長の上書き
     pub output_max_length: Option<usize>,
-    /// カスタムフィルターの上書き（グローバルを置換）
+    /// 追加のカスタムフィルター（グローバルへ追記。削除・置換は不可）
     pub custom_filters: Option<Vec<CustomFilter>>,
-    /// 拡張子フックの上書き（グローバルを置換）
+    /// 拡張子フック（**適用されない**。任意コマンド実行のためグローバル設定限定）
     pub extension_hooks: Option<BTreeMap<String, Vec<String>>>,
-    /// 追加の Stop フック（グローバルとマージ）
+    /// Stop フック（**適用されない**。任意コマンド実行のためグローバル設定限定）
     pub stop_hooks: Option<Vec<StopHook>>,
 }
 
@@ -986,8 +1092,13 @@ mod tests {
         assert_eq!(config.hook_timeout, 120);
     }
 
+    // 以下の一連のテストは元々「プロジェクト設定はグローバルを上書き/置換できる」という
+    // 旧挙動を固定していた。プロジェクト設定は未信頼入力（clone してきたリポジトリに
+    // 同梱され得る）なので、防御の緩和と新規のコマンド実行を認めない方針へ変更し、
+    // 期待値をそれに合わせて更新している（詳細は `Config::merge_project` の doc 参照）。
+
     #[test]
-    fn test_merge_project_overrides_scalar() {
+    fn test_merge_project_cannot_disable_block_but_can_set_timeout() {
         let mut config = Config::default();
         assert!(config.rm_block); // default true
 
@@ -998,12 +1109,47 @@ mod tests {
         };
         config.merge_project(&project);
 
-        assert!(!config.rm_block);
+        // 旧挙動は rm_block=false になっていた。プロジェクト設定からブロックは外せない。
+        assert!(config.rm_block);
+        // ブロック判定を弱めない値は従来どおり上書きできる。
         assert_eq!(config.hook_timeout, 30);
+        assert!(
+            config.warnings.iter().any(|w| w.contains("rm_block")),
+            "無視した理由が警告に残るべき: {:?}",
+            config.warnings
+        );
     }
 
     #[test]
-    fn test_merge_project_overrides_custom_filters() {
+    fn test_merge_project_can_enable_block() {
+        // 強化方向（false → true）は受け入れる。プロジェクト側でより厳しくするのは安全。
+        let mut config = Config {
+            rm_block: false,
+            kill_block: false,
+            dd_block: false,
+            ..Config::default()
+        };
+
+        let project = ProjectConfig {
+            rm_block: Some(true),
+            kill_block: Some(true),
+            dd_block: Some(true),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert!(config.rm_block);
+        assert!(config.kill_block);
+        assert!(config.dd_block);
+        assert!(
+            config.warnings.is_empty(),
+            "強化方向の指定は無視していないので警告を出さない: {:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn test_merge_project_appends_custom_filters() {
         let mut config = Config::default();
         config.custom_filters.push(CustomFilter {
             command: "npm".to_string(),
@@ -1021,13 +1167,19 @@ mod tests {
         };
         config.merge_project(&project);
 
-        // custom_filters は上書き（グローバルが消える）
-        assert_eq!(config.custom_filters.len(), 1);
-        assert_eq!(config.custom_filters[0].command, "yarn");
+        // 旧挙動は置換（グローバルの npm ルールが消えた）。現在は追加のみ。
+        assert_eq!(config.custom_filters.len(), 2);
+        assert_eq!(config.custom_filters[0].command, "npm");
+        assert_eq!(config.custom_filters[1].command, "yarn");
+        assert!(
+            config.warnings.iter().any(|w| w.contains("custom_filters")),
+            "置換ではなく追加になったことを警告で伝えるべき: {:?}",
+            config.warnings
+        );
     }
 
     #[test]
-    fn test_merge_project_empty_vec_clears_custom_filters() {
+    fn test_merge_project_empty_vec_cannot_clear_custom_filters() {
         let mut config = Config::default();
         config.custom_filters.push(CustomFilter {
             command: "npm".to_string(),
@@ -1041,12 +1193,13 @@ mod tests {
         };
         config.merge_project(&project);
 
-        // Some(vec![]) = 明示的に空で上書き
-        assert!(config.custom_filters.is_empty());
+        // 旧挙動では Some(vec![]) がグローバルのルールを全消しする抜け道だった。
+        assert_eq!(config.custom_filters.len(), 1);
+        assert_eq!(config.custom_filters[0].command, "npm");
     }
 
     #[test]
-    fn test_merge_project_stop_hooks_extend() {
+    fn test_merge_project_ignores_stop_hooks() {
         let mut config = Config::default();
         config.stop_hooks.push(StopHook {
             commands: vec!["global-cmd".to_string()],
@@ -1068,14 +1221,18 @@ mod tests {
         };
         config.merge_project(&project);
 
-        // stop_hooks はマージ（両方残る）
-        assert_eq!(config.stop_hooks.len(), 2);
+        // 旧挙動は extend で、リポジトリ同梱のファイルから任意コマンドを実行できた。
+        assert_eq!(config.stop_hooks.len(), 1);
         assert_eq!(config.stop_hooks[0].commands, vec!["global-cmd"]);
-        assert_eq!(config.stop_hooks[1].commands, vec!["project-cmd"]);
+        assert!(
+            config.warnings.iter().any(|w| w.contains("stop_hooks")),
+            "無視した理由が警告に残るべき: {:?}",
+            config.warnings
+        );
     }
 
     #[test]
-    fn test_merge_project_overrides_extension_hooks() {
+    fn test_merge_project_ignores_extension_hooks() {
         let mut config = Config::default();
         config
             .extension_hooks
@@ -1091,9 +1248,17 @@ mod tests {
         };
         config.merge_project(&project);
 
-        // extension_hooks は上書き
-        assert!(!config.extension_hooks.contains_key(".rs"));
-        assert!(config.extension_hooks.contains_key(".ts"));
+        // 旧挙動は置換で、グローバルの formatter を潰しつつ任意コマンドを仕込めた。
+        assert!(config.extension_hooks.contains_key(".rs"));
+        assert!(!config.extension_hooks.contains_key(".ts"));
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("extension_hooks")),
+            "無視した理由が警告に残るべき: {:?}",
+            config.warnings
+        );
     }
 
     #[test]
@@ -1382,8 +1547,10 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_project_overrides_bool_fields() {
-        // Some(false) でグローバルの true を上書きできる
+    fn test_merge_project_bool_fields_cannot_be_weakened() {
+        // 旧挙動: Some(false) でグローバルの true を上書きできた。
+        // 現在: 緩和方向の上書きは無視し、警告のみ残す（未信頼のプロジェクト設定から
+        // 安全ガードを外せないようにするため）。
         let mut config = Config {
             rm_block: true,
             kill_block: true,
@@ -1397,9 +1564,34 @@ mod tests {
         };
         config.merge_project(&project);
 
-        assert!(!config.rm_block);
-        assert!(!config.kill_block);
+        assert!(config.rm_block);
+        assert!(config.kill_block);
         assert!(config.dd_block); // 未指定のため変更なし
+        assert_eq!(
+            config.warnings.len(),
+            2,
+            "無視した 2 件分の警告が残るべき: {:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn test_merge_project_no_warning_when_global_already_disabled() {
+        // グローバルが元から false なら、プロジェクトの false は何も無効化していない。
+        // 警告の意味を「実際に無視した」ケースに限定して、無害なケースで鳴らさない。
+        let mut config = Config {
+            rm_block: false,
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            rm_block: Some(false),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert!(!config.rm_block);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]
@@ -1420,8 +1612,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_project_custom_filters_replace_global() {
-        // custom_filters は置換（extend ではない）
+    fn test_merge_project_custom_filters_keep_global_rules() {
+        // 旧挙動: custom_filters は置換だったため、プロジェクト設定に 1 件書くだけで
+        // グローバルのルール（ここでは npm ブロック）を丸ごと外せた。
         let mut config = Config {
             custom_filters: vec![CustomFilter {
                 command: "npm".to_string(),
@@ -1441,38 +1634,43 @@ mod tests {
         };
         config.merge_project(&project);
 
-        assert_eq!(config.custom_filters.len(), 1);
-        assert_eq!(config.custom_filters[0].command, "yarn");
+        assert_eq!(config.custom_filters.len(), 2);
+        assert_eq!(config.custom_filters[0].command, "npm");
+        assert_eq!(config.custom_filters[1].command, "yarn");
     }
 
     #[test]
-    fn test_merge_project_extension_hooks_replace_global() {
-        // extension_hooks は置換（extend ではない）
+    fn test_merge_project_extension_hooks_keep_global_only() {
+        // 旧挙動: extension_hooks は置換。グローバルの formatter を潰した上で、
+        // ファイル編集のたびに任意コマンドを実行させられた。
         let mut config = Config {
             extension_hooks: BTreeMap::from([
-                ("rs".to_string(), vec!["rustfmt {file}".to_string()]),
-                ("ts".to_string(), vec!["prettier {file}".to_string()]),
+                (".rs".to_string(), vec!["rustfmt {file}".to_string()]),
+                (".ts".to_string(), vec!["prettier {file}".to_string()]),
             ]),
             ..Default::default()
         };
 
         let project = ProjectConfig {
             extension_hooks: Some(BTreeMap::from([(
-                "py".to_string(),
+                ".py".to_string(),
                 vec!["black {file}".to_string()],
             )])),
             ..Default::default()
         };
         config.merge_project(&project);
 
-        // グローバルの rs, ts は消え、プロジェクトの py のみ
-        assert_eq!(config.extension_hooks.len(), 1);
-        assert!(config.extension_hooks.contains_key("py"));
+        // グローバルの定義だけが残り、プロジェクトの定義は採用されない
+        assert_eq!(config.extension_hooks.len(), 2);
+        assert!(config.extension_hooks.contains_key(".rs"));
+        assert!(config.extension_hooks.contains_key(".ts"));
+        assert!(!config.extension_hooks.contains_key(".py"));
     }
 
     #[test]
-    fn test_merge_project_stop_hooks_extend_global() {
-        // stop_hooks は extend（グローバル + プロジェクト両方を実行）
+    fn test_merge_project_stop_hooks_stay_global_only() {
+        // 旧挙動: stop_hooks は extend。リポジトリに .claw-hooks.toml を置くだけで
+        // エージェント停止時に任意コマンドが走った（コード実行）。
         let mut config = Config {
             stop_hooks: vec![StopHook {
                 commands: vec!["echo global".to_string()],
@@ -1496,14 +1694,13 @@ mod tests {
         };
         config.merge_project(&project);
 
-        assert_eq!(config.stop_hooks.len(), 2);
+        assert_eq!(config.stop_hooks.len(), 1);
         assert_eq!(config.stop_hooks[0].commands[0], "echo global");
-        assert_eq!(config.stop_hooks[1].commands[0], "echo project");
     }
 
     #[test]
-    fn test_merge_project_empty_custom_filters_clears_global() {
-        // Some(vec![]) で明示的にグローバルを空にできる
+    fn test_merge_project_empty_list_does_not_clear_global_filters() {
+        // 旧挙動: Some(vec![]) が「明示的な全消し」として働く抜け道だった。
         let mut config = Config {
             custom_filters: vec![CustomFilter {
                 command: "npm".to_string(),
@@ -1515,11 +1712,17 @@ mod tests {
 
         let project = ProjectConfig {
             custom_filters: Some(vec![]),
+            stop_hooks: Some(vec![]),
+            extension_hooks: Some(BTreeMap::new()),
             ..Default::default()
         };
         config.merge_project(&project);
 
-        assert!(config.custom_filters.is_empty());
+        assert_eq!(config.custom_filters.len(), 1);
+        // 「全消し」が効いていないことは伝える（消したつもりの利用者向け）。
+        // 一方 stop_hooks / extension_hooks の空リストは無視する中身が無いので黙る。
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert!(config.warnings[0].contains("custom_filters"));
     }
 
     #[test]

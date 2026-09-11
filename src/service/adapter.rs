@@ -6700,7 +6700,14 @@ mod tests {
             assert_eq!(parsed.event, HookEvent::BeforeCommand);
         }
         // 検査対象のツールは従来どおりフェイルクローズする。
-        for tool in ["Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"] {
+        for tool in [
+            "Bash",
+            "PowerShell",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+        ] {
             let input = format!(
                 r#"{{"hook_event_name":"PreToolUse","tool_name":"{}"}}"#,
                 tool
@@ -6818,5 +6825,4 @@ mod tests {
                 .contains("deny")
         );
     }
-
 }

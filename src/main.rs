@@ -38,6 +38,11 @@ fn main() -> Result<()> {
     // ロガーのガードは終了直前に drop する必要があるため、ここで保持する。
     let logger_guard = init_logging(&cli, &config);
 
+    // プロジェクト設定で無視した項目（防御の緩和・コマンド実行の追加）をログに残す。
+    // ログの出力先は設定から決まるため、初期化より前には出せない。ここで出さないと
+    // 「`.claw-hooks.toml` に書いたのに効かない」理由がどこにも残らない。
+    config.log_warnings();
+
     // コマンド実行（フック判定の終了コードを集約する）
     let exit_code: i32 = match cli.command {
         Commands::Hook {
@@ -161,7 +166,11 @@ fn run_check(config: &Config, quiet: bool) -> Result<i32> {
         if let Some(project_path) = ConfigService::find_project_config() {
             eprintln!("Project config found: {}", project_path.display());
             match ConfigService::load_project_config(&project_path) {
-                Ok(_) => eprintln!("Project config is valid."),
+                // 「valid」だけだと、信頼境界により無視された項目がある場合に
+                // 「書いたとおりに効いている」と読めてしまう。警告は既に上で
+                // 出力済みなので、そこへ目を向けさせる。
+                Ok(_) if config.warnings.is_empty() => eprintln!("Project config is valid."),
+                Ok(_) => eprintln!("Project config is valid (see warnings above)."),
                 Err(e) => eprintln!("Project config error: {}", e),
             }
         }

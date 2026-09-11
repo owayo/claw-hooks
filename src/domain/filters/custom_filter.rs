@@ -3,7 +3,7 @@
 use regex::Regex;
 
 use super::Filter;
-use crate::domain::parser::ShellParser;
+use crate::domain::parser::{ShellParser, command_key};
 use crate::domain::{Decision, HookEvent, HookInput, ToolInput};
 
 /// カスタムコマンドマッチングのフィルターモード。
@@ -117,14 +117,47 @@ impl CustomCommandFilter {
         result
     }
 
+    /// コマンド文字列の先頭トークンだけを `command_key` で正規化した変形を返す。
+    ///
+    /// 組み込みフィルター（rm/kill/dd）は `command_key` を通すので `/bin/rm` を捕まえるが、
+    /// カスタムフィルターだけ生の文字列で照合していたため、`npm` をブロックしていても
+    /// `/usr/bin/npm` で素通りできた。パターンはコマンド名先頭にアンカーされる仕様なので、
+    /// 先頭トークンを basename 化した文字列でも照合すればこの抜け道を塞げる。
+    ///
+    /// 正規化しても内容が変わらない場合（既に `npm` 等）は `None` を返し、
+    /// 同じ文字列を二度照合しない。
+    fn command_key_variant(stripped: &str) -> Option<String> {
+        let trimmed = stripped.trim_start();
+        let head_len = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let (head, rest) = trimmed.split_at(head_len);
+        if head.is_empty() {
+            return None;
+        }
+        let key = command_key(head);
+        if key == head {
+            return None;
+        }
+        Some(format!("{}{}", key, rest))
+    }
+
     /// 正規表現モードでコマンド文字列がマッチするか判定する。
+    ///
+    /// 元の文字列と、コマンド名を basename 化した文字列の両方で照合する。
+    /// 両方見るのは、利用者が `command = "/usr/bin/npm"` のようにパスを含む
+    /// パターンを書いている可能性があるため（正規化側だけにすると従来マッチして
+    /// いたものを取りこぼす = 緩和方向の変更になる）。
     fn matches_regex(&self, command: &str, pattern: &Regex) -> bool {
         let mut parser = ShellParser::new();
         let command_strings = parser.extract_command_strings(command);
 
-        command_strings
-            .iter()
-            .any(|cmd| pattern.is_match(&Self::strip_quoted_content(cmd)))
+        command_strings.iter().any(|cmd| {
+            let stripped = Self::strip_quoted_content(cmd);
+            if pattern.is_match(&stripped) {
+                return true;
+            }
+            Self::command_key_variant(&stripped)
+                .is_some_and(|normalized| pattern.is_match(&normalized))
+        })
     }
 
     /// 引数モードでコマンド文字列がマッチするか判定する。
@@ -145,8 +178,12 @@ impl CustomCommandFilter {
                 continue;
             }
 
-            // コマンド名が正規表現にマッチするか判定
-            if !target_cmd.is_match(parts[0]) {
+            // コマンド名が正規表現にマッチするか判定する。
+            // 生のトークンと `command_key` 正規化後（basename / 実行拡張子 / 小文字化）の
+            // 両方を見る。正規化後だけにすると `command = "/usr/bin/npm"` のような
+            // パス込みのパターンを取りこぼすため、両方で照合して従来の一致を保つ。
+            let normalized = command_key(parts[0]);
+            if !target_cmd.is_match(parts[0]) && !target_cmd.is_match(&normalized) {
                 continue;
             }
 
@@ -348,6 +385,85 @@ mod tests {
 
         // 他のコマンドにはマッチしないべき
         assert!(!filter.matches("python install"));
+    }
+
+    // === コマンド名の正規化（絶対パス経由の回避防止）のテスト ===
+
+    #[test]
+    fn test_custom_filter_args_mode_matches_absolute_path() {
+        // 組み込みフィルターは command_key で /bin/rm を捕まえるのに、カスタムフィルターだけ
+        // 生の文字列で照合していたため、絶対パスを付けるだけで回避できていた。
+        let filter = CustomCommandFilter::with_args(
+            "npm",
+            vec!["install".to_string(), "i".to_string()],
+            "Use pnpm instead".to_string(),
+        )
+        .unwrap();
+
+        assert!(filter.matches("npm install x"));
+        assert!(filter.matches("/usr/bin/npm install x"));
+        assert!(filter.matches("/usr/local/bin/npm i x"));
+        assert!(filter.matches("./npm install x"));
+        // 実行拡張子と大文字も command_key が畳む
+        assert!(filter.matches("npm.cmd install x"));
+        assert!(filter.matches("NPM install x"));
+
+        // 引数が対象外なら従来どおりマッチしない（過剰ブロックしない）
+        assert!(!filter.matches("/usr/bin/npm run build"));
+    }
+
+    #[test]
+    fn test_custom_filter_regex_mode_matches_absolute_path() {
+        let filter = CustomCommandFilter::new("yarn", "Use pnpm instead".to_string()).unwrap();
+
+        assert!(filter.matches("yarn add react"));
+        assert!(filter.matches("/usr/local/bin/yarn add react"));
+        assert!(filter.matches("cd /app && /opt/homebrew/bin/yarn install"));
+
+        // コマンド名の位置以外に現れる場合は従来どおりマッチしない
+        assert!(!filter.matches("echo /usr/local/bin/yarn"));
+        assert!(!filter.matches("which yarn"));
+    }
+
+    #[test]
+    fn test_custom_filter_keeps_matching_path_qualified_patterns() {
+        // 利用者がパス込みのパターンを書いている場合に取りこぼさないよう、
+        // 元の文字列でも照合し続ける（正規化側だけに寄せると緩和方向の変更になる）。
+        let regex_filter =
+            CustomCommandFilter::new("/usr/bin/npm", "path pattern".to_string()).unwrap();
+        assert!(regex_filter.matches("/usr/bin/npm install x"));
+
+        let args_filter = CustomCommandFilter::with_args(
+            "/usr/bin/npm",
+            vec!["install".to_string()],
+            "path pattern".to_string(),
+        )
+        .unwrap();
+        assert!(args_filter.matches("/usr/bin/npm install x"));
+    }
+
+    #[test]
+    fn test_command_key_variant_returns_none_when_unchanged() {
+        // 既に正規化済みなら二重照合しない
+        assert_eq!(
+            CustomCommandFilter::command_key_variant("npm install x"),
+            None
+        );
+        assert_eq!(CustomCommandFilter::command_key_variant(""), None);
+        assert_eq!(CustomCommandFilter::command_key_variant("   "), None);
+    }
+
+    #[test]
+    fn test_command_key_variant_normalizes_head_only() {
+        // 先頭トークンだけを畳み、引数はそのまま残す（引数のパスを壊さない）
+        assert_eq!(
+            CustomCommandFilter::command_key_variant("/usr/bin/npm install /opt/pkg"),
+            Some("npm install /opt/pkg".to_string())
+        );
+        assert_eq!(
+            CustomCommandFilter::command_key_variant("/bin/rm"),
+            Some("rm".to_string())
+        );
     }
 
     // === エッジケースのテスト ===

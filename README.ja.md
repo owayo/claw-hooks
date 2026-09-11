@@ -47,7 +47,7 @@
 - 🛡️ **デバッグログ安全性** - 永続化するのはイベント/ツール/セッション、実行ファイルの basename、引数数、バイト数サマリーのみ。Stop/拡張子フックの引数と実行ファイルのディレクトリを除去し、生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
 - 🛑 **入出力サイズ上限** - stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
 - 🔒 **フェイルクローズドのゲート** - コマンドブロックはパースエラー、読み取り不能な入力、設定の破損時に拒否を返す。`config.toml` のタイポ 1 つで保護が無効化されることはもう無い。設定エラーでは（従来のように exit `1` + stdout 空で終了せず）エージェント固有の拒否応答を返し、診断は stderr へ、あわせて `claw-hooks check` を案内する（exit 1 + stdout 空は一部のエージェントで「フック失敗＝判定を無視」と解釈されるため）。ただしフェイルクローズドにするのは実行前ゲートだけ。Stop 系での「ブロック」は「停止せず継続」を意味し、claw-hooks が中身を検査しないイベントでの拒否はユーザーのプロンプトを消去したり実際のツール出力を置き換えたりするだけで安全性を上げないため、いずれも許可に倒す。イベントを特定できないほど壊れたペイロードは従来どおりブロックする
-- 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに上書き/拡張
+- 📂 **プロジェクト設定マージ** - プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに拡張。プロジェクト設定は未信頼の入力として扱われ（エージェントが clone したリポジトリにも置かれ得るため）、防御を**強める**方向のみ反映されます。ガードの有効化とフィルターの追加は反映され、ガードの無効化・グローバルフィルターの置換・stop/extension フックの宣言は警告付きで無視されます
 - 🔌 **マルチエージェント対応** - Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLI、Grok CLIに対応
 
 ## なぜ claw-hooks？
@@ -123,7 +123,7 @@ sys.exit(0)
 | 危険なコマンドをブロック | コマンドごとに25行以上のPython | TOML 1行 |
 | カスタムフィルター | フィルターごとに新しいスクリプト | `[[custom_filters]]`に追加 |
 | 拡張子フック（フォーマッター） | 複雑なファイル検出スクリプト | `[extension_hooks]`マップ |
-| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Codex CLI）、Windsurf は exit 2 + stderr 経由*、Antigravity CLI は Stop hooks 経由*、Grok CLI は不可（事後フックの stdout が無視されるため） |
+| lint出力をエージェントに送信 | 手動でJSON構築 | 自動（Claude Code、Codex CLI）、Windsurf は exit 2 + stderr 経由*、Antigravity CLI は Stop hooks 経由*、Cursor は不可（`afterFileEdit` に出力スキーマが無いため）、Grok CLI は不可（事後フックの stdout が無視されるため） |
 | マルチエージェント対応 | エージェントごとに異なるスクリプト | 単一バイナリ + `--format` |
 | Stopフック（lint、通知等） | ユースケースごとにスクリプト作成 | `[[stop_hooks]]`設定 |
 
@@ -289,7 +289,7 @@ claw-hooks hook --config /path/to/config.toml
 
 ### Cursor
 
-`~/.cursor/hooks.json`（ユーザー）または`<project>/.cursor/hooks.json`（プロジェクト）に追加:
+`<project>/.cursor/hooks.json`（プロジェクト）または `~/.cursor/hooks.json`（ユーザー）に追加:
 
 ```json
 {
@@ -312,6 +312,10 @@ claw-hooks hook --config /path/to/config.toml
 ```
 
 > **コマンドブロック用フックには `failClosed: true` を推奨します。** Cursor は既定でフェイルオープンです。正常なブロック（exit `0` + stdout の `{"permission":"deny", …}`）は `failClosed` なしでも機能しますが、claw-hooks 自体がクラッシュ・タイムアウトした場合、`failClosed: true` を設定していないと Cursor はコマンドを通してしまいます。`afterFileEdit`/`stop` では付けません（フォーマッター/lint のクラッシュでエージェントを止めるべきではないため）。
+
+> **停止時 lint を使うならプロジェクトフックに置いてください。** Cursor はプロジェクトフック（`<project>/.cursor/hooks.json`）をプロジェクトルートで、ユーザーフック（`~/.cursor/hooks.json`）を `~/.cursor/` で実行します。claw-hooks の `condition = { file_exists = "Cargo.toml" }` による判定、`.claw-hooks.toml` の探索、各フックの作業ディレクトリはいずれもそのディレクトリを基準にするため、ユーザーレベルに登録するとプロジェクト種別の条件が無言で不成立になります。条件なしのフック（`git-sc` の自動コミット等）はリポジトリではなく Cursor の設定ディレクトリで走ります。
+
+> **保存後の診断は Cursor へ返せません。** `afterFileEdit` には出力スキーマが定義されていないため、フォーマッターによるファイル書き換えは反映されますが、linter のテキストを渡す先がありません。診断が必要な場合はプロジェクト全体の lint を `stop` フックで回してください（`followup_message` 経由で返ります）。
 
 ### Windsurf (Cascade)
 
@@ -362,6 +366,7 @@ claw-hooks hook --config /path/to/config.toml
 注意点:
 - **Antigravity では `--event` を指定してください。** Antigravity のペイロードにはイベント名フィールドが無く、`PreToolUse` と `PostToolUse` は形状で区別できません（どちらも `toolCall` と `stepIdx` を持ち、差は Optional な `error` のみ）。`hooks.json` はイベントごとに別エントリで登録するため、`--event` でどちらかを伝えます。未指定の場合は形状から推定し、区別できないケースは `PreToolUse` に倒します（コマンドブロックは維持されますが、保存後フックは動作しません）。
 - `--event PostToolUse` を指定すると Antigravity でも拡張子フックが動作します。編集対象は `toolCall.args.TargetFile` から復元します。ただし公式仕様で `PostToolUse` の出力は `{}` 固定のため、formatter/linter は**実行されますが診断結果をエージェントへ返せません**。診断を伝えたい場合は従来どおり Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` で再投入してください。
+- **matcher は `run_command` に加えて `manage_task` も対象にします。** `manage_task` は `Action: "send_input"` のとき `Input` を実行中プロセスの標準入力へ書き込みます。`run_command` + `RunPersistent: true` で永続シェルを起動すれば、以降のコマンドは `CommandLine` を一度も通らずに `send_input` から届くため、`manage_task` を matcher から外すと rm/kill/dd フィルターを完全に迂回できてしまいます。それ以外のアクション（`list` / `status` / `kill`）はエージェント自身のバックグラウンドタスク管理（シェルの `kill` コマンドとは別物）なのでパススルーします。
 - Antigravity には `stop_hook_active`（Claude/Codex）や `loop_count`（Cursor）に相当する入力がありません（`executionNum` は実行試行の連番で、通常の初回停止でも `1` です）。そのため恒久的に失敗する stop hook によるループを claw-hooks 側では遮断できません。report=true の stop hook には自己完結する終了条件を持たせてください。
 - `PreInvocation` / `PostInvocation` は claw-hooks のスコープ外（モデル呼び出し前後のオーケストレーション）なので、自動的にパススルーされます。これらのイベントは hook 登録不要です。
 - Antigravity hooks 公式仕様: <https://antigravity.google/docs/customizations/hooks>
@@ -453,6 +458,7 @@ Codex hooks はデフォルトで有効です。明示的に機能フラグを�
 - `timeout` の単位は**秒**で、デフォルトは `5` です。フォーマッターやプロジェクト全体 lint には短いため、上記のように延ばしてください。
 - プロジェクトのフックはリポジトリを信頼するまで実行されません。`/hooks-trust` を一度実行するか、`--trust` 付きで Grok を起動してください。
 - Grok は Claude Code（`.claude/settings.json`）と Cursor（`.cursor/hooks.json`）のフック設定も読み込みます。すでにそちらへ claw-hooks を登録している場合は、1 イベントにつき二重実行にならないよう登録を 1 か所にまとめてください。
+- claw-hooks はツール名ではなく `toolInput` の**形**で判定します。`command` フィールドがあればシェルコマンド、`file_path` / `filePath` / `notebook_path` / `notebookPath` があればファイル編集、どちらも無ければパススルーです。`toolName` と `toolInput` を必須にしないのも同じ理由で、判定に使わないフィールドを必須化すると無関係なツール呼び出しまで拒否されます（引数を持たないツールは `toolInput` をキーごと送りません）。
 - Grok がブロックできるのは `PreToolUse` だけです。それ以外はすべて stdout が無視される事後フックなので、拡張子フックによるファイル整形も Stop hooks の lint も実行はされますが、その出力をエージェントへ返すことはできません（Windsurf の `post_cascade_response` と同じ制約です）。
 - Grok は明示的な拒否以外すべてフェイルオープンです。タイムアウト・クラッシュ・不正出力はフック失敗として記録され、ツール呼び出しはそのまま実行されます。そのため claw-hooks はブロック時に deny JSON **と** exit code `2` の両方を返し、フェイルクローズド経路でも（`1` ではなく）exit `2` を使うことで、どちらの解釈でもブロックが成立するようにしています。
 
@@ -573,34 +579,35 @@ claw-hooksはデフォルトでグローバル設定ファイル（`~/.config/cl
 ```toml
 # my-project/.claw-hooks.toml
 
-# 上書き: このプロジェクトでは dd ブロックを無効化
-dd_block = false
+# このプロジェクトで必要なガードを有効化する（有効化は常に許可される）
+dd_block = true
 
-# 上書き: プロジェクト固有の拡張子フック（グローバルを完全置換）
-[extension_hooks]
-".rs" = ["rustfmt {file}"]
-".ts" = ["biome check {file}"]
-
-# マージ: 追加のStopフック（グローバルのStopフックに追加）
-[[stop_hooks]]
-commands = ["pnpm exec tsc --noEmit"]
-condition = { file_exists = "tsconfig.json" }
+# グローバルのフィルターに追加する
+[[custom_filters]]
+command = "yarn"
+message = "Use pnpm instead"
 ```
 
-**マージルール:**
+**マージルール。** `.claw-hooks.toml` は「エージェントが clone してきたリポジトリの中のファイル」でもあり得るため、**未信頼の入力**として扱います。プロジェクト設定は防御を**強める**ことはできますが、弱めることはできず、新しいコマンド実行を持ち込むこともできません。
 
 | フィールド | ルール | 動作 |
 |-----------|--------|------|
-| `extension_hooks` | **上書き** | プロジェクトの定義がグローバルを完全置換 |
-| `custom_filters` | **上書き** | プロジェクトの定義がグローバルを完全置換 |
-| `stop_hooks` | **マージ** | グローバルとプロジェクトの両方が実行される |
-| `rm_block`, `kill_block`, `dd_block` | **上書き** | プロジェクトの値が優先 |
-| `*_block_message`, `hook_timeout`, `output_max_length` | **上書き** | プロジェクトの値が優先 |
-| `debug`, `log_path`, `nano_buddy` | **グローバル専用** | プロジェクト設定では使用不可 |
+| `rm_block`, `kill_block`, `dd_block` | **有効化のみ** | `true` は反映。`false` への上書きは警告を出して無視 |
+| `custom_filters` | **追加のみ** | プロジェクトの定義を追加。グローバルの削除・置換は不可 |
+| `stop_hooks` | **拒否** | エージェント停止時に任意コマンドが走るため |
+| `extension_hooks` | **拒否** | ファイル編集のたびに任意コマンドが走るため |
+| `*_block_message`, `hook_timeout`, `output_max_length` | **上書き** | プロジェクトの値が優先（いずれもブロック判定を弱めない） |
+| `debug`, `log_path`, `nano_buddy` | **グローバル専用** | エラーとして拒否 |
 
-省略されたフィールドはグローバルの値を維持します。空の配列（例: `custom_filters = []`）を設定すると、グローバルの値を明示的にクリアします。
+省略されたフィールドはグローバルの値を維持します。無視した項目は警告として報告されるため、「設定したのに効かない」状態が見えないまま残ることはありません。
 
-`claw-hooks check` で検証できます — プロジェクト設定が見つかったかどうかと、その有効性を報告します。
+`claw-hooks check` で検証できます — プロジェクト設定の有無と妥当性に加えて、無視される項目と未知の（タイポした）キーを報告します。
+
+> **プロジェクト単位のフォーマッター・リンターの移行。** `.claw-hooks.toml` に `extension_hooks` や `stop_hooks` を書いていた場合は、グローバルの `config.toml` へ移し、`condition = { file_exists = "…" }` で対象を絞ってください。プロジェクトごとの挙動は同じまま、「リポジトリ側が実行内容を決められる」状態を避けられます。プロジェクト設定に残したものは無視され、`claw-hooks check` が報告します。
+
+> **`hook_timeout = 0` は拒否されるようになりました。** これは「無制限」を意味したことはなく（`0` を無制限として扱うのは `output_max_length` だけです）、全フックが即座にタイムアウトする設定でした。claw-hooks は不正な設定でフェイルクローズするため、この設定が残っているとすべてのコマンドが拒否されます。`claw-hooks check` が原因を指摘します。
+
+> **カスタムフィルターがコマンド名を正規化するようになりました。** 組み込みの `rm`/`kill`/`dd` フィルターと同じ扱いになり、`command = "npm"` のフィルターが `/usr/bin/npm` / `./npm` / `NPM` / `npm.cmd` にもマッチします。従来よりブロック範囲が広がります。
 
 **2. `--config` — 設定ファイルの完全置換**
 
@@ -710,7 +717,9 @@ commands = ["git-sc --all --yes --quiet"]
 
 **レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、コマンドは fire-and-forget 方式で起動され、Hook応答をブロックしません。デタッチコマンドは stdin/stdout/stderr が null になるため、spawn 失敗はログに残りますが、コマンド出力と終了ステータスは収集されません。Windsurf と Grok CLI の Stop フックは常にベストエフォートです（Windsurf は基盤側が非同期、Grok は stdout が無視されるため）。
 
-**セッションスコープ（エージェントセッションの抑止）:** Claude Code のチーム機能は委譲エージェント（teammate）を別プロセスとして起動し、それぞれが自分の `Stop` イベントを発火します — 1 タスクで数十回になることもあります。claw-hooks はこの 2 つを自動で判別します: 委譲エージェントの Stop ペイロードには空白でない `agent_id` と `agent_type` の両方が含まれます。`--agent` で起動したメインセッションにも `agent_type` は入り得ますが、サブエージェント固有の `agent_id` は無いためメイン扱いを維持します。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。従来どおり常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。判別フィールドが欠落・空白・非文字列の場合と、セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity / Grok CLI）はメインセッションとして扱われます。
+**セッションスコープ（エージェントセッションの抑止）:** claw-hooks は委譲エージェントのセッションとメインセッションを自動で判別します: 委譲側の Stop ペイロードには空白でない `agent_id` と `agent_type` の両方が含まれます（公式仕様では `agent_id` は「サブエージェント呼び出しの内側で発火したときだけ入る」と定義されています）。`--agent` で起動したメインセッションにも `agent_type` は入り得ますが、サブエージェント固有の `agent_id` は無いためメイン扱いを維持します。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。従来どおり常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。判別フィールドが欠落・空白・非文字列の場合と、セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity / Grok CLI）はメインセッションとして扱われます。
+
+> **agent team の teammate はスコープ外です。** teammate はインプロセスで動き、完了は Claude Code の別イベント `TeammateIdle` で通知されますが、claw-hooks はこれを意図的に扱いません。このイベントにはループカウンタ（`stop_hook_active` / `loop_count` に相当するもの）が無く、失敗を伝える唯一の手段が「teammate に作業を継続させる」ことなので、恒久的に失敗する lint があると無限ループになります。**したがって teammate の idle 時には停止時 lint も通知も実行されません。**
 
 ```toml
 # メインセッションの停止時のみ実行（デフォルト — フィールド指定不要）

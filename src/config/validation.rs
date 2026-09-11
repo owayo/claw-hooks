@@ -11,8 +11,26 @@ use super::{Config, CustomFilter, StopHook};
 /// フックは短時間で終わる前提のため、1日を超える値は設定ミスとして扱う。
 pub(crate) const MAX_HOOK_TIMEOUT_SECS: u64 = 86_400;
 
-/// 設定を検証する。
+/// `claw-hooks check` 用の検証エントリポイント。
+///
+/// 値の検証に加えて、読み込み時に記録された警告（無視したプロジェクト設定・未知キー）を
+/// stderr に出力する。検証に失敗しても警告は見えるよう、先に警告を出す。
+///
+/// フック実行経路（`Config::validate`）は `validate_values` を直接呼んで沈黙させる。
+/// Claude / Windsurf ではブロック時の stderr 本文がそのままエージェントへ渡す理由に
+/// なるため、そこへ設定警告が混ざると判定メッセージが濁るからである。
 pub fn validate(config: &Config) -> Result<()> {
+    // `check` はロガー初期化後に走るため、ログにも同じ警告を残せる
+    // （設定読み込み時点ではロガーがまだ無い — ログの出力先が設定そのものだから）。
+    config.log_warnings();
+    for warning in &config.warnings {
+        eprintln!("warning: {}", warning);
+    }
+    validate_values(config)
+}
+
+/// 設定の値そのものを検証する（出力を伴わない本体）。
+pub(crate) fn validate_values(config: &Config) -> Result<()> {
     // ログパスの検証（NUL文字を含まないこと）
     if !config.log_path.as_os_str().is_empty() && config.log_path.to_string_lossy().contains('\0') {
         bail!("Invalid log_path: contains null character");
@@ -28,6 +46,19 @@ pub fn validate(config: &Config) -> Result<()> {
 
 /// フックコマンドのタイムアウト値を検証する。
 fn validate_hook_timeout(timeout_secs: u64, field: &str) -> Result<()> {
+    // 0 を「無制限」のつもりで書く利用者が必ず出る（同じ Config の `output_max_length` は
+    // 0 = 無制限のため）。実際には全フックが起動直後に kill され出力ごと捨てられ、
+    // lint も通知も commit も静かに全滅する。上限だけ見ていると `check` が
+    // "Configuration is valid." と答えてしまうので、明示的に弾いて誤解を解く。
+    if timeout_secs == 0 {
+        bail!(
+            "{} must be >= 1 second, got 0 \
+             (0 does NOT mean unlimited: every hook command would be killed immediately \
+             and its output discarded; use a large value such as {} for a practically unlimited timeout)",
+            field,
+            MAX_HOOK_TIMEOUT_SECS
+        );
+    }
     if timeout_secs > MAX_HOOK_TIMEOUT_SECS {
         bail!(
             "{} must be <= {} seconds, got {}",
@@ -282,6 +313,44 @@ mod tests {
         let mut config = default_config();
         config.log_path = PathBuf::from("bad\0path");
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_hook_timeout_zero() {
+        // 0 は「無制限」ではなく「即タイムアウト」。valid 扱いのままだと
+        // `check` が "Configuration is valid." と答えた上で全フックが黙って死ぬ。
+        let mut config = default_config();
+        config.hook_timeout = 0;
+        let err = validate_values(&config).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("hook_timeout"),
+            "どのフィールドかを示すべき: {}",
+            message
+        );
+        assert!(
+            message.contains("unlimited"),
+            "0 が無制限ではないことを伝えるべき: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_hook_timeout_one_second() {
+        // 境界値: 1 秒は有効（下限は 0 の拒否のみ）
+        let mut config = default_config();
+        config.hook_timeout = 1;
+        assert!(validate_values(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_rejects_hook_timeout_zero() {
+        // プロジェクト設定側も同じ理由で 0 を弾く
+        let pc = ProjectConfig {
+            hook_timeout: Some(0),
+            ..Default::default()
+        };
+        assert!(validate_project(&pc).is_err());
     }
 
     #[test]

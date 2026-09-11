@@ -294,11 +294,13 @@ impl StopHookFilter {
                     Ok(result) => {
                         Self::log_output(&label, &result.output);
                         if result.timed_out {
-                            // タイムアウトは異常終了 — 成功として扱わない
-                            Some(format!(
-                                "⏱ Stop hook timed out after {}s: {}",
-                                timeout_secs, label
-                            ))
+                            // タイムアウトは異常終了 — 成功として扱わない。
+                            // 本文は command 側が組み立てたもの（実際に待った秒数の通知と、
+                            // 打ち切り時点までに読めた出力）をそのまま使う。ここで
+                            // `timeout_secs` から文面を作り直すと、孫プロセスがパイプを
+                            // 保持したケースで実際の待ち時間（drain grace）ではなく
+                            // hook_timeout の値が表示され、しかも取得済みの診断が捨てられる。
+                            Some(Self::build_reason(&label, &result.output))
                         } else if result.output.status.success() {
                             None
                         } else {

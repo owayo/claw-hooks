@@ -984,6 +984,17 @@ impl ShellParser {
                     raw_is_command_string: false,
                 });
             }
+            // here-string `<<< "script"`: シェルは受け取った文字列を標準入力から読んで
+            // スクリプトとして実行する。フォールバック経路ではリダイレクト演算子が
+            // ただの引数トークンとして現れるため、ここで拾わないと素通しする。
+            // AST 経路では `herestring_redirect` ノードとして別途処理されるので、
+            // args にこの形が現れず二重解析にはならない。
+            if let Some(here_string) = Self::extract_here_string_from_args(args) {
+                inners.push(ReevaluatedInner {
+                    text: here_string,
+                    raw_is_command_string: false,
+                });
+            }
         }
         match key.as_str() {
             // env -S / --split-string（分割文字列をコマンドとして再評価）
@@ -1331,6 +1342,25 @@ impl ShellParser {
         }
 
         commands
+    }
+
+    /// `<<< "script"` の本文（シェルが標準入力から読んで実行するスクリプト）を返す。
+    ///
+    /// 演算子と本文が離れている形（`<<< script`）と連結している形（`<<<script`）の
+    /// 両方を受ける。
+    fn extract_here_string_from_args(args: &[String]) -> Option<String> {
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "<<<" {
+                return iter.next().filter(|s| !s.trim().is_empty()).cloned();
+            }
+            if let Some(rest) = arg.strip_prefix("<<<") {
+                if !rest.trim().is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// `trap "cmd" SIGNAL` の第 1 位置引数（シェルが後で再評価するコマンド文字列）を返す。

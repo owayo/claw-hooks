@@ -32,7 +32,25 @@ fn read_stdin_bounded(stdin: io::Stdin) -> Result<Vec<u8>> {
     Ok(raw)
 }
 
-/// フェイルクローズ応答を、終了コードに応じた正しいストリームへ書き出す。
+/// フェイルクローズ応答の本文と終了コードを組み立てる。
+///
+/// 本文・終了コード・出力ストリームは同じイベント判定から導かなければならない。
+/// 経路ごとに個別に組み立てると、片方だけ `--event` の明示指定を見落とす等のズレが生じる
+/// （実際に `emit_config_error` は `--event` を渡しておらず、設定が壊れているときだけ
+/// Antigravity の Stop / PostToolUse に PreToolUse 用の deny を返していた）。
+///
+/// `raw_input` には元入力を渡す。読めなかった場合も `None` ではなく空文字列を渡すこと。
+/// 空文字列ならイベント名を持たないフォーマットは従来どおり汎用形式へフォールバックし、
+/// かつ `--event` の明示指定（Antigravity で PreToolUse / PostToolUse / Stop を
+/// 区別する唯一の手段）は生かされる。
+fn fail_closed_response(adapter: &FormatAdapter, message: &str, raw_input: &str) -> (String, i32) {
+    (
+        adapter.format_error_for_input(message, raw_input),
+        adapter.error_exit_code(Some(raw_input)),
+    )
+}
+
+/// フェイルクローズ応答を stderr に書くべきかを判定する。
 ///
 /// 不変条件はひとつだけ: **エラー本文を stderr に出してよいのは、実際にブロックする
 /// （exit != 0）ときだけ**。Claude / Windsurf は exit 2 のとき stdout の JSON を読まず
@@ -42,15 +60,20 @@ fn read_stdin_bounded(stdin: io::Stdin) -> Result<Vec<u8>> {
 /// JSON がデバッグログ側へ流れ、stdout が空のままになる。
 ///
 /// 設定エラー / ランタイムエラー / 入力のフェイルクローズの 3 経路すべてが同じ判断を
-/// 必要とするため、分岐をここに集約する。分散していると片方だけ直して残りが取り残され、
+/// 必要とするため、判定をここに集約する。分散していると片方だけ直して残りが取り残され、
 /// 実際に `emit_config_error` / `emit_runtime_error` は終了コードを見ない分岐のまま
 /// Stop の停止許可 JSON を stderr へ流していた。
+fn fail_closed_uses_stderr(adapter: &FormatAdapter, exit_code: i32) -> bool {
+    exit_code != 0 && adapter.format_uses_stderr_for_errors()
+}
+
+/// フェイルクローズ応答を、終了コードに応じた正しいストリームへ書き出す。
 fn write_fail_closed_response(
     adapter: &FormatAdapter,
     output: &str,
     exit_code: i32,
 ) -> io::Result<()> {
-    if exit_code != 0 && adapter.format_uses_stderr_for_errors() {
+    if fail_closed_uses_stderr(adapter, exit_code) {
         let stderr = io::stderr();
         let mut stderr = stderr.lock();
         writeln!(stderr, "{}", output)?;
@@ -64,6 +87,19 @@ fn write_fail_closed_response(
     }
 }
 
+/// フェイルクローズ経路の診断を stderr へ書く（書けなくても失敗しない）。
+///
+/// `eprintln!` は stderr への書き込みに失敗すると panic する。panic は exit 101 になり、
+/// Codex / Antigravity では「フック失敗＝判定を無視」と解釈されてフェイルオープンする
+/// （危険コマンドのブロックが素通りする）。フェイルクローズ経路は出力先が壊れている
+/// ことが前提の経路なので、診断を出せないことより終了コードを守る方を優先する。
+fn warn_fail_closed_diagnostic(message: &str) {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = writeln!(stderr, "{}", message);
+    let _ = stderr.flush();
+}
+
 /// フェイルクローズ応答を書き出す。書き込み自体に失敗しても終了コードで意思を表明する。
 ///
 /// 出力先が壊れている（パイプ切断・ディスクフル）場合、本文を届ける手段はもう無い。
@@ -71,7 +107,10 @@ fn write_fail_closed_response(
 /// 経路を再び作ってしまうため、診断だけ stderr に出して終了コードに委ねる。
 fn emit_fail_closed_response(adapter: &FormatAdapter, output: &str, exit_code: i32) {
     if let Err(e) = write_fail_closed_response(adapter, output, exit_code) {
-        eprintln!("claw-hooks failed to write fail-closed response: {}", e);
+        warn_fail_closed_diagnostic(&format!(
+            "claw-hooks failed to write fail-closed response: {}",
+            e
+        ));
     }
 }
 
@@ -114,7 +153,7 @@ impl HookService {
     ) -> i32 {
         // 設定内容そのもの（パスやフィルター定義）はエージェントへ返す本文に含めない。
         // 診断の詳細は stderr に出し、ユーザーが `claw-hooks check` で確認できるようにする。
-        eprintln!("claw-hooks configuration error: {:#}", error);
+        warn_fail_closed_diagnostic(&format!("claw-hooks configuration error: {:#}", error));
 
         let adapter = FormatAdapter::new(format, 0).with_event_override(event);
         let message = "claw-hooks configuration is invalid. Run `claw-hooks check`.";
@@ -136,8 +175,7 @@ impl HookService {
             eprintln!("🔍 [TRACE] Config error fail-closed: {:#}", error);
         }
 
-        let output = adapter.format_error_for_input(message, &raw_input);
-        let exit_code = adapter.error_exit_code(Some(&raw_input));
+        let (output, exit_code) = fail_closed_response(&adapter, message, &raw_input);
         emit_fail_closed_response(&adapter, &output, exit_code);
 
         exit_code
@@ -162,14 +200,14 @@ impl HookService {
         event: Option<String>,
         error: &anyhow::Error,
     ) -> i32 {
-        eprintln!("claw-hooks internal error: {:#}", error);
+        warn_fail_closed_diagnostic(&format!("claw-hooks internal error: {:#}", error));
         if trace {
             eprintln!("🔍 [TRACE] Runtime error fail-closed: {:#}", error);
         }
 
         let adapter = FormatAdapter::new(format, 0).with_event_override(event);
-        let output = adapter.format_error_for_input("claw-hooks encountered an internal error", "");
-        let exit_code = adapter.error_exit_code(Some(""));
+        let (output, exit_code) =
+            fail_closed_response(&adapter, "claw-hooks encountered an internal error", "");
         emit_fail_closed_response(&adapter, &output, exit_code);
 
         exit_code
@@ -224,7 +262,7 @@ impl HookService {
                 // イベント名の判定経路自体が飛ばされ、`--event` による明示指定
                 // （Antigravity でイベントを一意に決める唯一の手段）まで無視されて、
                 // Stop に対して PreToolUse 用の deny を返してしまう。
-                return Ok(self.fail_closed(&log_message, "Failed to read hook input", Some("")));
+                return Ok(self.fail_closed(&log_message, "Failed to read hook input", ""));
             }
         };
         // 不正な UTF-8 を含んでいても処理を継続できるよう損失あり変換する
@@ -247,7 +285,7 @@ impl HookService {
                 raw.len(),
                 MAX_INPUT_BYTES
             );
-            return Ok(self.fail_closed(&log_message, "Input too large", Some(&input)));
+            return Ok(self.fail_closed(&log_message, "Input too large", &input));
         }
 
         // トレースモード: 生の入力を即座に stderr に出力
@@ -264,7 +302,7 @@ impl HookService {
             return Ok(self.fail_closed(
                 "No input received from stdin",
                 "No input received from stdin",
-                Some(&input),
+                &input,
             ));
         }
 
@@ -287,7 +325,7 @@ impl HookService {
                 // パース失敗経路は元入力からイベント名を判定し、エージェント別の
                 // 適切な deny フォーマット（format_error_for_input）で返す。
                 let error_msg = format!("Failed to parse input: {}", e);
-                return Ok(self.fail_closed(&error_msg, &error_msg, Some(&input)));
+                return Ok(self.fail_closed(&error_msg, &error_msg, &input));
             }
         };
 
@@ -313,11 +351,7 @@ impl HookService {
             Ok(output) => output,
             Err(e) => {
                 let log_message = format!("Failed to format output: {}", e);
-                return Ok(self.fail_closed(
-                    &log_message,
-                    "Failed to format hook output",
-                    Some(&input),
-                ));
+                return Ok(self.fail_closed(&log_message, "Failed to format hook output", &input));
             }
         };
 
@@ -359,7 +393,7 @@ impl HookService {
             // イベントが既知のここで、イベント別のフェイルクローズ
             // （Stop なら停止許可 + exit 0、実行前ゲートならブロック）へ倒す。
             let log_message = format!("Failed to write hook output: {}", e);
-            return Ok(self.fail_closed(&log_message, "Failed to write hook output", Some(&input)));
+            return Ok(self.fail_closed(&log_message, "Failed to write hook output", &input));
         }
 
         Ok(exit_code)
@@ -445,9 +479,9 @@ impl HookService {
     /// - `log_message`: トレース（stderr）と `error!` ログに残す診断メッセージ。
     /// - `emit_message`: エージェントへ返す整形済みエラーの本文。通常は `log_message`
     ///   と同一だが、入力過大時のみ短い定型文（"Input too large"）を用いる。
-    /// - `raw_input`: 元入力（読めなかった場合も空文字列）を渡す。イベント名を判定して
-    ///   エージェント別の適切な deny フォーマット（`format_error_for_input`）で返すため。
-    ///   `None` の場合は汎用フォーマット（`format_error`）を用いる。
+    /// - `raw_input`: 元入力。読めなかった経路（stdin の I/O 失敗）でも空文字列を渡す。
+    ///   イベント名を判定してエージェント別の適切な deny フォーマットで返すため
+    ///   （詳細は `fail_closed_response` のドキュメント参照）。
     ///
     /// 出力の書き込み失敗はここで握り潰して終了コードだけを返す。`?` で返すと
     /// `main` 側の `emit_runtime_error` が汎用ブロックに差し替えてしまい、
@@ -457,17 +491,12 @@ impl HookService {
     /// フラッシュ用ガードを呼び出し側（main）で確実に drop してから終了するため
     /// （`process::exit` はスタックローカルの drop を実行しないため、ここで直接終了すると
     /// 診断ログが欠落し得る）。
-    fn fail_closed(&self, log_message: &str, emit_message: &str, raw_input: Option<&str>) -> i32 {
+    fn fail_closed(&self, log_message: &str, emit_message: &str, raw_input: &str) -> i32 {
         if self.trace {
             eprintln!("🔍 [TRACE] ERROR: {}", log_message);
         }
         error!("{}", log_message);
-        // パース失敗経路は元入力からイベント名を判定して適切なフォーマットで返す。
-        let output_json = match raw_input {
-            Some(input) => self.adapter.format_error_for_input(emit_message, input),
-            None => self.adapter.format_error(emit_message),
-        };
-        let exit_code = self.adapter.error_exit_code(raw_input);
+        let (output_json, exit_code) = fail_closed_response(&self.adapter, emit_message, raw_input);
         emit_fail_closed_response(&self.adapter, &output_json, exit_code);
         exit_code
     }
@@ -493,6 +522,122 @@ mod tests {
     fn make_service() -> HookService {
         let config = Config::default();
         HookService::new(config, Format::Claude, false)
+    }
+
+    // === フェイルクローズ応答のストリーム選択 ===
+
+    #[test]
+    fn test_fail_closed_block_uses_stderr_for_claude_and_windsurf() {
+        // Claude / Windsurf は exit 2 のとき stdout の JSON を読まず stderr 本文を
+        // 理由として扱うため、実際にブロックするときだけ stderr を使う。
+        for format in [Format::Claude, Format::Windsurf] {
+            let adapter = FormatAdapter::new(format, 0);
+            assert!(
+                fail_closed_uses_stderr(&adapter, 2),
+                "{:?}: ブロック時のエラー本文は stderr へ",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn test_fail_closed_stop_allow_stays_on_stdout() {
+        // Stop 系のフェイルクローズは無限ループ回避で「停止許可 + exit 0」に倒れる。
+        // これは判定 JSON であってエラー本文ではないので stdout に出さないと、
+        // エージェントから見て stdout が空（= 判定なし）のままになる。
+        for format in [
+            Format::Claude,
+            Format::Windsurf,
+            Format::Cursor,
+            Format::Codex,
+            Format::Agy,
+            Format::Grok,
+        ] {
+            let adapter = FormatAdapter::new(format, 0);
+            assert!(
+                !fail_closed_uses_stderr(&adapter, 0),
+                "{:?}: exit 0 の判定 JSON は stdout へ",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn test_fail_closed_block_stays_on_stdout_for_json_formats() {
+        // Cursor / Codex / Antigravity / Grok は判定を stdout の JSON で伝える。
+        for format in [Format::Cursor, Format::Codex, Format::Agy, Format::Grok] {
+            let adapter = FormatAdapter::new(format, 0);
+            assert!(
+                !fail_closed_uses_stderr(&adapter, 2),
+                "{:?}: 判定 JSON は stdout へ",
+                format
+            );
+        }
+    }
+
+    // === フェイルクローズ応答と `--event` の明示指定 ===
+
+    #[test]
+    fn test_fail_closed_response_honors_event_override_for_agy_stop() {
+        // Antigravity は入力にイベント名フィールドが無く、Stop の `decision` 語彙に
+        // `deny` は存在しない。`--event` を落とすと停止許可の代わりに未定義の応答を返す。
+        let adapter =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("Stop".to_string()));
+        // 空入力はペイロードを読めない状況（stdin 読み取り失敗・設定エラー）を模す。
+        let (output, exit_code) = fail_closed_response(&adapter, "boom", "");
+        assert_eq!(output, r#"{"decision":"stop"}"#);
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_fail_closed_response_honors_event_override_for_agy_post_tool_use() {
+        // PostToolUse の出力は公式仕様で `{}` 固定。deny を返すと契約違反になる。
+        let adapter =
+            FormatAdapter::new(Format::Agy, 0).with_event_override(Some("PostToolUse".to_string()));
+        let (output, exit_code) = fail_closed_response(&adapter, "boom", "");
+        assert_eq!(output, "{}");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_fail_closed_response_keeps_blocking_pre_tool_use() {
+        // 実行前ゲートはイベントが判別できてもできなくてもブロックを維持する
+        // （`--event` 指定あり / ペイロード形状からの推定 / 判別不能の 3 通り）。
+        let cases = [
+            (Some("PreToolUse".to_string()), ""),
+            (None, r#"{"stepIdx":1,"toolCall":{"name":"run_command"}}"#),
+            (None, ""),
+        ];
+        for (event, raw_input) in cases {
+            let adapter = FormatAdapter::new(Format::Agy, 0).with_event_override(event.clone());
+            let (output, _) = fail_closed_response(&adapter, "boom", raw_input);
+            assert!(
+                output.contains(r#""decision":"deny""#),
+                "event={:?} input={:?} ではブロックを維持すること: {}",
+                event,
+                raw_input,
+                output
+            );
+        }
+    }
+
+    #[test]
+    fn test_fail_closed_response_blocks_pre_tool_use_on_claude() {
+        // ペイロードにイベント名を持つフォーマットは、空入力なら従来どおり
+        // 汎用のブロック（exit 2 + stderr 本文）へフォールバックする。
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let (output, exit_code) = fail_closed_response(&adapter, "boom", "");
+        assert!(output.contains("fail-closed"), "{}", output);
+        assert_eq!(exit_code, 2);
+
+        // Stop と判別できれば停止許可（exit 0）に倒れる。
+        let (output, exit_code) = fail_closed_response(
+            &adapter,
+            "boom",
+            r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+        );
+        assert_eq!(output, "{}");
+        assert_eq!(exit_code, 0);
     }
 
     #[test]

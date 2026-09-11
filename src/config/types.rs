@@ -34,6 +34,8 @@ fn default_output_max_length() -> usize {
 /// 5. `config/validation.rs`（値域チェックが必要な場合）
 /// 6. `config/service.rs` のデフォルト設定テンプレートと README（ユーザ向け文書）
 /// 7. `merge_project` / デシリアライズのテスト
+/// 8. `config/service.rs` の `KNOWN_GLOBAL_KEYS` / `KNOWN_PROJECT_KEYS`
+///    （未知キー警告の対象外にする。漏れると新しいキーが「タイポ」として警告される）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -86,6 +88,14 @@ pub struct Config {
     /// 0 の場合は無制限。
     #[serde(default = "default_output_max_length")]
     pub output_max_length: usize,
+
+    /// 読み込み時に記録した警告（無視したプロジェクト設定・未知のトップレベルキー）。
+    ///
+    /// 設定ファイルからは読まない（`ConfigService` と `merge_project` が埋める）。
+    /// 無言で無視すると「書いたのに効かない」理由が利用者から見えなくなるため、
+    /// `claw-hooks check` が stderr に、フック実行時はログに出す。
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 impl Default for Config {
@@ -105,6 +115,7 @@ impl Default for Config {
             nano_buddy: false,
             hook_timeout: default_hook_timeout(),
             output_max_length: default_output_max_length(),
+            warnings: Vec::new(),
         }
     }
 }

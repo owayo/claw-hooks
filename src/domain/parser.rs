@@ -932,6 +932,28 @@ impl ShellParser {
                     self.extract_commands_from_node(child, source, commands, depth + 1);
                 }
             }
+            "redirected_statement" => {
+                // `bash <<EOF ... EOF` では heredoc のリダイレクトが command ノードでは
+                // なくこの文ノードの子に付く。body 側がシェル相当なら、流し込まれる
+                // スクリプトは実際に実行されるので再解析する。
+                // `cat <<EOF ... EOF` のようにシェル以外へ流す場合は単なるテキストなので
+                // 対象外（再解析すると本文中の単語を実行コマンドと誤検出する）。
+                let mut body_command_name = None;
+                for child in node.children(&mut node.walk()) {
+                    if matches!(child.kind(), "command" | "simple_command") {
+                        body_command_name = self.get_command_name(child, source);
+                        break;
+                    }
+                }
+                if body_command_name
+                    .is_some_and(|name| SHELL_COMMANDS.contains(&command_key(&name).as_str()))
+                {
+                    self.extract_heredoc_scripts(node, source, commands);
+                }
+                for child in node.children(&mut node.walk()) {
+                    self.extract_commands_from_node(child, source, commands, depth + 1);
+                }
+            }
             _ => {
                 // 子ノードを再帰走査する。
                 for child in node.children(&mut node.walk()) {
@@ -5012,5 +5034,133 @@ mod tests {
                 "{cmd}: リダイレクトを危険コマンドと誤検出した: {cmds:?}"
             );
         }
+    }
+
+    // === 実行委譲経路のフェイルオープン回帰テスト ===
+    //
+    // 以下はいずれも「シェルが確実に実行するのに claw-hooks が検出できず素通しする」
+    // 形で見つかったもの。AST 経路とフォールバック経路の双方で塞ぐ必要がある
+    // （過去に片方だけ直っていた実績があるため）。
+
+    /// tree-sitter-bash の引数ノード種別を網羅しないと、引数が配列から丸ごと脱落して
+    /// (1) 中身が消える (2) 位置がズレて値取得フラグが実コマンドを食う、の 2 通りで
+    /// 検出漏れになる。
+    #[test]
+    fn test_expansion_argument_nodes_do_not_hide_dangerous_command() {
+        for cmd in [
+            // ansi_c_string: `-c` の次の要素が消えてシェル再評価が走らなくなっていた
+            "bash -c $'rm -rf /tmp/x'",
+            "eval $'rm -rf /tmp/x'",
+            // command_substitution / arithmetic_expansion: 1 語詰まって `-u` が rm を食う
+            "sudo -u $(id -un) rm -rf /tmp/x",
+            "sudo -u `id -un` rm -rf /tmp/x",
+            "nice -n $((5)) rm -rf /tmp/x",
+            "strace -o $(mktemp) rm -rf /tmp/x",
+            "xargs -n $(echo 1) rm -rf /tmp/x",
+        ] {
+            assert!(rm_blocked(cmd), "{cmd}: 展開を含む引数で rm を取りこぼした");
+        }
+    }
+
+    /// 展開トークンはコマンド名に確定できない。確定させると後ろの実コマンドを見失う。
+    #[test]
+    fn test_expansion_token_is_not_treated_as_command_name() {
+        for cmd in [
+            "timeout $((5)) rm -rf /tmp/x",
+            "sudo $((1)) rm -rf /tmp/x",
+            "ionice -c $((2)) rm -rf /tmp/x",
+        ] {
+            assert!(
+                rm_blocked(cmd),
+                "{cmd}: 展開トークンの後ろの rm を取りこぼした"
+            );
+        }
+    }
+
+    /// `coproc` は後続をコマンドとして非同期実行する予約語（`time` と同種）。
+    #[test]
+    fn test_coproc_wrapper_is_expanded() {
+        assert!(rm_blocked("coproc rm -rf /tmp/x"));
+    }
+
+    /// `trap` に登録した文字列はシグナル受信時にシェルが再評価する（`eval` と同じ）。
+    #[test]
+    fn test_trap_handler_string_is_reevaluated() {
+        assert!(rm_blocked(r#"trap "rm -rf /tmp/x" EXIT"#));
+        assert!(rm_blocked("trap 'rm -rf /tmp/x' INT"));
+        // ハンドラ解除 (`-`) と無視 (`''`) はコマンドを実行しない。
+        assert!(!rm_blocked("trap - EXIT"));
+        assert!(!rm_blocked("trap '' EXIT"));
+        assert!(!rm_blocked("trap 'echo done' EXIT"));
+    }
+
+    /// macOS の `script` は `-t` が値を取り `-F` はブーリアン。逆に登録していると
+    /// leading positional の消費と噛み合って実コマンドが消える。
+    #[test]
+    fn test_script_wrapper_flag_table_matches_macos() {
+        for cmd in [
+            "script -t 0 /dev/null rm -rf /tmp/x",
+            "script -F /tmp/p rm -rf /tmp/x",
+            "script -q /tmp/out rm -rf /tmp/x",
+        ] {
+            assert!(rm_blocked(cmd), "{cmd}: script 配下の rm を取りこぼした");
+        }
+        assert!(!rm_blocked("script -q /tmp/out echo hi"));
+    }
+
+    /// POSIX ではリダイレクトをコマンド語の前に置ける。読み飛ばさないと演算子自体を
+    /// コマンド名と誤認して後続の実コマンドを取りこぼす。
+    #[test]
+    fn test_leading_redirection_does_not_hide_command() {
+        for cmd in [
+            "> /tmp/f rm -rf /tmp/x",
+            ">/tmp/f rm -rf /tmp/x",
+            "2>&1 rm -rf /tmp/x",
+            ">&2 rm -rf /tmp/x",
+        ] {
+            assert!(
+                rm_blocked(cmd),
+                "{cmd}: リダイレクト前置で rm を取りこぼした"
+            );
+        }
+        // 通常のリダイレクトを誤検出しないこと。
+        for cmd in ["echo hi > /tmp/f", "ls -la 2>&1", "cat < /tmp/f"] {
+            assert!(!rm_blocked(cmd), "{cmd}: リダイレクトを誤検出した");
+        }
+    }
+
+    /// fd 複製 (`2>&1`) の `&` をバックグラウンド実行の `&` と取り違えて分割すると、
+    /// `2>` と `1 rm -rf /` に割れて `1` をコマンド名と誤認する。
+    #[test]
+    fn test_fd_duplication_is_not_split_as_background() {
+        assert!(rm_blocked("2>&1 rm -rf /tmp/x"));
+        // 単独の `&`（バックグラウンド実行）の分割は従来どおり効くこと。
+        assert!(rm_blocked("echo ok & rm -rf /tmp/x"));
+        assert!(!rm_blocked("sleep 1 &"));
+    }
+
+    /// シェルへ here-string / heredoc で流し込んだスクリプトは実際に実行される。
+    /// リダイレクトなので引数ノードには現れず、専用に拾う必要がある。
+    #[test]
+    fn test_heredoc_and_herestring_scripts_are_parsed() {
+        assert!(rm_blocked(r#"bash <<< "rm -rf /tmp/x""#));
+        assert!(rm_blocked(r#"bash -s <<< "rm -rf /tmp/x""#));
+        assert!(rm_blocked("bash <<EOF\nrm -rf /tmp/x\nEOF"));
+        assert!(!rm_blocked(r#"bash <<< "echo hi""#));
+    }
+
+    /// コマンド置換の内側の空白で語が割れると、値を取るフラグが展開の途中を値として
+    /// 食い、後ろの実コマンドがコマンド名の位置からずれる（フォールバック経路）。
+    #[test]
+    fn test_tokenizer_keeps_command_substitution_as_one_token() {
+        let tokens = parse_shell_tokens("env -u $(echo FOO) rm -rf /tmp/x");
+        assert_eq!(
+            tokens,
+            vec!["env", "-u", "$(echo FOO)", "rm", "-rf", "/tmp/x"]
+        );
+        let tokens = parse_shell_tokens("nice -n $((5)) rm");
+        assert_eq!(tokens, vec!["nice", "-n", "$((5))", "rm"]);
+        let tokens = parse_shell_tokens("sudo -u `id -un` rm");
+        assert_eq!(tokens, vec!["sudo", "-u", "`id -un`", "rm"]);
     }
 }

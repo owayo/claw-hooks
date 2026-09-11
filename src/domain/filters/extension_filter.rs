@@ -239,7 +239,7 @@ impl ExtensionHookFilter {
             .map_err(|e| format!("Failed to execute hook: {}", e))?;
         // タイムアウト本文はエージェントへ返るので、プログラム名だけを渡す
         // （stop_filter 側と同じ扱い）。
-        let result = run_with_timeout(child, self.timeout_secs, display_label);
+        let result = run_with_timeout(child, self.timeout_secs, &display_label);
         let elapsed = start.elapsed();
         // 完了ログには展開済みコマンド全文（ファイルパスを含む）を残さず、
         // プログラム名と所要時間のサマリのみを記録する（機密非永続化方針）。

@@ -6678,4 +6678,145 @@ mod tests {
         assert_eq!(Format::Grok.label(), "Grok CLI");
         assert_eq!(Format::Grok.emoji(), "🤖");
     }
+
+    // === 過剰検証 / 形状判定の回帰テスト ===
+
+    /// 公式仕様の PreToolUse は `EndConversation` 以外の全ツール名にマッチする。
+    /// MCP ツールや引数を持たない組み込みツールは `tool_input` を送らないため、
+    /// ツール種別の判定より前に必須化すると無関係なツールを誤ブロックする
+    /// （Claude の PreToolUse で exit 2 = deny）。
+    #[test]
+    fn test_claude_tool_input_is_required_only_for_inspected_tools() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        // claw-hooks が中身を見ないツールは tool_input 欠落を許容する。
+        for tool in ["AskUserQuestion", "mcp__memory__list", "ExitPlanMode"] {
+            let input = format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"{}"}}"#,
+                tool
+            );
+            let parsed = adapter
+                .parse_input(&input)
+                .unwrap_or_else(|e| panic!("{tool} で誤ブロック: {e}"));
+            assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        }
+        // 検査対象のツールは従来どおりフェイルクローズする。
+        for tool in ["Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            let input = format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"{}"}}"#,
+                tool
+            );
+            assert!(
+                adapter.parse_input(&input).is_err(),
+                "{tool} は tool_input を必須にすべき"
+            );
+        }
+    }
+
+    /// Cursor の `stop` の `status` は claw-hooks が判定に使わない。必須化すると
+    /// フィールド 1 つの欠落で全 stop hook がエラー表示なしに沈黙する
+    /// （stop 系のパースエラーは `{}` + exit 0 に倒れるため）。
+    #[test]
+    fn test_cursor_stop_status_is_optional() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let parsed = adapter
+            .parse_input(r#"{"hook_event_name":"stop","loop_count":0}"#)
+            .expect("status 欠落で stop hook を止めてはいけない");
+        assert_eq!(parsed.event, HookEvent::Stop);
+        // loop_count は判定に使うので従来どおり読み取れること。
+        let crate::domain::ToolInput::Stop(stop) = parsed.tool_input else {
+            panic!("Stop 入力にマップされていない");
+        };
+        assert_eq!(stop.loop_count, Some(0));
+        assert_eq!(stop.status, None);
+    }
+
+    /// Cursor の `preToolUse` は「全ツール種別に発火する汎用フック」で、
+    /// ツール名の列挙も非網羅（"Values include ..."）。名前の等値判定に頼ると
+    /// シェル実行ツールが改称・追加された瞬間にコマンドブロックが素通しになる。
+    #[test]
+    fn test_cursor_pre_tool_use_dispatches_on_shape_not_name() {
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        // 未知の名前でもコマンドを持てば検査対象。
+        let parsed = adapter
+            .parse_input(
+                r#"{"hook_event_name":"preToolUse","tool_name":"Terminal","tool_input":{"command":"rm -rf /tmp/x"}}"#,
+            )
+            .unwrap();
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        assert_eq!(parsed.tool_name, "Bash");
+        // コマンドを持たないツールはパススルー（誤 deny を返さない）。
+        let parsed = adapter
+            .parse_input(
+                r#"{"hook_event_name":"preToolUse","tool_name":"Read","tool_input":{"path":"/tmp/a"}}"#,
+            )
+            .unwrap();
+        assert_eq!(parsed.event, HookEvent::Passthrough);
+    }
+
+    /// Grok の `.ipynb` 編集はパスのキーが `notebook_path` になる。拾わないと
+    /// ノートブック編集の formatter/linter が無言でスキップされる。
+    #[test]
+    fn test_grok_post_tool_use_reads_notebook_path() {
+        let adapter = FormatAdapter::new(Format::Grok, 0);
+        for key in ["file_path", "filePath", "notebook_path", "notebookPath"] {
+            let input = format!(
+                r#"{{"hookEventName":"PostToolUse","toolName":"Edit","toolInput":{{"{}":"/tmp/a.ipynb"}}}}"#,
+                key
+            );
+            let parsed = adapter.parse_input(&input).unwrap();
+            assert_eq!(
+                parsed.event,
+                HookEvent::AfterFileEdit,
+                "{key} を保存後フックの対象にできていない"
+            );
+        }
+    }
+
+    /// Antigravity の `manage_task` は `Action: "send_input"` のとき `Input` が
+    /// 実行中プロセスの標準入力へ送られる。`run_command` を RunPersistent で起動して
+    /// 永続シェルを作れば、以降は CommandLine を一度も通らずにコマンドを流し込める。
+    #[test]
+    fn test_agy_manage_task_send_input_is_inspected() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let parsed = adapter
+            .parse_input(
+                r#"{"toolCall":{"name":"manage_task","args":{"Action":"send_input","TaskId":"t1","Input":"rm -rf /tmp/x"}},"stepIdx":3}"#,
+            )
+            .unwrap();
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        assert_eq!(parsed.tool_name, "Bash");
+        // send_input 以外（list / status / kill）はタスク管理操作なので対象外。
+        for action in ["list", "status", "kill"] {
+            let input = format!(
+                r#"{{"toolCall":{{"name":"manage_task","args":{{"Action":"{}","TaskId":"t1"}}}},"stepIdx":3}}"#,
+                action
+            );
+            let parsed = adapter.parse_input(&input).unwrap();
+            assert!(
+                !matches!(parsed.tool_input, crate::domain::ToolInput::Bash(_)),
+                "{action} をコマンドとして検査してはいけない"
+            );
+        }
+    }
+
+    /// Antigravity はイベント名フィールドを持たないため、JSON が壊れると
+    /// イベントを判別できず Stop に PreToolUse 用の deny を返していた。
+    /// Stop の decision 語彙に deny は無く、契約上は未定義の応答になる。
+    #[test]
+    fn test_agy_malformed_stop_resolves_to_stop_allow() {
+        let adapter = FormatAdapter::new(Format::Agy, 0);
+        let truncated = r#"{"executionNum":1,"terminationReason":"model_stop","fullyIdle":tr"#;
+        assert_eq!(
+            adapter.format_error_for_input("broken", truncated),
+            r#"{"decision":"stop"}"#
+        );
+        // 壊れた PreToolUse は従来どおりブロックを維持する。
+        let truncated_pre = r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"rm -rf /"#;
+        assert!(
+            adapter
+                .format_error_for_input("broken", truncated_pre)
+                .contains("deny")
+        );
+    }
+
 }

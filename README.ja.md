@@ -8,7 +8,13 @@
   シンプルなTOML設定でClaude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI・Grok CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
 </p>
 
+<h3 align="center">Supported Platforms</h3>
+
 <p align="center">
+  <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&amp;logoColor=black" alt="Linux">
+  <img src="https://img.shields.io/badge/macOS-000000?logo=apple&amp;logoColor=white" alt="macOS">
+  <img src="https://img.shields.io/badge/Windows-0078D6" alt="Windows">
+  <br>
   <a href="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml">
     <img alt="CI" src="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml/badge.svg?branch=main">
   </a>

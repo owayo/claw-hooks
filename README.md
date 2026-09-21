@@ -36,7 +36,7 @@
 ## Features
 
 - 🦀 **Built with Rust** - Low overhead, lightweight single binary, blazing fast (<10ms startup)
-- ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill`, PowerShell's `Stop-Process` and suggests [safe-kill](https://github.com/owayo/safe-kill)
+- ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill`, PowerShell's `Stop-Process` and its `spps` alias, and suggests [safe-kill](https://github.com/owayo/safe-kill)
 - 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell's `Remove-Item` and suggests [safe-rm](https://github.com/owayo/safe-rm)
 - 🪟 **PowerShell Tool Coverage** - The same filters apply to Claude Code's `PowerShell` tool, which is the only shell tool on Windows without Git Bash. Configure the matcher as `Bash|PowerShell`
 - 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
@@ -302,7 +302,11 @@ Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user)
   "version": 1,
   "hooks": {
     "preToolUse": [
-      { "command": "claw-hooks hook --format cursor", "failClosed": true }
+      {
+        "command": "claw-hooks hook --format cursor",
+        "matcher": "Shell|Bash|Terminal|Exec|Run|Command",
+        "failClosed": true
+      }
     ],
     "beforeShellExecution": [
       { "command": "claw-hooks hook --format cursor", "failClosed": true }
@@ -318,6 +322,8 @@ Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user)
 ```
 
 > **`failClosed: true` on the command-blocking hooks is recommended.** Cursor is fail-open by default: a clean block (exit `0` plus `{"permission":"deny", …}` on stdout) works without it, but if claw-hooks itself crashes or times out, Cursor lets the command through unless `failClosed: true` is set. Leave it off for `afterFileEdit`/`stop` (a formatter/lint crash should not block the agent).
+
+> **Keep the matcher on `preToolUse`.** That hook fires for *every* tool, so without a matcher a large `Write` also reaches claw-hooks; once the payload exceeds the 4 MiB stdin limit it can no longer be parsed, and `preToolUse` is a pre-execution gate, so the fail-closed path denies a file write that claw-hooks has no opinion about. Cursor matchers are regular expressions, so the pattern above stays deliberately broad — a false positive is harmless (claw-hooks still passes through anything without `tool_input.command`), and a false negative is covered by `beforeShellExecution`, which is shell-specific by event rather than by tool name.
 
 > **Prefer project hooks when you use stop-time lint.** Cursor runs project hooks (`<project>/.cursor/hooks.json`) from the project root, but user hooks (`~/.cursor/hooks.json`) from `~/.cursor/`. claw-hooks resolves `condition = { file_exists = "Cargo.toml" }`, the `.claw-hooks.toml` lookup, and each hook's own working directory from that directory, so a user-level registration makes every project-type condition fail silently — and a hook without a condition (a `git-sc` auto-commit, say) runs in your Cursor config directory instead of the repository.
 
@@ -465,7 +471,6 @@ Notes:
 - Project hooks only run after the repository is trusted: run `/hooks-trust` once, or start Grok with `--trust`.
 - Grok also loads Claude Code (`.claude/settings.json`) and Cursor (`.cursor/hooks.json`) hook files. If claw-hooks is already registered in one of those, keep a single registration so it does not run twice per event.
 - claw-hooks dispatches on the shape of `toolInput`, never on `toolName`: a `command` field means a shell command, a `file_path` / `filePath` / `notebook_path` / `notebookPath` field means a file edit, and anything else passes through. `toolName` and `toolInput` are both optional for the same reason — they are not what the decision is made from, and requiring them would deny unrelated tool calls (tools without arguments omit `toolInput` entirely).
-- claw-hooks dispatches on the shape of `toolInput`, never on `toolName`: a `command` field means a shell command, a `file_path` / `filePath` / `notebook_path` / `notebookPath` field means a file edit, and anything else passes through. `toolName` and `toolInput` are both optional for the same reason — they are not what the decision is made from, and requiring them would deny unrelated tool calls (tools without arguments omit `toolInput` entirely).
 - `PreToolUse` is Grok's only blocking event. Every other event is a post-hook whose stdout is ignored, so extension hooks still reformat files and Stop hooks still run lint, but their output cannot be reported back to the agent — the same limitation as Windsurf's `post_cascade_response`.
 - Grok is fail-open for anything that is not an explicit deny: a timeout, a crash, or malformed output is recorded as a hook failure and the tool call proceeds. claw-hooks therefore emits the deny JSON **and** exit code `2` when it blocks, and uses exit `2` (never `1`) on its fail-closed paths, so the block holds under either reading of the contract.
 
@@ -489,6 +494,8 @@ dd_block_message = "🚫 dd command blocked for safety."
 # Debug logging
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
+# A leading "~" is expanded to the home directory. A relative path would otherwise be
+# resolved against the hook process's working directory, i.e. the repository being edited.
 # Debug logs record hook event summaries and executable basenames only. Hook arguments,
 # executable directories, file contents, and agent messages are not written.
 
@@ -601,12 +608,12 @@ message = "Use pnpm instead"
 |-------|------|----------|
 | `rm_block`, `kill_block`, `dd_block` | **Enable only** | `true` is honored; `false` is ignored with a warning |
 | `custom_filters` | **Add only** | Project entries are appended; global entries are never removed or replaced |
-| `stop_hooks` | **Rejected** | Would run arbitrary commands when the agent stops |
-| `extension_hooks` | **Rejected** | Would run arbitrary commands on every file edit |
+| `stop_hooks` | **Ignored** | Would run arbitrary commands when the agent stops |
+| `extension_hooks` | **Ignored** | Would run arbitrary commands on every file edit |
 | `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence (none of these weaken a decision) |
 | `debug`, `log_path`, `nano_buddy` | **Global only** | Rejected as an error |
 
-Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped.
+Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks` and `extension_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated as strictly as before.
 
 Validate with `claw-hooks check` — it reports whether a project config was found, whether it's valid, which entries are ignored, and any unknown (mistyped) keys.
 
@@ -854,10 +861,10 @@ Uses the `hook_event_name` field for event detection:
 
 | `hook_event_name` | Required Fields | Internal Mapping |
 |-------------------|-----------------|------------------|
-| `preToolUse` (`Shell` / `Bash` only) | `tool_name`, `tool_input.command` | PreToolUse + Bash |
+| `preToolUse` (any tool) | — (`tool_input.command` selects the command path; without it the event passes through) | PreToolUse + Bash |
 | `beforeShellExecution` | `command` | PreToolUse + Bash |
 | `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
-| `stop` | `status` | Stop |
+| `stop` | — (`loop_count` is read when present) | Stop |
 
 Unsupported Cursor events, including non-shell `preToolUse` tools, pass through as an empty object (`{}`) rather than `{"permission":"allow"}`. Cursor merges hook responses from several sources and a higher-priority `allow` can override another hook's `deny`, so claw-hooks never votes to approve an event it did not inspect (`beforeReadFile`, `beforeMCPExecution`, `beforeTabFileRead`, `sessionStart`, `postToolUse`, …). Allowed commands return `{}` for the same reason.
 
@@ -954,7 +961,7 @@ camelCase schema with an explicit `hookEventName` field:
 | `Stop` | n/a | Stop |
 | `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PostToolUseFailure` / `PermissionDenied` / `StopFailure` / `Notification` / `PreCompact` / `PostCompact` | n/a | pass-through allow |
 
-claw-hooks dispatches on the **shape of `toolInput`, not on `toolName`**. Grok states that it maps Claude tool names such as `Bash` and `Edit` onto its own, but the mapped names are not part of the published spec, so matching by name would let an unanticipated shell tool slip past the command filter. A payload carrying `command` therefore goes to the command filters and one carrying `file_path` / `filePath` goes to the extension hooks; anything else passes through. `toolName` and `toolInput` are still required on tool events — a payload missing either fails closed. Legacy snake_case keys (`hook_event_name`, `session_id`, `tool_name`, `tool_input`) are accepted as well, because Grok also reads Claude Code and Cursor hook files.
+claw-hooks dispatches on the **shape of `toolInput`, not on `toolName`**. Grok states that it maps Claude tool names such as `Bash` and `Edit` onto its own, but the mapped names are not part of the published spec, so matching by name would let an unanticipated shell tool slip past the command filter. A payload carrying `command` therefore goes to the command filters and one carrying `file_path` / `filePath` goes to the extension hooks; anything else passes through. `toolName` and `toolInput` are both **optional** for the same reason: neither is what the decision is made from, so requiring them would deny unrelated tool calls (a tool without arguments omits `toolInput` entirely), and `PreToolUse` is the one path where claw-hooks can hard-block on Grok. Legacy snake_case keys (`hook_event_name`, `session_id`, `tool_name`, `tool_input`) are accepted as well, because Grok also reads Claude Code and Cursor hook files.
 
 Grok's contract is fail-open: exit `0` allows, exit `2` denies, and every other outcome — timeout, crash, malformed stdout — records a failure but lets the tool call proceed. claw-hooks therefore blocks with the deny JSON **and** exit code `2` so the decision holds under either interpretation, and never exits `1` on a fail-closed path. Allowed commands return `{}` rather than an `allow` decision, since `deny` is the only documented `decision` value.
 

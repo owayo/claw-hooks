@@ -36,7 +36,7 @@
 ## 機能
 
 - 🦀 **Rust製** - 低オーバーヘッド、軽量シングルバイナリ、超高速（起動<10ms）
-- ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`, PowerShell の `Stop-Process` をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
+- ⚡ **Killコマンドブロック** - `kill`, `pkill`, `killall`, `taskkill`, PowerShell の `Stop-Process` とそのエイリアス `spps` をブロックし、[safe-kill](https://github.com/owayo/safe-kill)を提案
 - 🗑️ **RMコマンドブロック** - `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell の `Remove-Item` をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - 🪟 **PowerShell ツール対応** - Claude Code の `PowerShell` ツールにも同じフィルターを適用。Git Bash の無い Windows では PowerShell が唯一のシェルツールになる。matcher は `Bash|PowerShell` を指定すること
 - 💾 **DDコマンドブロック** - ディスク上書き事故を防ぐため、オプションで`dd`をブロック
@@ -302,7 +302,11 @@ claw-hooks hook --config /path/to/config.toml
   "version": 1,
   "hooks": {
     "preToolUse": [
-      { "command": "claw-hooks hook --format cursor", "failClosed": true }
+      {
+        "command": "claw-hooks hook --format cursor",
+        "matcher": "Shell|Bash|Terminal|Exec|Run|Command",
+        "failClosed": true
+      }
     ],
     "beforeShellExecution": [
       { "command": "claw-hooks hook --format cursor", "failClosed": true }
@@ -318,6 +322,8 @@ claw-hooks hook --config /path/to/config.toml
 ```
 
 > **コマンドブロック用フックには `failClosed: true` を推奨します。** Cursor は既定でフェイルオープンです。正常なブロック（exit `0` + stdout の `{"permission":"deny", …}`）は `failClosed` なしでも機能しますが、claw-hooks 自体がクラッシュ・タイムアウトした場合、`failClosed: true` を設定していないと Cursor はコマンドを通してしまいます。`afterFileEdit`/`stop` では付けません（フォーマッター/lint のクラッシュでエージェントを止めるべきではないため）。
+
+> **`preToolUse` には matcher を付けたままにしてください。** このフックは*すべての*ツールで発火するため、matcher が無いと巨大な `Write` も claw-hooks に届きます。stdin の 4 MiB 上限を超えるとパースできなくなり、`preToolUse` は実行前ゲートなのでフェイルクローズドの deny になって、claw-hooks が何の意見も持たないファイル書き込みを止めてしまいます。Cursor の matcher は正規表現なので、上の例はあえて広めにしてあります。誤って一致しても無害で（`tool_input.command` を持たない入力は従来どおりパススルーされます）、取りこぼしはツール名ではなくイベント単位でシェルを捉える `beforeShellExecution` が二重に受けます。
 
 > **停止時 lint を使うならプロジェクトフックに置いてください。** Cursor はプロジェクトフック（`<project>/.cursor/hooks.json`）をプロジェクトルートで、ユーザーフック（`~/.cursor/hooks.json`）を `~/.cursor/` で実行します。claw-hooks の `condition = { file_exists = "Cargo.toml" }` による判定、`.claw-hooks.toml` の探索、各フックの作業ディレクトリはいずれもそのディレクトリを基準にするため、ユーザーレベルに登録するとプロジェクト種別の条件が無言で不成立になります。条件なしのフック（`git-sc` の自動コミット等）はリポジトリではなく Cursor の設定ディレクトリで走ります。
 
@@ -488,6 +494,8 @@ dd_block_message = "🚫 dd command blocked for safety."
 # デバッグログ
 debug = false
 # log_path = "~/.config/claw-hooks/logs"  # デフォルト: config.tomlと同じディレクトリ
+# 先頭の "~" はホームディレクトリへ展開されます。展開しない相対パスはフックプロセスの
+# 作業ディレクトリ（= 編集中のリポジトリ）を基準に解決されてしまうためです。
 # デバッグログにはフックイベントの概要と実行ファイルの basename のみを記録します。
 # フックの引数、実行ファイルのディレクトリ、ファイル本文、エージェントメッセージは保存しません
 
@@ -600,12 +608,12 @@ message = "Use pnpm instead"
 |-----------|--------|------|
 | `rm_block`, `kill_block`, `dd_block` | **有効化のみ** | `true` は反映。`false` への上書きは警告を出して無視 |
 | `custom_filters` | **追加のみ** | プロジェクトの定義を追加。グローバルの削除・置換は不可 |
-| `stop_hooks` | **拒否** | エージェント停止時に任意コマンドが走るため |
-| `extension_hooks` | **拒否** | ファイル編集のたびに任意コマンドが走るため |
+| `stop_hooks` | **無視** | エージェント停止時に任意コマンドが走るため |
+| `extension_hooks` | **無視** | ファイル編集のたびに任意コマンドが走るため |
 | `*_block_message`, `hook_timeout`, `output_max_length` | **上書き** | プロジェクトの値が優先（いずれもブロック判定を弱めない） |
 | `debug`, `log_path`, `nano_buddy` | **グローバル専用** | エラーとして拒否 |
 
-省略されたフィールドはグローバルの値を維持します。無視した項目は警告として報告されるため、「設定したのに効かない」状態が見えないまま残ることはありません。
+省略されたフィールドはグローバルの値を維持します。無視した項目は警告として報告されるため、「設定したのに効かない」状態が見えないまま残ることはありません。`stop_hooks` と `extension_hooks` は適用されずに破棄されるため、**内容の検証も行いません**。書式が壊れた項目も正しい項目と同じように無視されるだけで、設定読み込み全体を失敗させることはありません（失敗させると、clone したリポジトリに置かれた 2 行でそのディレクトリの全コマンドが deny になってしまいます）。グローバルの `config.toml` は従来どおり厳密に検証します。
 
 `claw-hooks check` で検証できます — プロジェクト設定の有無と妥当性に加えて、無視される項目と未知の（タイポした）キーを報告します。
 
@@ -853,10 +861,10 @@ Claude の `Stop` では `stop_hook_active` が必須です。欠落または型
 
 | `hook_event_name` | 必須フィールド | 内部マッピング |
 |-------------------|----------------|----------------|
-| `preToolUse`（`Shell` / `Bash` のみ） | `tool_name`, `tool_input.command` | PreToolUse + Bash |
+| `preToolUse`（全ツール） | なし（`tool_input.command` があればコマンド経路、無ければパススルー） | PreToolUse + Bash |
 | `beforeShellExecution` | `command` | PreToolUse + Bash |
 | `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
-| `stop` | `status` | Stop |
+| `stop` | なし（`loop_count` は存在すれば読む） | Stop |
 
 Shell 以外の `preToolUse` を含む未対応の Cursor イベントは、`{"permission":"allow"}` ではなく空オブジェクト（`{}`）として透過されます。Cursor は複数ソースのフック応答をマージし、優先度の高い `allow` が他フックの `deny` を上書きし得るため、claw-hooks は中身を検査していないイベント（`beforeReadFile`、`beforeMCPExecution`、`beforeTabFileRead`、`sessionStart`、`postToolUse` 等）に対して許可を表明しません。許可したコマンドで `{}` を返すのも同じ理由です。
 
@@ -953,7 +961,7 @@ camelCase スキーマで、`hookEventName` フィールドを明示的に持ち
 | `Stop` | n/a | Stop |
 | `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PostToolUseFailure` / `PermissionDenied` / `StopFailure` / `Notification` / `PreCompact` / `PostCompact` | n/a | パススルー allow |
 
-claw-hooks は **`toolName` ではなく `toolInput` の形**で処理を振り分けます。Grok は `Bash` / `Edit` のような Claude のツール名を自前のツール名へマッピングすると明記していますが、マッピング後の名前は公開仕様に列挙されていないため、名前で判定すると想定外の名前のシェル実行ツールがコマンドフィルターを素通りしてしまいます。そこで `command` を持つペイロードはコマンドフィルターへ、`file_path` / `filePath` を持つペイロードは拡張子フックへ回し、それ以外はパススルーします。ツールイベントでは `toolName` と `toolInput` は必須で、どちらかを欠くペイロードはフェイルクローズドになります。Grok は Claude Code / Cursor のフック設定も読み込むため、snake_case のキー（`hook_event_name`、`session_id`、`tool_name`、`tool_input`）も受理します。
+claw-hooks は **`toolName` ではなく `toolInput` の形**で処理を振り分けます。Grok は `Bash` / `Edit` のような Claude のツール名を自前のツール名へマッピングすると明記していますが、マッピング後の名前は公開仕様に列挙されていないため、名前で判定すると想定外の名前のシェル実行ツールがコマンドフィルターを素通りしてしまいます。そこで `command` を持つペイロードはコマンドフィルターへ、`file_path` / `filePath` を持つペイロードは拡張子フックへ回し、それ以外はパススルーします。`toolName` と `toolInput` はどちらも**任意**です。理由は同じで、判定に使わないフィールドを必須化すると無関係なツール呼び出しまで拒否してしまうためです（引数を持たないツールは `toolInput` をキーごと送りません）。Grok では `PreToolUse` が唯一のハードブロック経路なので、ここでの誤 deny は影響が大きくなります。Grok は Claude Code / Cursor のフック設定も読み込むため、snake_case のキー（`hook_event_name`、`session_id`、`tool_name`、`tool_input`）も受理します。
 
 Grok の契約はフェイルオープンです: exit `0` は許可、exit `2` は拒否、それ以外の結末（タイムアウト・クラッシュ・不正な stdout）は失敗として記録されるだけでツール呼び出しは続行されます。そのため claw-hooks はブロック時に deny JSON **と** exit code `2` の両方を返してどちらの解釈でも判定が成立するようにし、フェイルクローズド経路でも exit `1` は使いません。許可時は `allow` 判定ではなく `{}` を返します（公式に文書化された `decision` の値は `deny` のみのため）。
 

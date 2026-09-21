@@ -2195,11 +2195,26 @@ fn test_config_error_still_blocks_dangerous_command() {
         let (stdout, stderr, exit_code) =
             run_hook_with_config_and_format(input, format, &config_path);
 
-        // 設定エラーの詳細は stderr に出し、エージェントへ返す本文には含めない
-        assert!(
-            stderr.contains("configuration error"),
-            "{format}: config error should be reported on stderr: {stderr}"
-        );
+        // 設定エラーの詳細（設定ファイルの絶対パス、TOML エラーが引用する該当行）は
+        // ユーザー向けの診断であってエージェントへ返す本文ではない。
+        // Claude / Windsurf は exit != 0 のとき stderr 本文をそのままブロック理由として
+        // 読むため、その 2 つでは詳細を出さず定型文だけを返す。
+        match format {
+            "claude" | "windsurf" => {
+                assert!(
+                    !stderr.contains("configuration error"),
+                    "{format}: stderr が判定チャネルなので設定の詳細を載せてはいけない: {stderr}"
+                );
+                assert!(
+                    stderr.contains("claw-hooks check"),
+                    "{format}: 確認方法を案内する定型文は返す: {stderr}"
+                );
+            }
+            _ => assert!(
+                stderr.contains("configuration error"),
+                "{format}: config error should be reported on stderr: {stderr}"
+            ),
+        }
 
         let blocked = match format {
             // exit 2 + stderr 本文でブロックを表現するフォーマット

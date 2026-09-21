@@ -185,18 +185,20 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
 
 /// プロジェクトレベルの設定を検証する。
 /// `Some` のフィールドのみ検証（プロジェクト設定で指定されたもの）。
+///
+/// 検証するのは **実際に適用されるフィールドだけ**。`extension_hooks` / `stop_hooks` は
+/// 信頼境界により一切適用されず（`Config::merge_project` を参照。どちらも任意コマンドを
+/// 実行するため、未信頼のプロジェクト設定からは受け付けない）、無視した旨は警告で伝える。
+/// 適用しない値を検証してハードエラーにすると、clone したリポジトリに壊れた 2 行を
+/// 置くだけで設定読み込み全体が失敗し、そのディレクトリでは `ls` のような無関係な
+/// コマンドまでフェイルクローズドで deny になる。正しい記述は黙って無視されるのに
+/// 壊れた記述だけが致命的、という非対称も生む。
 pub fn validate_project(config: &ProjectConfig) -> Result<()> {
     if let Some(timeout_secs) = config.hook_timeout {
         validate_hook_timeout(timeout_secs, "hook_timeout")?;
     }
     if let Some(ref filters) = config.custom_filters {
         validate_custom_filters(filters)?;
-    }
-    if let Some(ref hooks) = config.extension_hooks {
-        validate_extension_hooks(hooks)?;
-    }
-    if let Some(ref hooks) = config.stop_hooks {
-        validate_stop_hooks(hooks)?;
     }
     Ok(())
 }
@@ -689,16 +691,20 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_project_invalid_extension_hooks() {
+    fn test_validate_project_does_not_reject_ignored_extension_hooks() {
+        // プロジェクト設定の `extension_hooks` は適用されない（`merge_project` 参照）。
+        // 適用しない値の書式エラーで設定読み込み全体を落とすと、clone したリポジトリの
+        // 2 行で無関係なコマンドまで deny になるため、ここでは検証しない。
         let pc = ProjectConfig {
             extension_hooks: Some({
                 let mut m = BTreeMap::new();
+                // `.` 始まりでない不正なキー。
                 m.insert("ts".to_string(), vec!["biome check {file}".to_string()]);
                 m
             }),
             ..Default::default()
         };
-        assert!(validate_project(&pc).is_err());
+        assert!(validate_project(&pc).is_ok());
     }
 
     #[test]
@@ -722,9 +728,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_project_invalid_stop_hooks() {
+    fn test_validate_project_does_not_reject_ignored_stop_hooks() {
+        // `extension_hooks` と同じ理由で、適用されない `stop_hooks` も検証しない。
         let pc = ProjectConfig {
             stop_hooks: Some(vec![StopHook {
+                // 空コマンド = 適用されるなら不正な書式。
                 commands: vec!["".to_string()],
                 condition: None,
                 stage: None,
@@ -733,7 +741,7 @@ mod tests {
             }]),
             ..Default::default()
         };
-        assert!(validate_project(&pc).is_err());
+        assert!(validate_project(&pc).is_ok());
     }
 
     #[test]

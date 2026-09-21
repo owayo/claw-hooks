@@ -600,6 +600,26 @@ impl ShellParser {
             }
         }
 
+        // コマンド語の後ろに来たリダイレクトが実コマンドを飲み込む形を補完する
+        // （`env 2>/dev/null rm -rf /` の `rm` は file_redirect の destination に埋もれる）。
+        if let Some(stripped) = Self::redirect_stripped_command(root, command, 0) {
+            for nested in self.extract_commands(&stripped) {
+                Self::push_unique_command(&mut commands, &nested);
+            }
+        }
+
+        // tree-sitter-bash は構文エラーでも `Some(tree)` を返し、壊れた木を渡してくる。
+        // `parse()` が `None` を返す場合しかフォールバックへ落ちない作りだと、
+        // ERROR ノードに化けて消えた部分の危険コマンドを無言で取りこぼす
+        // （`bash 2>/dev/null <<< "rm -rf /"` は herestring_redirect が ERROR になり、
+        // here-string 本文が一切解析されない）。文字列ベースのフォールバックを
+        // 併走させて結果を合算し、fail-open を防ぐ。
+        if root.has_error() {
+            for nested in self.extract_commands_fallback(command) {
+                Self::push_unique_command(&mut commands, &nested);
+            }
+        }
+
         commands
     }
 
@@ -677,6 +697,24 @@ impl ShellParser {
         // 先頭ブレース展開の取りこぼしを補うため、畳んだ文字列も解析する。
         if let Some(expanded) = brace_expanded_command(command) {
             for nested in self.extract_command_strings(&expanded) {
+                if !command_strings.contains(&nested) {
+                    command_strings.push(nested);
+                }
+            }
+        }
+
+        // `extract_commands` と同じく、リダイレクトに飲み込まれたコマンド行を補完する。
+        if let Some(stripped) = Self::redirect_stripped_command(root, command, 0) {
+            for nested in self.extract_command_strings(&stripped) {
+                if !command_strings.contains(&nested) {
+                    command_strings.push(nested);
+                }
+            }
+        }
+
+        // `extract_commands` と同じ理由で、構文エラーを含む木ではフォールバックを併走させる。
+        if root.has_error() {
+            for nested in self.extract_command_strings_fallback(command) {
                 if !command_strings.contains(&nested) {
                     command_strings.push(nested);
                 }
@@ -876,6 +914,104 @@ impl ShellParser {
     }
 
     /// ASTノードを再帰的に走査してコマンドを抽出する
+    /// `file_redirect` が実コマンドを飲み込んでいる場合に、リダイレクト部分だけを
+    /// 取り除いた文字列を返す。
+    ///
+    /// tree-sitter-bash の `file_redirect` は演算子以降の語を**すべて** `destination`
+    /// フィールドとして取り込む。そのためコマンド語の後ろにリダイレクトが来ると、
+    /// 実コマンドがリダイレクトノードに埋もれて `command` ノードの引数からも消える:
+    ///
+    /// ```text
+    /// sudo 2>/dev/null rm -rf /tmp/x
+    ///   redirected_statement
+    ///     body: command [sudo]                    ← 引数ゼロ
+    ///     redirect: file_redirect [2>/dev/null rm -rf /tmp/x]
+    ///       destination: word [/dev/null]
+    ///       destination: word [rm]                ← 実コマンドがここに埋もれる
+    /// ```
+    ///
+    /// 構文エラーではない（`has_error` は立たない）ので [`Node::has_error`] 起点の
+    /// フォールバック併走でも拾えない。2 つ目以降の destination は実際にはコマンド行の
+    /// 続きなので、リダイレクト（演算子 + 最初の destination）を取り除いた文字列を
+    /// 返して呼び出し側に再解析させる。除去のみで長さは必ず減るため再帰は停止する。
+    ///
+    /// リダイレクトがコマンド語より**前**にある形（`> f rm -rf /`）は tree-sitter が
+    /// 正しく command_name を取るため、この補完は不要（`destination` も 1 つだけになる）。
+    #[cfg(feature = "ast-parser")]
+    fn redirect_stripped_command(node: Node, source: &str, depth: usize) -> Option<String> {
+        if depth > MAX_NODE_DEPTH {
+            return None;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "file_redirect" {
+                let mut destination_cursor = child.walk();
+                let mut destinations =
+                    child.children_by_field_name("destination", &mut destination_cursor);
+                // destination が 2 つ以上 = 2 つ目以降はコマンド行の続き。
+                if let (Some(first), Some(_)) = (destinations.next(), destinations.next()) {
+                    let mut stripped = String::with_capacity(source.len());
+                    stripped.push_str(&source[..child.start_byte()]);
+                    stripped.push_str(&source[first.end_byte()..]);
+                    return Some(stripped);
+                }
+            }
+            if let Some(found) = Self::redirect_stripped_command(child, source, depth + 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// ラッパー（sudo / env / nohup / timeout …）を辿った先の実コマンドがシェル相当か。
+    ///
+    /// here-string / heredoc の本文は実際に実行されるため、受け取り側がシェルなら
+    /// 再解析する必要がある。ところが `env bash <<< "rm -rf /"` の `command` ノードの
+    /// コマンド語は `env` で、シェル判定に落ちずに本文が素通ししていた。
+    /// ラッパーを順に剥がして、最終的に起動されるコマンドで判定する。
+    #[cfg(feature = "ast-parser")]
+    fn resolves_to_shell(cmd_name: &str, args: &[String]) -> bool {
+        let mut name = cmd_name.to_string();
+        let mut rest: &[String] = args;
+        // 自己再帰ではなく反復で辿り、長いラッパー連鎖でもスタックを消費しない。
+        for _ in 0..MAX_RECURSION_DEPTH {
+            if SHELL_COMMANDS.contains(&command_key(&name).as_str()) {
+                return true;
+            }
+            if !is_command_wrapper(&name) {
+                return false;
+            }
+            let Some(index) = Self::find_wrapped_command_index(&name, rest) else {
+                return false;
+            };
+            name = rest[index].clone();
+            rest = &rest[index + 1..];
+        }
+        false
+    }
+
+    /// `command` ノードのコマンド語が制御構文キーワードだった場合に、実コマンドへ寄せる。
+    ///
+    /// tree-sitter-bash は `time if true; then rm -rf /; fi` のように `time` が `if` を
+    /// 引数へ飲み込むと文法が崩れ、後続セグメントを `command_name = "then"` の
+    /// `command` ノードとして返す（`has_error` は立たない）。そのままではキーワードを
+    /// コマンド名として扱い、引数に埋もれた実コマンドを取りこぼす。
+    /// フォールバックと同じ [`Self::effective_command_index`] に判断を委ねる。
+    #[cfg(feature = "ast-parser")]
+    fn shift_to_effective_command(name: String, args: Vec<String>) -> (String, Vec<String>) {
+        let mut tokens = Vec::with_capacity(args.len() + 1);
+        tokens.push(name);
+        tokens.extend(args);
+        // 実コマンド位置を特定できないときは先頭のまま（従来挙動）に倒す。
+        let index = Self::effective_command_index(&tokens).unwrap_or(0);
+        let mut rest = tokens.split_off(index);
+        if rest.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let name = rest.remove(0);
+        (name, rest)
+    }
+
     #[cfg(feature = "ast-parser")]
     fn extract_commands_from_node(
         &mut self,
@@ -893,13 +1029,16 @@ impl ShellParser {
         match node.kind() {
             "command" | "simple_command" => {
                 // command_name の子ノードを取得
-                if let Some(cmd_name) = self.get_command_name(node, source) {
+                if let Some(raw_name) = self.get_command_name(node, source) {
+                    // 後続解析のため引数を取得
+                    let raw_args = self.get_command_arguments(node, source);
+                    // コマンド語が制御構文キーワードのときは実コマンドへ寄せる
+                    // （`time if true; then rm …; fi` で `then` が command_name になる）。
+                    let (cmd_name, args) = Self::shift_to_effective_command(raw_name, raw_args);
+
                     if !cmd_name.is_empty() {
                         commands.push(cmd_name.clone());
                     }
-
-                    // 後続解析のため引数を取得
-                    let args = self.get_command_arguments(node, source);
 
                     // ASTレベルでラッパーコマンドを展開（sudo, env, command など）
                     if is_command_wrapper(&cmd_name) {
@@ -915,8 +1054,9 @@ impl ShellParser {
                     // シェルに here-string / heredoc でスクリプトを流し込む形
                     // （`bash <<< "rm -rf /"`、`sh <<EOF ... EOF`）も中身が実行される。
                     // これらはリダイレクトなので引数ノードにも現れず、拾わないと
-                    // 素通しする。シェル相当のコマンドのときだけ再解析する。
-                    if SHELL_COMMANDS.contains(&command_key(&cmd_name).as_str()) {
+                    // 素通しする。`env bash <<< …` のようにラッパー越しでもシェルへ
+                    // 届くため、ラッパーを辿った先のコマンドで判定する。
+                    if Self::resolves_to_shell(&cmd_name, &args) {
                         self.extract_heredoc_scripts(node, source, commands);
                     }
                 }
@@ -938,16 +1078,19 @@ impl ShellParser {
                 // スクリプトは実際に実行されるので再解析する。
                 // `cat <<EOF ... EOF` のようにシェル以外へ流す場合は単なるテキストなので
                 // 対象外（再解析すると本文中の単語を実行コマンドと誤検出する）。
-                let mut body_command_name = None;
+                // `sudo bash <<EOF … EOF` のようにラッパーを挟む形もシェルへ届くため、
+                // body のコマンド語だけでなく引数も見てラッパーを辿る。
+                let mut body = None;
                 for child in node.children(&mut node.walk()) {
                     if matches!(child.kind(), "command" | "simple_command") {
-                        body_command_name = self.get_command_name(child, source);
+                        if let Some(name) = self.get_command_name(child, source) {
+                            let args = self.get_command_arguments(child, source);
+                            body = Some((name, args));
+                        }
                         break;
                     }
                 }
-                if body_command_name
-                    .is_some_and(|name| SHELL_COMMANDS.contains(&command_key(&name).as_str()))
-                {
+                if body.is_some_and(|(name, args)| Self::resolves_to_shell(&name, &args)) {
                     self.extract_heredoc_scripts(node, source, commands);
                 }
                 for child in node.children(&mut node.walk()) {
@@ -1694,26 +1837,31 @@ impl ShellParser {
         let mut i = 0usize;
         let mut timeout_duration_consumed = false;
         let mut taskset_mask_consumed = false;
+        let mut options_ended = false;
         let wrapper_key = command_key(wrapper);
         let mut leading_positionals = Self::wrapper_leading_positionals(&wrapper_key);
 
         while i < args.len() {
             let arg = &args[i];
 
-            if arg == "--" {
-                // `--` はオプション解釈の打ち切りを意味するが、ラッパーが取る
-                // leading positional（`su`/`gosu` のユーザ指定など）は `--` の
-                // 後ろにも残る。これを消費してから実コマンド位置を返さないと、
-                // ユーザ名を実行コマンドと誤認して後続の rm/kill/dd を見落とす
-                // （例: `su -- root rm -rf /` で root をコマンド扱いしてしまう）。
-                // chroot/flock は位置引数が `--` より前に来るため、ここに到達する
-                // 時点で leading_positionals は通常 0 になっている。
+            if !options_ended && arg == "--" {
+                // `--` が打ち切るのは**オプション解釈だけ**で、ラッパーが取る非オプション
+                // オペランドは `--` の後ろにも残る。`su`/`gosu` のユーザ指定に加えて、
+                // `env` の `NAME=VALUE`、`timeout` の DURATION、`taskset` の MASK が
+                // これにあたる。ここで即 return すると `env -- FOO=1 rm -rf /` の
+                // `FOO=1` を実行コマンドと誤認して rm を見落とす（fail-open）。
+                // フラグだけ立てて走査を続け、以降の消費規則に判断を委ねる。
+                options_ended = true;
                 i += 1;
-                while leading_positionals > 0 && i < args.len() {
-                    leading_positionals -= 1;
-                    i += 1;
-                }
-                return (i < args.len()).then_some(i);
+                continue;
+            }
+
+            // リダイレクトはコマンド語ではない。読み飛ばさないと `2>/dev/null` を
+            // 実行コマンドと誤認し（`command_key` は `null` を返す）、そこで走査が
+            // 終わって後続の rm/kill/dd を取りこぼす。
+            if let Some(consumes_target) = Self::redirection_token_target(arg) {
+                i += if consumes_target { 2 } else { 1 };
+                continue;
             }
 
             if wrapper_key == "env" && Self::is_env_assignment_token(arg) {
@@ -1728,7 +1876,8 @@ impl ShellParser {
                 continue;
             }
 
-            if arg.starts_with('-') {
+            // `--` 以降はオプション解釈が終わっているため、`-` 始まりでもコマンド名。
+            if !options_ended && arg.starts_with('-') {
                 // wrapper_key は正規化済みなので、トークンごとの再正規化を避ける key 版を使う。
                 if Self::wrapper_flag_takes_arg_key(&wrapper_key, arg) {
                     i += 2;
@@ -1775,7 +1924,10 @@ impl ShellParser {
                 continue;
             }
 
-            return Some(i);
+            // ブレースグループ `{`・サブシェル `(`・制御構文キーワードはコマンド名では
+            // ない（`time { rm -rf /; }` / `time if true; then rm -rf /; fi`）。
+            // フォールバックと同じ読み飛ばし規則へ委ねて実コマンド位置まで寄せる。
+            return Self::effective_command_index(&args[i..]).map(|offset| i + offset);
         }
 
         None
@@ -1898,11 +2050,26 @@ impl ShellParser {
     /// グループ閉じ `}` / 制御構文の閉じ語（`fi`/`done`/`esac`）のみのトークンは
     /// コマンドを含まないため None を返す。
     fn parse_effective_command(tokens: &[String]) -> Option<(String, Vec<String>)> {
+        let index = Self::effective_command_index(tokens)?;
+        Some((tokens[index].clone(), tokens[index + 1..].to_vec()))
+    }
+
+    /// [`Self::parse_effective_command`] の索引版（実装本体）。
+    ///
+    /// ラッパー配下の走査（[`Self::find_wrapped_command_index`]）からも共有する。
+    /// 読み飛ばし規則が 2 箇所に分かれていると、片方だけが知っている形で検出漏れが
+    /// 起きる（`time { rm -rf /; }` はブレースグループの `{` を、
+    /// `time case x in x) rm -rf /;; esac` は `case` をコマンド名と誤認していた）。
+    fn effective_command_index(tokens: &[String]) -> Option<usize> {
         let mut index = 0usize;
         loop {
-            // 環境変数代入とブレースグループ開き `{` を読み飛ばす。
+            // 環境変数代入、ブレースグループ開き `{`、サブシェル開き `(`、
+            // 関数定義キーワード `function` を読み飛ばす。いずれもコマンド名ではない。
             while index < tokens.len()
-                && (Self::is_env_assignment_token(&tokens[index]) || tokens[index] == "{")
+                && (Self::is_env_assignment_token(&tokens[index])
+                    || tokens[index] == "{"
+                    || tokens[index] == "("
+                    || tokens[index] == "function")
             {
                 index += 1;
             }
@@ -1940,7 +2107,7 @@ impl ShellParser {
                 "for" | "select" => index = Self::loop_body_start(tokens, index)?,
                 // case WORD in: WORD はコマンドではないため読み飛ばす。
                 "case" => index = Self::case_header_end(tokens, index)?,
-                _ => return Some((tokens[index].clone(), tokens[index + 1..].to_vec())),
+                _ => return Some(index),
             }
         }
     }
@@ -5192,5 +5359,122 @@ mod tests {
         assert_eq!(tokens, vec!["nice", "-n", "$((5))", "rm"]);
         let tokens = parse_shell_tokens("sudo -u `id -un` rm");
         assert_eq!(tokens, vec!["sudo", "-u", "`id -un`", "rm"]);
+    }
+
+    // === リダイレクト・制御構文・`--` によるバイパスの回帰テスト ===
+
+    /// コマンド語の後ろに置いたリダイレクトが実コマンドを隠す形。
+    ///
+    /// tree-sitter-bash の `file_redirect` は演算子以降の語をすべて `destination` に
+    /// 取り込むため、`rm` がリダイレクトノードに埋もれて引数からも消えていた。
+    /// フォールバック側では `2>/dev/null` 自体がコマンド名と誤認されていた。
+    #[test]
+    fn test_redirect_after_wrapper_does_not_hide_command() {
+        let mut parser = ShellParser::new();
+        for command in [
+            "env 2>/dev/null rm -f /tmp/x",
+            "command 2>/dev/null rm -f /tmp/x",
+            "nohup 2>/dev/null rm -f /tmp/x",
+            "sudo >/dev/null rm -rf /tmp/x",
+            "eval 2>/dev/null \"rm -f /tmp/x\"",
+            "xargs 2>/dev/null rm",
+            "bash 2>/dev/null -c \"rm -rf /tmp/x\"",
+        ] {
+            assert!(
+                parser.extract_commands(command).contains(&"rm".to_string()),
+                "リダイレクトでコマンドを隠せてはいけない: {command}"
+            );
+        }
+    }
+
+    /// `--` はオプション解釈だけを打ち切り、ラッパーが取る非オプションオペランドは
+    /// その後ろに残る。即座にコマンド位置を返すと最初のオペランドを誤認する。
+    #[test]
+    fn test_option_terminator_still_consumes_wrapper_operands() {
+        let mut parser = ShellParser::new();
+        for command in [
+            "env -- FOO=1 rm -rf /tmp/x",
+            "timeout -- 5 rm -rf /tmp/x",
+            "taskset -- 0x1 rm -rf /tmp/x",
+            // leading positional を取るラッパーは従来どおり。
+            "su -- root rm -rf /tmp/x",
+            "gosu -- root rm -rf /tmp/x",
+        ] {
+            assert!(
+                parser.extract_commands(command).contains(&"rm".to_string()),
+                "`--` の後のオペランドをコマンドと誤認してはいけない: {command}"
+            );
+        }
+    }
+
+    /// ブレースグループ・サブシェル・制御構文はコマンド名ではない。
+    /// `time` がこれらを引数として飲み込むと、読み飛ばさない限り実コマンドを見失う。
+    #[test]
+    fn test_control_structures_under_wrapper_are_traversed() {
+        let mut parser = ShellParser::new();
+        for command in [
+            "time { rm -f /tmp/x ;}",
+            "time ( rm -f /tmp/x )",
+            "time if true; then rm -f /tmp/x; fi",
+            "time for i in 1; do rm -f /tmp/x; done",
+            "time while :; do rm -f /tmp/x; break; done",
+            "time case x in x) rm -f /tmp/x;; esac",
+        ] {
+            assert!(
+                parser.extract_commands(command).contains(&"rm".to_string()),
+                "制御構文の内側のコマンドを取りこぼしてはいけない: {command}"
+            );
+        }
+    }
+
+    /// here-string / heredoc の本文はシェルが実行する。ラッパーを挟んでも同じ。
+    #[test]
+    fn test_heredoc_through_wrapper_is_reparsed() {
+        let mut parser = ShellParser::new();
+        for command in [
+            "env bash <<< \"rm -f /tmp/x\"",
+            "nohup bash <<< \"rm -f /tmp/x\"",
+            "timeout 5 bash <<< \"rm -f /tmp/x\"",
+            // 構文エラーに化けるケース（フォールバック併走で拾う）。
+            "bash 2>/dev/null <<< \"rm -f /tmp/x\"",
+        ] {
+            assert!(
+                parser.extract_commands(command).contains(&"rm".to_string()),
+                "シェルへ流し込まれた本文を再解析すべき: {command}"
+            );
+        }
+    }
+
+    /// 上記の補完で無関係なコマンドを巻き込まないこと。
+    #[test]
+    fn test_redirect_and_control_fixes_do_not_overblock() {
+        let mut parser = ShellParser::new();
+        for command in [
+            "ls > /dev/null",
+            "cat file 2>&1",
+            "grep foo bar 2>/dev/null",
+        ] {
+            assert!(
+                !parser.extract_commands(command).contains(&"rm".to_string()),
+                "無関係なコマンドを rm と誤検出してはいけない: {command}"
+            );
+        }
+    }
+
+    /// シェル以外へ流す heredoc の本文は実行されない単なるテキスト。
+    ///
+    /// AST 経路限定のテスト。フォールバックパーサは改行をコマンド区切りとして
+    /// 扱うため本文を別コマンドとして拾うが、これは過剰検出（fail-closed 方向）
+    /// であり安全側の既知の挙動。
+    #[cfg(feature = "ast-parser")]
+    #[test]
+    fn test_non_shell_heredoc_body_is_not_detected() {
+        let mut parser = ShellParser::new();
+        assert!(
+            !parser
+                .extract_commands("cat <<EOF\nrm -rf /\nEOF")
+                .contains(&"rm".to_string()),
+            "シェル以外への heredoc 本文を実行コマンドと誤検出してはいけない"
+        );
     }
 }

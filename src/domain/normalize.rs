@@ -743,17 +743,42 @@ fn collapse_repeated_chars_outside_source_body(line: &str) -> String {
 fn collapse_repeated_chars(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
+    // ここまでに積んだ文字が空白だけか（= この位置が実質的な行頭か）。
+    // 行単位で呼ばれるため改行をまたぐ考慮は不要。
+    let mut leading_whitespace_only = true;
     while let Some(c) = chars.next() {
+        let at_line_start = leading_whitespace_only;
+        let prev_is_alphanumeric = result
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
         result.push(c);
+        if !c.is_whitespace() {
+            leading_whitespace_only = false;
+        }
         if is_decorative_char(c) {
             let mut count = 1u32;
             while chars.peek() == Some(&c) {
                 chars.next();
                 count += 1;
             }
-            let should_collapse = count >= 4
+            // 4 連以上の `_` 圧縮は rustc/clippy のマルチライン span 下線
+            // （`| |_______^`）が目的。英数字に隣接する `_` 連は `MY____CONST` の
+            // ような実在の識別子なので圧縮してはならない。行番号を持たない
+            // フォーマッタの diff 行（`-const MY____CONST: u32 = 1;`）は
+            // `collapse_repeated_chars_outside_source_body` の保護対象外なので、
+            // ここで判定しないとエージェントが存在しない識別子を前提に修正を書く。
+            let underscore_in_identifier = c == '_'
+                && (prev_is_alphanumeric || chars.peek().is_some_and(|n| n.is_alphanumeric()));
+            // `-->` → `->` は rustc/clippy の位置マーカー圧縮が目的で、これは
+            // 行頭（インデントを除く）にしか現れない。位置を問わずに当てると、
+            // diff 行に含まれるソースコードの `<!-- note -->` を `<!-- note ->` に
+            // 壊す。4 連以上（`text ---->`）は下の一般ルールが引き続き圧縮する。
+            let location_marker =
+                c == '-' && count >= 2 && at_line_start && chars.peek() == Some(&'>');
+            let should_collapse = (count >= 4 && !underscore_in_identifier)
                 || (c == '.' && count >= 3 && chars.peek().is_none())
-                || (c == '-' && count >= 2 && chars.peek() == Some(&'>'));
+                || location_marker;
             if !should_collapse {
                 for _ in 1..count {
                     result.push(c);
@@ -1587,6 +1612,51 @@ mod tests {
         assert_eq!(
             collapse_repeated_chars_outside_source_body("| |_______^"),
             "| |_^"
+        );
+    }
+
+    #[test]
+    fn test_collapse_repeated_chars_preserves_unnumbered_diff_source() {
+        // rustfmt --check / ruff format --diff / cargo fmt --check が出す unified diff は
+        // 行番号を持たないため `source_line_body_offset` の保護対象外になる。
+        // ここでコードを書き換えると、エージェントが存在しない識別子や構文的に
+        // 壊れた断片を根拠に修正を書いてしまう。
+        assert_eq!(
+            collapse_repeated_chars("-const MY____CONST: u32=1;"),
+            "-const MY____CONST: u32=1;"
+        );
+        assert_eq!(
+            collapse_repeated_chars("+const MY____CONST: u32 = 1;"),
+            "+const MY____CONST: u32 = 1;"
+        );
+        assert_eq!(
+            collapse_repeated_chars(" // tag <!-- note --> end"),
+            " // tag <!-- note --> end"
+        );
+        // 行頭（インデントのみ先行）の位置マーカーは従来どおり圧縮する。
+        assert_eq!(
+            collapse_repeated_chars("  --> src/main.rs:10:5"),
+            "  -> src/main.rs:10:5"
+        );
+        // 英数字に隣接しない `_` の連続は span 下線なので従来どおり圧縮する。
+        assert_eq!(collapse_repeated_chars("| |_______^"), "| |_^");
+    }
+
+    #[test]
+    fn test_normalize_preserves_formatter_diff_source_code() {
+        // E2E: `cargo fmt --check` の diff 出力を通しても識別子・コメントが壊れない。
+        let input = "Diff in /tmp/a.rs:1:\n\
+                     -const MY____CONST: u32=1;\n\
+                     +const MY____CONST: u32 = 1;\n\
+                     // tag <!-- note --> end\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("MY____CONST"),
+            "識別子を書き換えてはいけない: {result}"
+        );
+        assert!(
+            result.contains("<!-- note -->"),
+            "コメント終端を壊してはいけない: {result}"
         );
     }
 

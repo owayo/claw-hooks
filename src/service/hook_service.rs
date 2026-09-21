@@ -151,10 +151,6 @@ impl HookService {
         event: Option<String>,
         error: &anyhow::Error,
     ) -> i32 {
-        // 設定内容そのもの（パスやフィルター定義）はエージェントへ返す本文に含めない。
-        // 診断の詳細は stderr に出し、ユーザーが `claw-hooks check` で確認できるようにする。
-        warn_fail_closed_diagnostic(&format!("claw-hooks configuration error: {:#}", error));
-
         let adapter = FormatAdapter::new(format, 0).with_event_override(event);
         let message = "claw-hooks configuration is invalid. Run `claw-hooks check`.";
 
@@ -176,6 +172,15 @@ impl HookService {
         }
 
         let (output, exit_code) = fail_closed_response(&adapter, message, &raw_input);
+        // 設定内容そのもの（設定ファイルの絶対パス、TOML エラーが引用する該当行）は
+        // エージェントへ返す本文に含めない。ところが Claude / Windsurf は exit != 0 のとき
+        // **stderr 本文をそのままブロック理由として読む**ため、stderr が判定チャネルに
+        // なる場合は詳細を出すと露出してしまう（`fail_closed_uses_stderr` が表す契約）。
+        // その場合は定型文だけを返し、詳細は本文が案内する `claw-hooks check` で
+        // ユーザー自身が確認する。
+        if !fail_closed_uses_stderr(&adapter, exit_code) {
+            warn_fail_closed_diagnostic(&format!("claw-hooks configuration error: {:#}", error));
+        }
         emit_fail_closed_response(&adapter, &output, exit_code);
 
         exit_code
@@ -200,7 +205,6 @@ impl HookService {
         event: Option<String>,
         error: &anyhow::Error,
     ) -> i32 {
-        warn_fail_closed_diagnostic(&format!("claw-hooks internal error: {:#}", error));
         if trace {
             eprintln!("🔍 [TRACE] Runtime error fail-closed: {:#}", error);
         }
@@ -208,6 +212,11 @@ impl HookService {
         let adapter = FormatAdapter::new(format, 0).with_event_override(event);
         let (output, exit_code) =
             fail_closed_response(&adapter, "claw-hooks encountered an internal error", "");
+        // `emit_config_error` と同じ理由で、stderr が判定チャネルになる場合は
+        // 内部エラーの詳細をエージェントへ流さない。
+        if !fail_closed_uses_stderr(&adapter, exit_code) {
+            warn_fail_closed_diagnostic(&format!("claw-hooks internal error: {:#}", error));
+        }
         emit_fail_closed_response(&adapter, &output, exit_code);
 
         exit_code

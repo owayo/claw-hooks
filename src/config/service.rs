@@ -58,6 +58,21 @@ const KNOWN_PROJECT_KEYS: &[&str] = &[
 pub struct ConfigService;
 
 impl ConfigService {
+    /// 先頭の `~` をホームディレクトリへ展開する。
+    ///
+    /// 展開するのは単独の `~`（`~/...` を含む）だけ。`~user/...` は対象ユーザーの
+    /// ホームを解決できないため、そのまま返して利用者の記述を書き換えない。
+    /// ホームディレクトリが取得できない環境でも同様にそのまま返す。
+    fn expand_home(path: &Path) -> PathBuf {
+        let Ok(rest) = path.strip_prefix("~") else {
+            return path.to_path_buf();
+        };
+        match dirs::home_dir() {
+            Some(home) => home.join(rest),
+            None => path.to_path_buf(),
+        }
+    }
+
     /// デフォルトの設定ファイルパスを取得。
     /// クロスプラットフォームの一貫性のため常に ~/.config/claw-hooks/config.toml を使用。
     pub fn default_path() -> PathBuf {
@@ -98,6 +113,14 @@ impl ConfigService {
         let general_default = default_log_path_for_config_dir(None);
         if config.log_path == general_default {
             config.log_path = default_log_path_for_config_dir(config_dir);
+        } else {
+            // TOML の `~` はただのディレクトリ名で、シェルのようには展開されない。
+            // 既定の設定ファイルが `log_path = "~/.config/claw-hooks/logs"` を例示して
+            // いるため、展開しないとフックプロセスの cwd（= エージェントが作業中の
+            // リポジトリ）の直下に `~` という名前のディレクトリが実際に作られる。
+            // stop hook で git の自動コミットを併用していると、フックイベントの
+            // ログごとユーザーのリポジトリへ取り込まれてしまう。
+            config.log_path = Self::expand_home(&config.log_path);
         }
 
         // 未知のトップレベルキー（タイポ）を警告として記録する。
@@ -694,23 +717,38 @@ commands = ["echo project"]
     }
 
     #[test]
-    fn test_load_project_config_validates_extension_hooks_missing_placeholder() {
-        // {file} プレースホルダーなしの拡張子フック → バリデーションエラー
+    fn test_load_project_config_ignores_broken_extension_hooks_without_error() {
+        // `extension_hooks` はプロジェクト設定からは適用されない（ファイル編集のたびに
+        // 任意コマンドが走るため、未信頼の設定には許さない）。適用しない値の書式を
+        // 検証してエラーにすると、clone したリポジトリに壊れた 2 行を置くだけで
+        // 設定読み込み全体が失敗し、そのディレクトリでは無関係なコマンドまで
+        // フェイルクローズドで deny になる。
         let dir = tempfile::TempDir::new().unwrap();
         let project_path = dir.path().join(".claw-hooks.toml");
+        // `{file}` プレースホルダーが無い = 適用されるなら不正な書式。
         fs::write(
             &project_path,
             "[extension_hooks]\n\".rs\" = [\"rustfmt\"]\n",
         )
         .unwrap();
 
-        let err = ConfigService::load_project_config(&project_path).unwrap_err();
-        let err_msg = format!("{:#}", err);
-        let placeholder = "{file}";
+        let project = ConfigService::load_project_config(&project_path)
+            .expect("適用されない設定の書式エラーで読み込みを止めてはいけない");
+
+        // 受理はするが適用せず、無視した理由を警告に残す。
+        let mut config = Config::default();
+        config.merge_project(&project);
         assert!(
-            err_msg.contains(placeholder),
-            "エラーメッセージにplaceholder関連の記述がない: {}",
-            err_msg
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("extension_hooks") && w.contains("ignored")),
+            "無視した理由を警告に残すべき: {:?}",
+            config.warnings
+        );
+        assert!(
+            config.extension_hooks.is_empty(),
+            "プロジェクト設定の拡張子フックを適用してはいけない"
         );
     }
 
@@ -912,8 +950,9 @@ message = "project: use pnpm"
     }
 
     #[test]
-    fn test_load_project_config_validates_extension_key_prefix() {
-        // 拡張子キーは '.' で始まる必要がある
+    fn test_load_project_config_ignores_invalid_extension_key_prefix() {
+        // 拡張子キーの `.` 欠落も、適用されない以上は読み込みを止める理由にならない。
+        // （グローバル設定側では従来どおり `validate_values` がエラーにする）
         let dir = tempfile::TempDir::new().unwrap();
         let project_path = dir.path().join(".claw-hooks.toml");
         fs::write(
@@ -922,8 +961,61 @@ message = "project: use pnpm"
         )
         .unwrap();
 
-        let err = ConfigService::load_project_config(&project_path).unwrap_err();
-        let err_msg = format!("{:#}", err);
-        assert!(err_msg.contains("must start with"));
+        let project = ConfigService::load_project_config(&project_path)
+            .expect("適用されない設定の書式エラーで読み込みを止めてはいけない");
+        let mut config = Config::default();
+        config.merge_project(&project);
+        assert!(config.extension_hooks.is_empty());
+    }
+
+    // === log_path の `~` 展開 ===
+
+    #[test]
+    fn test_log_path_tilde_is_expanded_to_home() {
+        // TOML の `~` はシェルのように展開されない。放置すると相対パス扱いになり、
+        // フックプロセスの cwd（エージェントが作業中のリポジトリ）直下に `~` という
+        // 名前のディレクトリが実際に作られる。
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "log_path = \"~/.config/claw-hooks/logs\"\n").unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+
+        let home = dirs::home_dir().expect("ホームディレクトリを解決できる前提");
+        assert_eq!(
+            config.log_path,
+            home.join(".config").join("claw-hooks").join("logs")
+        );
+        assert!(
+            !config.log_path.starts_with("~"),
+            "`~` が残ってはいけない: {:?}",
+            config.log_path
+        );
+    }
+
+    #[test]
+    fn test_log_path_absolute_is_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let log_dir = dir.path().join("custom-logs");
+        fs::write(
+            &config_path,
+            format!("log_path = \"{}\"\n", log_dir.display()),
+        )
+        .unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+        assert_eq!(config.log_path, log_dir);
+    }
+
+    #[test]
+    fn test_log_path_tilde_user_form_is_left_alone() {
+        // `~user` は対象ユーザーのホームを解決できないため書き換えない。
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "log_path = \"~other/logs\"\n").unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+        assert_eq!(config.log_path, PathBuf::from("~other/logs"));
     }
 }

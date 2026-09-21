@@ -35,11 +35,17 @@ impl CustomCommandFilter {
     ///
     /// パターンが有効な正規表現でない場合エラーを返す。
     pub fn new(pattern: &str, message: String) -> Result<Self, regex::Error> {
-        // コマンド名にマッチするよう先頭にアンカーする
+        // コマンド名にマッチするよう先頭にアンカーする。
+        //
+        // 非キャプチャグループで包むのは、正規表現の交替 `|` がトップレベルで最も
+        // 優先度が低いため。`format!("^{}", pattern)` だと `npm install|yarn add` が
+        // `(^npm install)|(yarn add)` と解釈され、右辺にアンカーが掛からない。
+        // その結果 `git commit -m "fix yarn add"` のような無関係なコマンドまで
+        // ブロックされ、doc が約束する「コマンド名にマッチする」保証が破れていた。
         let anchored_pattern = if pattern.starts_with('^') {
             pattern.to_string()
         } else {
-            format!("^{}", pattern)
+            format!("^(?:{})", pattern)
         };
         let regex = Regex::new(&anchored_pattern)?;
         Ok(Self {
@@ -146,17 +152,37 @@ impl CustomCommandFilter {
     /// 両方見るのは、利用者が `command = "/usr/bin/npm"` のようにパスを含む
     /// パターンを書いている可能性があるため（正規化側だけにすると従来マッチして
     /// いたものを取りこぼす = 緩和方向の変更になる）。
+    /// シェルの quote removal 後の形（実際に argv へ渡る並び）へ正規化する。
+    ///
+    /// [`Self::strip_quoted_content`] はクォートの**中身ごと**落とすため、
+    /// `npm "install" lodash` / `npm 'install' lodash` / `npm in\stall lodash` が
+    /// すべて `npm  lodash` に潰れていた。シェルが実際に実行するのは
+    /// `npm install lodash` なので、判定対象と実行内容が食い違い、引用符を 1 組
+    /// 足すだけでカスタムフィルターを回避できた（組み込みの rm/kill/dd は
+    /// コマンド名しか見ないため影響を受けない）。
+    ///
+    /// 両方の形で照合することで、`echo "yarn"` の引用内をコマンドとみなさない
+    /// 誤検知防止を保ったまま、この回避経路を塞ぐ。パターンはコマンド名先頭に
+    /// アンカーされるため、引数位置へ移った語が誤ってマッチすることはない。
+    fn quote_removed_command(cmd: &str) -> String {
+        crate::domain::parse_shell_tokens(cmd).join(" ")
+    }
+
     fn matches_regex(&self, command: &str, pattern: &Regex) -> bool {
         let mut parser = ShellParser::new();
         let command_strings = parser.extract_command_strings(command);
 
         command_strings.iter().any(|cmd| {
-            let stripped = Self::strip_quoted_content(cmd);
-            if pattern.is_match(&stripped) {
-                return true;
-            }
-            Self::command_key_variant(&stripped)
-                .is_some_and(|normalized| pattern.is_match(&normalized))
+            [
+                Self::strip_quoted_content(cmd),
+                Self::quote_removed_command(cmd),
+            ]
+            .iter()
+            .any(|candidate| {
+                pattern.is_match(candidate)
+                    || Self::command_key_variant(candidate)
+                        .is_some_and(|normalized| pattern.is_match(&normalized))
+            })
         })
     }
 
@@ -171,30 +197,38 @@ impl CustomCommandFilter {
         let command_strings = parser.extract_command_strings(input_command);
 
         for cmd_str in command_strings {
-            let stripped = Self::strip_quoted_content(&cmd_str);
-            let parts: Vec<&str> = stripped.split_whitespace().collect();
+            let stripped: Vec<String> = Self::strip_quoted_content(&cmd_str)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            // quote removal 後（シェルが実際に argv へ渡す並び）でも照合する。
+            // これが無いと `npm "install" lodash` が引数モードの判定をすり抜ける
+            // （`quote_removed_command` の説明を参照）。
+            let unquoted = crate::domain::parse_shell_tokens(&cmd_str);
 
-            if parts.is_empty() {
-                continue;
-            }
+            for parts in [&stripped, &unquoted] {
+                let Some(head) = parts.first() else {
+                    continue;
+                };
 
-            // コマンド名が正規表現にマッチするか判定する。
-            // 生のトークンと `command_key` 正規化後（basename / 実行拡張子 / 小文字化）の
-            // 両方を見る。正規化後だけにすると `command = "/usr/bin/npm"` のような
-            // パス込みのパターンを取りこぼすため、両方で照合して従来の一致を保つ。
-            let normalized = command_key(parts[0]);
-            if !target_cmd.is_match(parts[0]) && !target_cmd.is_match(&normalized) {
-                continue;
-            }
+                // コマンド名が正規表現にマッチするか判定する。
+                // 生のトークンと `command_key` 正規化後（basename / 実行拡張子 / 小文字化）の
+                // 両方を見る。正規化後だけにすると `command = "/usr/bin/npm"` のような
+                // パス込みのパターンを取りこぼすため、両方で照合して従来の一致を保つ。
+                let normalized = command_key(head);
+                if !target_cmd.is_match(head) && !target_cmd.is_match(&normalized) {
+                    continue;
+                }
 
-            // 引数未指定の場合、コマンドの使用すべてにマッチ
-            if target_args.is_empty() {
-                return true;
-            }
+                // 引数未指定の場合、コマンドの使用すべてにマッチ
+                if target_args.is_empty() {
+                    return true;
+                }
 
-            // 対象の引数が存在するか判定
-            if parts.len() > 1 && target_args.iter().any(|arg| parts[1] == arg) {
-                return true;
+                // 対象の引数が存在するか判定
+                if parts.len() > 1 && target_args.iter().any(|arg| &parts[1] == arg) {
+                    return true;
+                }
             }
         }
 
@@ -688,5 +722,120 @@ mod tests {
             }
             _ => panic!("Expected Block"),
         }
+    }
+
+    // === クォート／エスケープによる回避 ===
+
+    #[test]
+    fn test_args_mode_is_not_bypassed_by_quoting() {
+        // シェルは `npm "install" lodash` を argv `npm install lodash` として実行する。
+        // クォートの中身ごと落とす正規化だけで判定すると `npm  lodash` に潰れ、
+        // 引用符を 1 組足すだけでフィルターを回避できていた。
+        let filter = CustomCommandFilter::with_args(
+            "npm",
+            vec!["install".to_string(), "i".to_string(), "add".to_string()],
+            "Use pnpm instead".to_string(),
+        )
+        .unwrap();
+
+        for command in [
+            "npm install lodash",
+            r#"npm "install" lodash"#,
+            "npm 'install' lodash",
+            r"npm in\stall lodash",
+            r#"npm "i" lodash"#,
+        ] {
+            assert!(
+                filter.applies_to(&crate::domain::test_helpers::make_bash_input(command)),
+                "クォートで回避できてはいけない: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_regex_mode_is_not_bypassed_by_quoting() {
+        let filter =
+            CustomCommandFilter::new("yarn add", "Use pnpm add instead".to_string()).unwrap();
+
+        for command in [r#"yarn "add" left-pad"#, "yarn 'add' left-pad"] {
+            assert!(
+                filter.applies_to(&crate::domain::test_helpers::make_bash_input(command)),
+                "クォートで回避できてはいけない: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quote_removal_does_not_introduce_false_positives() {
+        // quote removal 後の文字列でも照合するようにしたが、パターンはコマンド名の
+        // 先頭にアンカーされるため、引用内の語が引数位置にあるだけでは一致しない。
+        let filter = CustomCommandFilter::new("npm", "Use pnpm instead".to_string()).unwrap();
+        for command in [
+            r#"echo "npm install""#,
+            r#"git commit -m "bump npm deps""#,
+            "which npm",
+        ] {
+            assert!(
+                !filter.applies_to(&crate::domain::test_helpers::make_bash_input(command)),
+                "引数位置の語を誤検知してはいけない: {command}"
+            );
+        }
+    }
+
+    // === 交替 `|` とアンカーの優先度 ===
+
+    #[test]
+    fn test_alternation_stays_anchored_to_command_name() {
+        // `^npm install|yarn add` は `(^npm install)|(yarn add)` と解釈されるため、
+        // 非キャプチャグループで包まないと右辺のアンカーが失われ、
+        // コミットメッセージ中の語まで一致して誤ブロックになる。
+        let filter =
+            CustomCommandFilter::new("npm install|yarn add", "Use pnpm".to_string()).unwrap();
+
+        for command in ["npm install lodash", "yarn add left-pad"] {
+            assert!(
+                filter.applies_to(&crate::domain::test_helpers::make_bash_input(command)),
+                "コマンド名先頭の一致は従来どおり: {command}"
+            );
+        }
+        for command in [
+            "echo please yarn add something",
+            r#"git commit -m "fix yarn add""#,
+        ] {
+            assert!(
+                !filter.applies_to(&crate::domain::test_helpers::make_bash_input(command)),
+                "交替の右辺もコマンド名にアンカーされるべき: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_args_mode_alternation_stays_anchored() {
+        // `with_args` の `^{}$` も同じ理由で包む必要がある（`^npm|yarn$`）。
+        let filter = CustomCommandFilter::with_args(
+            "npm|yarn",
+            vec!["install".to_string()],
+            "Use pnpm".to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            filter.applies_to(&crate::domain::test_helpers::make_bash_input(
+                "npm install x"
+            )),
+            "左辺は完全一致でマッチする"
+        );
+        assert!(
+            filter.applies_to(&crate::domain::test_helpers::make_bash_input(
+                "yarn install"
+            )),
+            "右辺も完全一致でマッチする"
+        );
+        assert!(
+            !filter.applies_to(&crate::domain::test_helpers::make_bash_input(
+                "yarnpkg install"
+            )),
+            "右辺の末尾アンカーが失われてはいけない"
+        );
     }
 }

@@ -15,6 +15,11 @@ const KILL_COMMANDS: &[&str] = &[
     "killall",      // Unix
     "taskkill",     // Windows
     "stop-process", // PowerShell の正規コマンドレット名
+    // PowerShell が `Stop-Process` に既定で割り当てるエイリアスは `kill` と `spps` の 2 つ。
+    // `kill` は上で捕捉済みだが `spps` を落とすと、完全に等価な呼び出しが別名で書くだけで
+    // 通ってしまう。rm 側で `rd` を明示したのと同じ理由で挙げる（`ri` のような
+    // 他ツールとの名前衝突は無い）。
+    "spps", // PowerShell の Stop-Process エイリアス
 ];
 
 /// kill 関連コマンドをブロックするフィルターを作成する。
@@ -245,5 +250,17 @@ mod tests {
     #[test]
     fn test_kill_with_timeout_wrapper() {
         assert!(contains_kill_command("timeout 10 kill -9 1234"));
+    }
+
+    #[test]
+    fn test_powershell_stop_process_aliases_are_blocked() {
+        // PowerShell が `Stop-Process` に既定で割り当てるエイリアスは `kill` と `spps`。
+        // `spps` を落とすと、完全に等価な呼び出しが別名で書くだけで通ってしまう。
+        assert!(contains_kill_command("Stop-Process -Name node"));
+        assert!(contains_kill_command("spps -Name node"));
+        assert!(contains_kill_command("SPPS -Id 1234"));
+        // 無関係なコマンドは巻き込まない。
+        assert!(!contains_kill_command("sppsuffix --help"));
+        assert!(!contains_kill_command("echo spps"));
     }
 }

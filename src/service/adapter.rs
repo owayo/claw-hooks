@@ -400,8 +400,13 @@ impl FormatAdapter {
             },
             Format::Codex => match Self::raw_hook_event_name(input).as_deref() {
                 // PreToolUse と PermissionRequest はどちらも実行前の許可判断。
+                // `BeforeTool` は `parse_codex_input` が PreToolUse と同じ
+                // `HookEvent::BeforeCommand` へ写す旧版エイリアス。写像表とこの
+                // 許可リストがずれると、実行前ゲートとして扱うと宣言したイベントが
+                // パース失敗時に中立 allow へ倒れ、フェイルクローズドが穴になる。
                 Some(
-                    "PreToolUse" | "pre_tool_use" | "PermissionRequest" | "permission_request",
+                    "PreToolUse" | "pre_tool_use" | "BeforeTool" | "PermissionRequest"
+                    | "permission_request",
                 ) => false,
                 Some(_) => true,
                 None => false,
@@ -487,7 +492,12 @@ impl FormatAdapter {
                     })
                     .to_string();
                 }
-                if matches!(raw_event.as_str(), "PreToolUse" | "pre_tool_use") {
+                // `BeforeTool` も PreToolUse と同じ実行前ゲートなので、推奨形式の
+                // deny で返す（含めないと legacy の `{"decision":"block"}` に落ちる）。
+                if matches!(
+                    raw_event.as_str(),
+                    "PreToolUse" | "pre_tool_use" | "BeforeTool"
+                ) {
                     let error_message = format!("🚫 Hook error (fail-closed): {}", message);
                     return serde_json::json!({
                         "hookSpecificOutput": {
@@ -686,7 +696,11 @@ impl FormatAdapter {
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
-        let claude_input: ClaudeInput = serde_json::from_value(raw.clone())
+        // `&Value` から直接デシリアライズする。`serde_json::from_value` は所有権を取るため
+        // `raw.clone()` が必要になるが、それはペイロード全体の deep clone であり、
+        // `Write` の PostToolUse（`tool_input.content` にファイル全文が入る）では
+        // 本文がもう 1 部増える。この経路は Claude の全フック呼び出しが通る。
+        let claude_input = ClaudeInput::deserialize(&raw)
             .map_err(|e| anyhow!("Failed to parse Claude input: {}", e))?;
 
         let raw_event = claude_input.hook_event_name.clone();
@@ -1261,7 +1275,8 @@ impl FormatAdapter {
 
         let raw: serde_json::Value = serde_json::from_str(input)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
-        let windsurf_input: WindsurfInput = serde_json::from_value(raw.clone())
+        // Claude 側と同じ理由でペイロード全体の deep clone を避ける。
+        let windsurf_input = WindsurfInput::deserialize(&raw)
             .map_err(|e| anyhow!("Failed to parse Windsurf input: {}", e))?;
         if windsurf_input.agent_action_name.trim().is_empty() {
             return Err(anyhow!("Missing agent_action_name field"));
@@ -6889,5 +6904,35 @@ mod tests {
                 .format_error_for_input("broken", truncated_pre)
                 .contains("deny")
         );
+    }
+
+    /// `BeforeTool` は `parse_codex_input` が PreToolUse と同じ実行前ゲート
+    /// （`HookEvent::BeforeCommand`）へ写す旧版エイリアス。イベント写像表と
+    /// フェイルクローズドの許可リストがずれると、実行前ゲートとして扱うと
+    /// 宣言したイベントがパース失敗時に中立 allow へ倒れて穴になる。
+    #[test]
+    fn test_codex_before_tool_alias_fails_closed_like_pre_tool_use() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        for event in ["PreToolUse", "pre_tool_use", "BeforeTool"] {
+            let input = format!(r#"{{"hook_event_name":"{}","tool_name":"Bash"}}"#, event);
+            let output = adapter.format_error_for_input("boom", &input);
+            assert!(
+                output.contains(r#""permissionDecision":"deny""#),
+                "{event}: 実行前ゲートは PreToolUse 推奨形式の deny を返すべき: {output}"
+            );
+            assert_eq!(
+                adapter.error_exit_code(Some(input.as_str())),
+                0,
+                "{event}: Codex は判定を stdout の JSON で返す"
+            );
+        }
+    }
+
+    /// 写像表が実行前ゲートへ写さないイベントは、従来どおり中立応答に倒す。
+    #[test]
+    fn test_codex_post_tool_use_still_resolves_to_neutral_on_error() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
+        assert_eq!(adapter.format_error_for_input("boom", input), "{}");
     }
 }

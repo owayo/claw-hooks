@@ -858,10 +858,19 @@ impl FormatAdapter {
         // ここで先に必須化すると、claw-hooks が中身を一切見ないツールに対して
         // exit 2（= PreToolUse の deny）を返してしまい、`matcher: "*"` の環境では
         // 全ツールが誤ブロックされる。Codex 側（parse_codex_tool）と同じ遅延検証に揃える。
-        let inspects_tool_input = matches!(
-            tool_name.as_str(),
-            "Bash" | "PowerShell" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
-        );
+        //
+        // 必須にするのは「そのイベントで claw-hooks が実際に読むフィールド」だけに絞る。
+        // シェルツールの `command` は危険コマンド検査の入力そのものなので常に必須。
+        // 一方ファイルパスを読むのは保存後フック（AfterFileEdit）だけで、PreToolUse で
+        // ファイル入力を見るフィルターは 1 つも無い（組み込み・カスタムフィルターは
+        // いずれも `is_shell_tool()` でゲートされ、拡張子フックは AfterFileEdit 以外では
+        // 即 false を返す）。PreToolUse で `file_path` を必須化すると、読みもしない
+        // フィールドの欠落で「即ブロック」を返すことになる。
+        let inspects_tool_input = match tool_name.as_str() {
+            "Bash" | "PowerShell" => true,
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => event == HookEvent::AfterFileEdit,
+            _ => false,
+        };
         let Some(raw_tool_input) = claude_input.tool_input else {
             if inspects_tool_input {
                 return Err(anyhow!("Missing tool_input field"));
@@ -880,7 +889,24 @@ impl FormatAdapter {
                 session_id: claude_input.session_id,
             });
         };
-        let tool_input = Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input)?;
+        let tool_input =
+            match Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input) {
+                Ok(parsed) => parsed,
+                // 判定に使わない組み合わせ（PreToolUse のファイル編集ツール等）では、
+                // 形が想定と違っても素通しする。ここで落とすと PreToolUse では deny =
+                // 即ブロックになり、claw-hooks が意見を持たない編集を止めてしまう。
+                Err(_) if !inspects_tool_input => {
+                    debug!(
+                        agent = self.format.label(),
+                        event = ?event,
+                        tool_name = %tool_name,
+                        "{} tool_input shape not inspected for this event, passing through",
+                        self.log_prefix()
+                    );
+                    crate::domain::ToolInput::Other(raw_tool_input)
+                }
+                Err(error) => return Err(error),
+            };
 
         debug!(
             agent = self.format.label(),
@@ -6685,6 +6711,9 @@ mod tests {
     /// MCP ツールや引数を持たない組み込みツールは `tool_input` を送らないため、
     /// ツール種別の判定より前に必須化すると無関係なツールを誤ブロックする
     /// （Claude の PreToolUse で exit 2 = deny）。
+    ///
+    /// 必須かどうかはツール種別とイベントの組で決まる。ファイル編集ツールのパスを
+    /// 読むのは保存後フック（PostToolUse）だけなので、PreToolUse では必須にしない。
     #[test]
     fn test_claude_tool_input_is_required_only_for_inspected_tools() {
         let adapter = FormatAdapter::new(Format::Claude, 0);
@@ -6699,15 +6728,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{tool} で誤ブロック: {e}"));
             assert_eq!(parsed.event, HookEvent::BeforeCommand);
         }
-        // 検査対象のツールは従来どおりフェイルクローズする。
-        for tool in [
-            "Bash",
-            "PowerShell",
-            "Write",
-            "Edit",
-            "MultiEdit",
-            "NotebookEdit",
-        ] {
+        // シェルツールはコマンド本文が判定入力そのものなので従来どおりフェイルクローズする。
+        for tool in ["Bash", "PowerShell"] {
             let input = format!(
                 r#"{{"hook_event_name":"PreToolUse","tool_name":"{}"}}"#,
                 tool
@@ -6715,6 +6737,49 @@ mod tests {
             assert!(
                 adapter.parse_input(&input).is_err(),
                 "{tool} は tool_input を必須にすべき"
+            );
+        }
+        // ファイル編集ツールのパスを読むのは保存後フックだけ。PreToolUse では
+        // 参照しないフィールドなので、欠落や別キー名で即ブロックしてはいけない。
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            let input = format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"{}"}}"#,
+                tool
+            );
+            let parsed = adapter
+                .parse_input(&input)
+                .unwrap_or_else(|e| panic!("{tool} の PreToolUse で誤ブロック: {e}"));
+            assert_eq!(parsed.event, HookEvent::BeforeCommand);
+        }
+        // パスのキー名が想定と違う書き込みも、PreToolUse では素通しする。
+        let renamed_key = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"path":"/tmp/a","content":"x"}}"#;
+        let parsed = adapter
+            .parse_input(renamed_key)
+            .expect("PreToolUse の file_path 欠落で誤ブロックしてはいけない");
+        assert_eq!(parsed.event, HookEvent::BeforeCommand);
+    }
+
+    /// 保存後フック（PostToolUse）は編集対象のパスを読んで formatter/linter を
+    /// 起動するため、ファイル編集ツールの `tool_input` は従来どおり必須。
+    #[test]
+    fn test_claude_post_tool_use_still_requires_file_path() {
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            let input = format!(
+                r#"{{"hook_event_name":"PostToolUse","tool_name":"{}"}}"#,
+                tool
+            );
+            assert!(
+                adapter.parse_input(&input).is_err(),
+                "{tool} の PostToolUse は tool_input を必須にすべき"
+            );
+            let renamed_key = format!(
+                r#"{{"hook_event_name":"PostToolUse","tool_name":"{}","tool_input":{{"path":"/tmp/a"}}}}"#,
+                tool
+            );
+            assert!(
+                adapter.parse_input(&renamed_key).is_err(),
+                "{tool} の PostToolUse は file_path を必須にすべき"
             );
         }
     }

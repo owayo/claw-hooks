@@ -290,6 +290,9 @@ fn is_redundant_tool_summary_line(line: &str) -> bool {
     if line == "check ━" || line == "× Some errors were emitted while running checks." {
         return true;
     }
+    // 総件数行（biome の `Found N error(s).`）は意図的に残す。出力は既定 1000 文字で
+    // 切り詰められるため、列挙された診断が全件とは限らない。件数はそこで失われる
+    // 情報を補う唯一の手掛かりになる（`test_biome_checked_summary_dropped_when_diagnostics_follow`）。
     // `ruff format --check` の締め行（`N file(s) would be reformatted`）。
     // 直前の `Would reformat: <path>` の再掲でしかない。
     is_would_be_reformatted_summary(line)
@@ -395,6 +398,12 @@ fn dedup_repeated_source_context_lines(lines: Vec<String>) -> Vec<String> {
 /// 関わらず元の値と比較する）。これにより同一抜粋が3件以上連続する場合も2件目以降を
 /// すべて除去でき、かつ離れた診断は自分の抜粋を保持する。
 ///
+/// 除去は抜粋全体の一致に限らず、**先頭から連続して直前の抜粋に含まれる行**まで
+/// 広げる。lint は指摘行の前後数行を抜粋するため、同じファイルの近い行に対する
+/// 診断が続くと抜粋のウィンドウがずれながら重なる（`6,7,8,9` の次が `7,8,9,10,11`）。
+/// 完全一致だけを見ると、この部分的な重なりが丸ごと素通りしていた。
+/// 重なった行は直前の診断のブロックに残るため、出力全体としては失われない。
+///
 /// 対象は純粋なコンテキスト行の並びだけで、`- old` / `+ new` の差分行は
 /// [`is_source_context_line`] が除外するため抜粋ブロックに含まれない。
 /// 適用すべき修正内容が失われることはない。
@@ -435,8 +444,16 @@ fn drop_duplicate_excerpt_blocks_across_diagnostics(lines: Vec<String>) -> Vec<S
         }
 
         let block = lines[block_start..block_end].to_vec();
-        if previous_excerpt.as_ref() == Some(&block) {
-            for flag in &mut drop_flags[block_start..block_end] {
+        if let Some(previous) = previous_excerpt.as_ref() {
+            // 直前の診断が既に見せた行を、抜粋の先頭から連続する範囲に限って落とす。
+            // 抜粋が丸ごと一致する場合は全行がこの範囲に入るため、完全一致の除去も
+            // ここに含まれる。
+            let previous_lines: HashSet<&str> = previous.iter().map(String::as_str).collect();
+            let mut drop_end = block_start;
+            while drop_end < block_end && previous_lines.contains(lines[drop_end].as_str()) {
+                drop_end += 1;
+            }
+            for flag in &mut drop_flags[block_start..drop_end] {
                 *flag = true;
             }
         }
@@ -930,10 +947,16 @@ fn is_noop_success_line(line: &str) -> bool {
     if line == "All checks passed!" {
         return true;
     }
-    // biome check: `Checked N file(s) in <時間>. No fixes applied.` に限定する。
-    // 任意の `Checked ... No fixes applied.` を受理すると、利用者向けメッセージまで消えてしまう。
+    // biome check: `Checked N file(s) in <時間>. No fixes applied.`
+    // biome format: `Formatted N file(s) in <時間>. No fixes applied.`
+    // どちらも「走査したが書き換えは発生しなかった」= no-op を表す同型のメッセージ。
+    // 接頭辞と `. No fixes applied.` の両方を要求して限定する。任意の
+    // `Checked ... No fixes applied.` を受理すると、利用者向けメッセージまで消えてしまう。
+    // 実際に書き換えた場合は末尾が `Fixed N file.` になり一致しないため、
+    // 「ファイルが変わった」シグナルを誤って握り潰すことはない。
     let is_biome_noop = line
         .strip_prefix("Checked ")
+        .or_else(|| line.strip_prefix("Formatted "))
         .and_then(counted_file_message_tail)
         .and_then(|tail| tail.strip_prefix("in "))
         .and_then(|tail| tail.strip_suffix(". No fixes applied."))
@@ -1189,8 +1212,28 @@ mod tests {
             "1 file left unchanged",
             "3 files left unchanged",
             "Checked 1 file in 53ms. No fixes applied.",
+            // biome format は `Checked` ではなく `Formatted` で始まる同型の集計行を出す。
+            "Formatted 1 file in 15ms. No fixes applied.",
+            "Formatted 12 files in 1s. No fixes applied.",
         ] {
             assert!(is_noop_success_output(output), "未認識の出力: {output}");
+        }
+    }
+
+    #[test]
+    fn test_is_noop_success_output_rejects_formatted_with_fixes() {
+        // 実際に書き換えた場合は末尾が `Fixed N file.` になる。ファイルが変わった
+        // シグナルなので no-op として握り潰してはいけない。
+        for output in [
+            "Formatted 1 file in 15ms. Fixed 1 file.",
+            "Formatted 3 files in 20ms. Fixed 2 files.",
+            // 件数のない `Formatted` は定型集計行ではない。
+            "Formatted the config in 15ms. No fixes applied.",
+        ] {
+            assert!(
+                !is_noop_success_output(output),
+                "書き換え/非定型を no-op と誤判定した: {output}"
+            );
         }
     }
 
@@ -3278,6 +3321,68 @@ undocumented-public-module: Missing docstring in public module\n\
     }
 
     #[test]
+    fn test_overlapping_excerpt_windows_drop_only_repeated_lines() {
+        // lint は指摘行の前後を抜粋するため、同じファイルの近い行を指す診断が
+        // 続くと抜粋のウィンドウがずれながら重なる。重なった先頭部分だけを落とし、
+        // 新しく現れた行は残す。
+        let input = "rule-a: long line\n\
+             --> sample.py:7:64\n\
+             6 | first\n\
+             7 | second\n\
+             8 | third\n\
+             \n\
+             rule-b: long line\n\
+             --> sample.py:9:58\n\
+             7 | second\n\
+             8 | third\n\
+             9 | fourth\n\
+             10 | fifth\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("7 | second").count(),
+            1,
+            "重なった行は1回だけ残す: {result}"
+        );
+        assert_eq!(
+            result.matches("8 | third").count(),
+            1,
+            "重なった行は1回だけ残す: {result}"
+        );
+        assert!(result.contains("9 | fourth"), "新しい行は残す: {result}");
+        assert!(result.contains("10 | fifth"), "新しい行は残す: {result}");
+        assert!(
+            result.contains("-> sample.py:9:58"),
+            "位置情報は残す: {result}"
+        );
+    }
+
+    #[test]
+    fn test_excerpt_overlap_stops_at_first_non_repeated_line() {
+        // 除去は先頭から連続する範囲に限る。先頭が新しい行なら、後方に重複が
+        // あっても落とさない（飛び飛びに抜くと抜粋の並びが読めなくなるため）。
+        let input = "rule-a: first problem\n\
+             --> sample.py:1:1\n\
+             1 | alpha\n\
+             2 | bravo\n\
+             \n\
+             rule-b: second problem\n\
+             --> sample.py:5:1\n\
+             5 | echo\n\
+             1 | alpha\n";
+
+        let result = normalize_lint_output(input);
+
+        assert_eq!(
+            result.matches("1 | alpha").count(),
+            2,
+            "先頭が非重複なら以降は落とさない: {result}"
+        );
+        assert!(result.contains("5 | echo"), "{result}");
+    }
+
+    #[test]
     fn test_dedup_does_not_touch_lines_without_line_numbers() {
         // 行番号のない繰り返し（ソース行に見えないもの）は対象外
         let input = "Found 2 errors.\n\
@@ -3409,6 +3514,34 @@ undocumented-public-module: Missing docstring in public module\n\
         assert!(
             result.contains("noUnusedImports"),
             "診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_biome_formatted_summary_dropped_when_diagnostics_follow() {
+        // biome format は `Formatted N file in Xms. No fixes applied.` を出す。
+        // `Checked` 版と同型の集計行なので、診断が併記されていれば冗長。
+        let input = "Formatted 1 file in 15ms. No fixes applied.\n\
+                     web/a.ts:25:2 lint/correctness/noUnusedImports FIXABLE \u{2501}\u{2501}\u{2501}\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            !result.contains("No fixes applied"),
+            "診断があるとき集計行は冗長: {result}"
+        );
+        assert!(
+            result.contains("noUnusedImports"),
+            "診断は保持する: {result}"
+        );
+    }
+
+    #[test]
+    fn test_biome_formatted_summary_kept_when_only_content() {
+        // 集計行しか無い場合は消さない（成功時の抑制は呼び出し側の no-op 判定が担当）。
+        let input = "Formatted 1 file in 15ms. No fixes applied.\n";
+        let result = normalize_lint_output(input);
+        assert!(
+            result.contains("No fixes applied"),
+            "唯一の出力なら残す: {result}"
         );
     }
 

@@ -8,7 +8,7 @@
   シンプルなTOML設定でClaude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI・Grok CLIに対応 - コマンドブロック、自動フォーマット、Stop時自動化
 </p>
 
-<h3 align="center">Supported Platforms</h3>
+<h3 align="center">対応プラットフォーム</h3>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&amp;logoColor=black" alt="Linux">

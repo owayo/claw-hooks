@@ -63,8 +63,11 @@ jobs:
           # 依存関係のバージョンを変えず、パッケージバージョンの最初の1件だけ置換する
           sed -i "0,/^version = \"[^\"]*\"/s//version = \"${NEW_VERSION}\"/" Cargo.toml
 
+          # Cargo.lock はパッケージ自身の版だけを追随させる。generate-lockfile は依存まで
+          # 最新へ解決し直すため、CI で検証しておらず公開直後の版まで含む依存が
+          # リリースに入る (build ジョブは --locked でこの lockfile をそのまま使う)。
           if [ -f "Cargo.lock" ]; then
-            cargo generate-lockfile 2>/dev/null || true
+            cargo update --workspace
           fi
 
           echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
@@ -136,10 +139,22 @@ jobs:
         with:
           ref: ${{ needs.prepare-release.outputs.tag }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Rust の版は mise.toml を正とする。mise 本体の版と action のコミット SHA は
+      # ci.yml と同じ値にそろえる。cache を使わない理由も ci.yml を参照。
+      - name: Install Rust toolchain (mise.toml)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          targets: ${{ matrix.target }}
+          version: 2026.9.4
+          cache: false
+
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          rustc --version
+          test "$(rustc --version | cut -d' ' -f2)" = "$(mise current rust)"
+
+      - name: Add build target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -157,11 +172,11 @@ jobs:
         if: matrix.cross
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
-          cross build --release --target ${{ matrix.target }}
+          cross build --locked --release --target ${{ matrix.target }}
 
       - name: Build
         if: "!matrix.cross"
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'

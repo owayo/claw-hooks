@@ -453,14 +453,15 @@ fn expand_braces_into(s: &str, out: &mut String, depth: usize) {
     let mut i = 0;
     let mut lit_start = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
-            if let Some((close, alt_start, alt_end)) = brace_group_at(bytes, i) {
-                out.push_str(&s[lit_start..i]); // 群より前の literal
-                expand_braces_into(&s[alt_start..alt_end], out, depth + 1); // 選択肢を再帰展開
-                i = close + 1;
-                lit_start = i;
-                continue;
-            }
+        if bytes[i] == b'{'
+            && (i == 0 || bytes[i - 1] != b'$')
+            && let Some((close, alt_start, alt_end)) = brace_group_at(bytes, i)
+        {
+            out.push_str(&s[lit_start..i]); // 群より前の literal
+            expand_braces_into(&s[alt_start..alt_end], out, depth + 1); // 選択肢を再帰展開
+            i = close + 1;
+            lit_start = i;
+            continue;
         }
         i += 1;
     }
@@ -753,43 +754,43 @@ impl ShellParser {
         }
         match node.kind() {
             "command" | "simple_command" => {
-                if let Some(cmd_name) = self.get_command_name(node, source) {
-                    if !cmd_name.is_empty() {
-                        // 完全なコマンド文字列を構築: コマンド + 引数（クォート保持）
-                        let args_raw = self.get_command_arguments_raw(node, source);
-                        let full_cmd = if args_raw.is_empty() {
-                            cmd_name.clone()
-                        } else {
-                            format!("{} {}", cmd_name, args_raw.join(" "))
-                        };
-                        command_strings.push(full_cmd);
+                if let Some(cmd_name) = self.get_command_name(node, source)
+                    && !cmd_name.is_empty()
+                {
+                    // 完全なコマンド文字列を構築: コマンド + 引数（クォート保持）
+                    let args_raw = self.get_command_arguments_raw(node, source);
+                    let full_cmd = if args_raw.is_empty() {
+                        cmd_name.clone()
+                    } else {
+                        format!("{} {}", cmd_name, args_raw.join(" "))
+                    };
+                    command_strings.push(full_cmd);
 
-                        // 内側コマンドの抽出にはクォート除去済み引数を使用（一度だけ取得して共有）
-                        let args = self.get_command_arguments(node, source);
+                    // 内側コマンドの抽出にはクォート除去済み引数を使用（一度だけ取得して共有）
+                    let args = self.get_command_arguments(node, source);
 
-                        // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も
-                        // 抽出する。これを行わないと `^npm install` のようなアンカー付きカスタム
-                        // フィルタが `sudo npm install` で素通りする。
-                        if is_command_wrapper(&cmd_name) {
-                            if let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args) {
-                                let inner = args[idx..].join(" ");
-                                if !inner.is_empty() {
-                                    command_strings.extend(self.extract_command_strings(&inner));
-                                }
-                            }
+                    // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も
+                    // 抽出する。これを行わないと `^npm install` のようなアンカー付きカスタム
+                    // フィルタが `sudo npm install` で素通りする。
+                    if is_command_wrapper(&cmd_name)
+                        && let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args)
+                    {
+                        let inner = args[idx..].join(" ");
+                        if !inner.is_empty() {
+                            command_strings.extend(self.extract_command_strings(&inner));
                         }
+                    }
 
-                        // shell -c / env -S / xargs / eval / find -exec など、後続をコマンド
-                        // として再評価する形の内側コマンド文字列も抽出する。ディスパッチは
-                        // コマンド名抽出経路（extract_reevaluated_inner_commands）と同一実装
-                        // （reevaluated_inner_command_strings）を共有し、経路間の実装乖離に
-                        // よる検出漏れ（fail-open）を防ぐ。
-                        for inner in Self::reevaluated_inner_command_strings(&cmd_name, &args) {
-                            if inner.raw_is_command_string {
-                                command_strings.push(inner.text.clone());
-                            }
-                            command_strings.extend(self.extract_command_strings(&inner.text));
+                    // shell -c / env -S / xargs / eval / find -exec など、後続をコマンド
+                    // として再評価する形の内側コマンド文字列も抽出する。ディスパッチは
+                    // コマンド名抽出経路（extract_reevaluated_inner_commands）と同一実装
+                    // （reevaluated_inner_command_strings）を共有し、経路間の実装乖離に
+                    // よる検出漏れ（fail-open）を防ぐ。
+                    for inner in Self::reevaluated_inner_command_strings(&cmd_name, &args) {
+                        if inner.raw_is_command_string {
+                            command_strings.push(inner.text.clone());
                         }
+                        command_strings.extend(self.extract_command_strings(&inner.text));
                     }
                 }
                 // コマンド置換のために子ノードに再帰
@@ -885,12 +886,12 @@ impl ShellParser {
 
         // 実行委譲ラッパー（sudo/env/setsid/flock/...）の内側コマンド文字列も抽出する。
         // アンカー付きカスタムフィルタが `sudo npm install` で素通りするのを防ぐ。
-        if is_command_wrapper(&cmd_name) {
-            if let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args) {
-                let inner = args[idx..].join(" ");
-                if !inner.is_empty() {
-                    command_strings.extend(self.extract_command_strings_fallback(&inner));
-                }
+        if is_command_wrapper(&cmd_name)
+            && let Some(idx) = Self::find_wrapped_command_index(&cmd_name, &args)
+        {
+            let inner = args[idx..].join(" ");
+            if !inner.is_empty() {
+                command_strings.extend(self.extract_command_strings_fallback(&inner));
             }
         }
 
@@ -1497,10 +1498,10 @@ impl ShellParser {
             if arg == "<<<" {
                 return iter.next().filter(|s| !s.trim().is_empty()).cloned();
             }
-            if let Some(rest) = arg.strip_prefix("<<<") {
-                if !rest.trim().is_empty() {
-                    return Some(rest.to_string());
-                }
+            if let Some(rest) = arg.strip_prefix("<<<")
+                && !rest.trim().is_empty()
+            {
+                return Some(rest.to_string());
             }
         }
         None
@@ -2241,25 +2242,25 @@ impl ShellParser {
                 && (ch == '$' || ch == '<' || ch == '>')
                 && i + 1 < len
                 && chars[i + 1] == '('
+                && let Some((end, inner)) = Self::extract_parenthesized_fragment(&chars, i + 1)
             {
-                if let Some((end, inner)) = Self::extract_parenthesized_fragment(&chars, i + 1) {
-                    if !inner.trim().is_empty() {
-                        fragments.push(inner);
-                    }
-                    i = end + 1;
-                    continue;
+                if !inner.trim().is_empty() {
+                    fragments.push(inner);
                 }
+                i = end + 1;
+                continue;
             }
 
             // `` `...` `` 形式
-            if !in_single && ch == '`' {
-                if let Some((end, inner)) = Self::extract_backtick_fragment(&chars, i) {
-                    if !inner.trim().is_empty() {
-                        fragments.push(inner);
-                    }
-                    i = end + 1;
-                    continue;
+            if !in_single
+                && ch == '`'
+                && let Some((end, inner)) = Self::extract_backtick_fragment(&chars, i)
+            {
+                if !inner.trim().is_empty() {
+                    fragments.push(inner);
                 }
+                i = end + 1;
+                continue;
             }
 
             i += 1;
@@ -2637,16 +2638,16 @@ impl ShellParser {
                     paren_depth = paren_depth.saturating_sub(1);
                 }
                 '&' | '|' if !in_single_quote && !in_double_quote && paren_depth == 0 => {
-                    if let Some(&(next_idx, next_c)) = chars.peek() {
-                        if next_c == c {
-                            let part = &s[current_start..idx];
-                            if !part.trim().is_empty() {
-                                result.push(part.trim());
-                            }
-                            // 2文字目の演算子も消費し、次の開始位置を更新する。
-                            let _ = chars.next();
-                            current_start = next_idx + next_c.len_utf8();
+                    if let Some(&(next_idx, next_c)) = chars.peek()
+                        && next_c == c
+                    {
+                        let part = &s[current_start..idx];
+                        if !part.trim().is_empty() {
+                            result.push(part.trim());
                         }
+                        // 2文字目の演算子も消費し、次の開始位置を更新する。
+                        let _ = chars.next();
+                        current_start = next_idx + next_c.len_utf8();
                     }
                 }
                 _ => {}

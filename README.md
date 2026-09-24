@@ -139,7 +139,7 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 
 - **OS**: macOS, Linux, Windows
 - **Runtime dependencies**: None (single binary)
-- **Source builds / development**: Rust 1.85 or newer. CI also runs locked dependency checks on Rust 1.85 to keep the declared MSRV valid.
+- **Source builds / development**: Rust 1.98.1 or newer. The toolchain is pinned in `mise.toml`, and CI builds and tests with exactly that version, which is also the declared `rust-version`.
 
 ## Installation
 
@@ -159,13 +159,15 @@ cargo build --release
 
 Binary: `target/release/claw-hooks`
 
-For contributor checks:
+For contributor checks (the Rust toolchain is pinned in `mise.toml`):
 
 ```bash
-make msrv
-cargo test --all-features
-cargo test --no-default-features
+mise install
+mise exec -- cargo test --all-features
+mise exec -- cargo test --no-default-features
 ```
+
+`mise install` only fetches the toolchain and does not put it on `PATH`, hence `mise exec --`. You can omit it if mise is activated in your shell.
 
 ### From GitHub Releases
 
@@ -1078,7 +1080,7 @@ The "fail-closed parse error" column applies to the pre-execution gates only. Ev
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.98.1+ (pinned in `mise.toml`; with [mise](https://mise.jdx.dev/), run `mise install`)
 - Cargo
 
 ### Build

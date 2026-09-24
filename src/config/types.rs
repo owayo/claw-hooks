@@ -210,25 +210,25 @@ impl Config {
 
         // 拡張子フックと Stop フックはどちらも「任意コマンドの実行」そのものなので、
         // プロジェクト設定からは一切受け付けない（信頼確認なしのコード実行になるため）。
-        if let Some(ref v) = project.extension_hooks {
-            if !v.is_empty() {
-                self.warnings.push(format!(
+        if let Some(ref v) = project.extension_hooks
+            && !v.is_empty()
+        {
+            self.warnings.push(format!(
                     "project config: {} extension_hooks entr{} ignored \
                      (extension hooks run arbitrary commands on file edits and are only accepted from the global config)",
                     v.len(),
                     if v.len() == 1 { "y was" } else { "ies were" }
                 ));
-            }
         }
-        if let Some(ref v) = project.stop_hooks {
-            if !v.is_empty() {
-                self.warnings.push(format!(
+        if let Some(ref v) = project.stop_hooks
+            && !v.is_empty()
+        {
+            self.warnings.push(format!(
                     "project config: {} stop_hooks entr{} ignored \
                      (stop hooks run arbitrary commands when the agent stops and are only accepted from the global config)",
                     v.len(),
                     if v.len() == 1 { "y was" } else { "ies were" }
                 ));
-            }
         }
     }
 
@@ -367,25 +367,25 @@ impl HookCondition {
     /// 作業ディレクトリに対して条件を評価する。
     /// 指定されたすべての条件が満たされる場合に true を返す（AND ロジック）。
     pub fn is_satisfied(&self, cwd: &Path) -> bool {
-        if let Some(ref file) = self.file_exists {
-            if !cwd.join(file).exists() {
-                return false;
-            }
+        if let Some(ref file) = self.file_exists
+            && !cwd.join(file).exists()
+        {
+            return false;
         }
-        if let Some(ref file) = self.file_not_exists {
-            if cwd.join(file).exists() {
-                return false;
-            }
+        if let Some(ref file) = self.file_not_exists
+            && cwd.join(file).exists()
+        {
+            return false;
         }
-        if let Some(ref cmd) = self.command_exists {
-            if !Self::command_in_path(cmd) {
-                return false;
-            }
+        if let Some(ref cmd) = self.command_exists
+            && !Self::command_in_path(cmd)
+        {
+            return false;
         }
-        if let Some(ref cmd) = self.command_not_exists {
-            if Self::command_in_path(cmd) {
-                return false;
-            }
+        if let Some(ref cmd) = self.command_not_exists
+            && Self::command_in_path(cmd)
+        {
+            return false;
         }
         true
     }

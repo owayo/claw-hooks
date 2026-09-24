@@ -474,40 +474,40 @@ impl FormatAdapter {
             return "{}".to_string();
         }
 
-        if self.format == Format::Codex {
-            if let Some(raw_event) = Self::raw_hook_event_name(input) {
-                if matches!(
-                    raw_event.as_str(),
-                    "PermissionRequest" | "permission_request"
-                ) {
-                    let error_message = format!("🚫 Hook error (fail-closed): {}", message);
-                    return serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PermissionRequest",
-                            "decision": {
-                                "behavior": "deny",
-                                "message": error_message
-                            }
+        if self.format == Format::Codex
+            && let Some(raw_event) = Self::raw_hook_event_name(input)
+        {
+            if matches!(
+                raw_event.as_str(),
+                "PermissionRequest" | "permission_request"
+            ) {
+                let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+                return serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "decision": {
+                            "behavior": "deny",
+                            "message": error_message
                         }
-                    })
-                    .to_string();
-                }
-                // `BeforeTool` も PreToolUse と同じ実行前ゲートなので、推奨形式の
-                // deny で返す（含めないと legacy の `{"decision":"block"}` に落ちる）。
-                if matches!(
-                    raw_event.as_str(),
-                    "PreToolUse" | "pre_tool_use" | "BeforeTool"
-                ) {
-                    let error_message = format!("🚫 Hook error (fail-closed): {}", message);
-                    return serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": error_message
-                        }
-                    })
-                    .to_string();
-                }
+                    }
+                })
+                .to_string();
+            }
+            // `BeforeTool` も PreToolUse と同じ実行前ゲートなので、推奨形式の
+            // deny で返す（含めないと legacy の `{"decision":"block"}` に落ちる）。
+            if matches!(
+                raw_event.as_str(),
+                "PreToolUse" | "pre_tool_use" | "BeforeTool"
+            ) {
+                let error_message = format!("🚫 Hook error (fail-closed): {}", message);
+                return serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": error_message
+                    }
+                })
+                .to_string();
             }
         }
 
@@ -670,12 +670,11 @@ impl FormatAdapter {
             // これを拾わないと `.ipynb` の保存後フック（formatter/linter）が発火しない。
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
                 let mut raw_tool_input = raw_tool_input.clone();
-                if let Some(object) = raw_tool_input.as_object_mut() {
-                    if !object.contains_key("file_path") {
-                        if let Some(notebook_path) = object.get("notebook_path").cloned() {
-                            object.insert("file_path".to_string(), notebook_path);
-                        }
-                    }
+                if let Some(object) = raw_tool_input.as_object_mut()
+                    && !object.contains_key("file_path")
+                    && let Some(notebook_path) = object.get("notebook_path").cloned()
+                {
+                    object.insert("file_path".to_string(), notebook_path);
                 }
                 let file =
                     serde_json::from_value::<crate::domain::FileOperationInput>(raw_tool_input)

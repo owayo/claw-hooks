@@ -1,4 +1,4 @@
-.PHONY: build release install clean test fmt check msrv help
+.PHONY: build release install clean test fmt check help
 
 # 既定ターゲット
 .DEFAULT_GOAL := help
@@ -39,10 +39,6 @@ fmt: ## コードをフォーマット
 check: ## clippy と cargo check を実行
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo check
-
-msrv: ## MSRV(Rust 1.85)でビルド確認
-	rustup run 1.85.0 cargo check --locked --all-features
-	rustup run 1.85.0 cargo check --locked --no-default-features
 
 clean: ## ビルド成果物を削除
 	cargo clean

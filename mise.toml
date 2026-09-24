@@ -1,0 +1,6 @@
+# Rust ツールチェーンの版はここを正とする。Cargo.toml の rust-version も同じ値に
+# そろえること (tests/toolchain_sync.rs が一致を検証する)。CI も jdx/mise-action で
+# このファイルを読む。mise 自身の版はここに書けないため、CI の mise-action の
+# `version` で固定している。
+[tools]
+rust = { version = "1.98.1", profile = "minimal", components = "clippy,rustfmt" }

@@ -139,7 +139,7 @@ sys.exit(0)
 
 - **OS**: macOS, Linux, Windows
 - **実行時依存**: なし（単一バイナリ）
-- **ソースビルド/開発**: Rust 1.85 以上。CI でも Rust 1.85 で lockfile 固定の依存チェックを実行し、宣言した MSRV が有効であることを保証します。
+- **ソースビルド/開発**: Rust 1.98.1 以上。toolchain は `mise.toml` で固定しており、CI はその版でビルドとテストを行います（`Cargo.toml` の `rust-version` も同じ値）。
 
 ## インストール
 
@@ -159,13 +159,15 @@ cargo build --release
 
 バイナリ: `target/release/claw-hooks`
 
-開発時の確認:
+開発時の確認（Rust の toolchain は `mise.toml` で固定）:
 
 ```bash
-make msrv
-cargo test --all-features
-cargo test --no-default-features
+mise install
+mise exec -- cargo test --all-features
+mise exec -- cargo test --no-default-features
 ```
+
+`mise install` は toolchain を取得するだけで `PATH` には載せないため、`mise exec --` を付けています。シェルで mise を activate 済みなら省略できます。
 
 ### GitHub Releases から
 
@@ -1077,7 +1079,7 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 
 ### 前提条件
 
-- Rust 1.85+
+- Rust 1.98.1+（`mise.toml` で固定。[mise](https://mise.jdx.dev/) を使う場合は `mise install`）
 - Cargo
 
 ### ビルド

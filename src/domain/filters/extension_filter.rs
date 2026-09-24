@@ -394,11 +394,11 @@ impl Filter for ExtensionHookFilter {
         for file_input in file_inputs {
             if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
                 // NanoBuddy 通知（フックコマンドより先に到達するよう先に送信）
-                if self.nano_buddy {
-                    if let Some(ext) = Self::extract_ext(&file_input.file_path) {
-                        debug!("🐱 NanoBuddy ext notification: .{}", ext);
-                        crate::notify::nano_buddy::notify_extension_hook(&ext);
-                    }
+                if self.nano_buddy
+                    && let Some(ext) = Self::extract_ext(&file_input.file_path)
+                {
+                    debug!("🐱 NanoBuddy ext notification: .{}", ext);
+                    crate::notify::nano_buddy::notify_extension_hook(&ext);
                 }
 
                 // コマンドを実行して出力を収集

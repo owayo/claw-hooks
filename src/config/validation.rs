@@ -137,46 +137,46 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
         }
 
         // ステージ範囲の検証（1-5）
-        if let Some(stage) = hook.stage {
-            if !(1..=5).contains(&stage) {
-                bail!(
-                    "stop_hooks[{}]: stage must be between 1 and 5, got {}",
-                    i,
-                    stage
-                );
-            }
+        if let Some(stage) = hook.stage
+            && !(1..=5).contains(&stage)
+        {
+            bail!(
+                "stop_hooks[{}]: stage must be between 1 and 5, got {}",
+                i,
+                stage
+            );
         }
 
         // 条件が指定されている場合の検証
         if let Some(ref condition) = hook.condition {
-            if let Some(ref file_exists) = condition.file_exists {
-                if file_exists.is_empty() {
-                    bail!("stop_hooks[{}]: condition.file_exists cannot be empty", i);
-                }
+            if let Some(ref file_exists) = condition.file_exists
+                && file_exists.is_empty()
+            {
+                bail!("stop_hooks[{}]: condition.file_exists cannot be empty", i);
             }
-            if let Some(ref file_not_exists) = condition.file_not_exists {
-                if file_not_exists.is_empty() {
-                    bail!(
-                        "stop_hooks[{}]: condition.file_not_exists cannot be empty",
-                        i
-                    );
-                }
+            if let Some(ref file_not_exists) = condition.file_not_exists
+                && file_not_exists.is_empty()
+            {
+                bail!(
+                    "stop_hooks[{}]: condition.file_not_exists cannot be empty",
+                    i
+                );
             }
-            if let Some(ref command_exists) = condition.command_exists {
-                if command_exists.is_empty() {
-                    bail!(
-                        "stop_hooks[{}]: condition.command_exists cannot be empty",
-                        i
-                    );
-                }
+            if let Some(ref command_exists) = condition.command_exists
+                && command_exists.is_empty()
+            {
+                bail!(
+                    "stop_hooks[{}]: condition.command_exists cannot be empty",
+                    i
+                );
             }
-            if let Some(ref command_not_exists) = condition.command_not_exists {
-                if command_not_exists.is_empty() {
-                    bail!(
-                        "stop_hooks[{}]: condition.command_not_exists cannot be empty",
-                        i
-                    );
-                }
+            if let Some(ref command_not_exists) = condition.command_not_exists
+                && command_not_exists.is_empty()
+            {
+                bail!(
+                    "stop_hooks[{}]: condition.command_not_exists cannot be empty",
+                    i
+                );
             }
         }
     }

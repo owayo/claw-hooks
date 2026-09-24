@@ -203,11 +203,11 @@ impl StopHookFilter {
             // （stop hook 由来の自動フォローアップ発火回数、0 始まり）を送る。
             // 1 以上なら既にフォローアップ済みなので、Claude の stop_hook_active と
             // 対称的に全 stop hook をスキップして無限ループを防ぐ。
-            if let Some(count) = stop_input.loop_count {
-                if count >= 1 {
-                    debug!("🛑 loop_count={} (>=1), skipping all stop hooks", count);
-                    return LoopCheck::Skip;
-                }
+            if let Some(count) = stop_input.loop_count
+                && count >= 1
+            {
+                debug!("🛑 loop_count={} (>=1), skipping all stop hooks", count);
+                return LoopCheck::Skip;
             }
             stop_input.agent_message.clone()
         } else {

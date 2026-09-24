@@ -107,10 +107,10 @@ pub fn strip_ansi_codes(input: &str) -> String {
                         }
                     }
                     // 終端バイトを消費する（欠けている場合は不正シーケンスとして触らない）
-                    if let Some(&c) = chars.peek() {
-                        if ('\x30'..='\x7e').contains(&c) {
-                            chars.next();
-                        }
+                    if let Some(&c) = chars.peek()
+                        && ('\x30'..='\x7e').contains(&c)
+                    {
+                        chars.next();
                     }
                 }
                 Some(_) => {

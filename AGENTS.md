@@ -6,7 +6,7 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, Grok, G
 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
-- **Language**: Rust (MSRV 1.85)
+- **Language**: Rust 1.98.1 (toolchain pinned in `mise.toml`; `rust-version` is kept identical — see Toolchain)
 - **Version**: 26.8.100
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
 - **Supported Agents**: Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI
@@ -86,8 +86,8 @@ cargo test -- --nocapture
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 
-# MSRV
-make msrv
+# Toolchain (pinned in mise.toml)
+mise install
 
 # Run
 cargo run -- hook        # Process hook from stdin
@@ -95,6 +95,14 @@ cargo run -- init        # Generate default config
 cargo run -- check       # Validate config
 cargo run -- version     # Show version
 ```
+
+## Toolchain
+
+- The Rust version is defined only in `mise.toml` (`[tools] rust`). `Cargo.toml`'s `rust-version` must stay identical: CI builds and tests with that single version, so a lower `rust-version` would declare support for versions nothing verifies. `tests/toolchain_sync.rs` fails when the two diverge — bump both together, because dependency updaters (e.g. `depup`) may bump only one of them. Do not add `rust-toolchain.toml` or pin the version anywhere else. Raising `rust-version` also switches on clippy's MSRV-gated lints — moving from 1.85 to 1.98.1 surfaced 27 `collapsible_if` findings (nested `if let` collapsed into let chains) with no code change — so run `cargo clippy --fix` for both feature sets (`--all-features` and `--no-default-features`) in the same commit.
+- CI (`ci.yml`) and the release build (`release.yml`) install the toolchain from `mise.toml` via `jdx/mise-action`, pinned by commit SHA with a fixed mise version. Keep both workflows on the same values, and choose releases that are at least 14 days old. The action's cache stays off: the toolchain itself lives under rustup (`~/.rustup`), outside the cache, and a restored cache skips installing clippy/rustfmt (jdx/mise-action#215). Each job then checks that `rustc` matches `mise current rust`, so a runner's preinstalled stable cannot slip in unnoticed.
+- Build targets are not listed in `mise.toml` (every developer and job would install all of them); each build job adds its own with `rustup target add`.
+- `mise.lock` is not committed: `core:rust` delegates to rustup, so the lockfile would carry no checksums.
+- The release workflow syncs only the package's own version into `Cargo.lock` (`cargo update --workspace`) and builds with `--locked`. `cargo generate-lockfile` must not come back: it re-resolves every dependency to the newest release, shipping versions CI never tested and bypassing the release-age policy dependency updates follow.
 
 ## Code Style
 

@@ -10,30 +10,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  msrv:
-    name: MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust 1.85 toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
-
-      - name: Check MSRV (all features)
-        run: cargo check --locked --all-features
-
-      # AST 無効時のフォールバックパーサーも MSRV でビルドできることを保証する。
-      - name: Check MSRV (no default features)
-        run: cargo check --locked --no-default-features
-
+  # Rust の版は mise.toml を正とする。Cargo.toml の rust-version も同じ値
+  # (tests/toolchain_sync.rs で検証) なので、このジョブが MSRV の検証を兼ねる。
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # mise 本体の版は mise.toml に書けないため `version` で固定し、action も
+      # コミット SHA で固定する。版を上げるときは release.yml も同時に書き換える。
+      # cache は使わない。toolchain の実体は rustup 管理 (~/.rustup) でキャッシュに
+      # 入らず、復元すると clippy / rustfmt が欠けたまま進む (jdx/mise-action#215)。
+      - name: Install Rust toolchain (mise.toml)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.9.4
+          cache: false
+
+      # runner に元から入っている stable ではなく、mise.toml の版が選ばれていることを確かめる。
+      - name: Verify Rust toolchain
+        run: |
+          rustc --version
+          cargo clippy --version
+          cargo fmt --version
+          test "$(rustc --version | cut -d' ' -f2)" = "$(mise current rust)"
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -42,31 +43,31 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mise.toml', '**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
       # フォールバック(非 AST)パーサー経路も検証する。ast-parser を無効化した
       # ビルドは独立した文字列パーサーを使うため、AST 経路のテストでは
       # 検出漏れ(fail-open)を取りこぼし得る。両構成を CI で必ず通す。
       - name: Run tests (no default features / fallback parser)
-        run: cargo test --no-default-features --verbose
+        run: cargo test --locked --no-default-features --verbose
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run clippy (no default features)
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
 
       - name: Check formatting
         run: cargo fmt -- --check
 
   build:
     name: Build
-    needs: [msrv, test]
+    needs: [test]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -83,10 +84,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (mise.toml)
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          targets: ${{ matrix.target }}
+          version: 2026.9.4
+          cache: false
+
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          rustc --version
+          test "$(rustc --version | cut -d' ' -f2)" = "$(mise current rust)"
+
+      # target は mise.toml に書かない (書くと全開発者・全ジョブが全 target を
+      # 入れることになる)。ビルドするジョブで mise.toml の toolchain に追加する。
+      - name: Add build target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}

@@ -933,14 +933,23 @@ mod tests {
     fn test_spawn_detached_with_env_passes_env_vars() {
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-detached-env-{}", std::process::id()));
+        // シェルのリダイレクトはファイルを空で作ってから書き込むため、marker へ直接書かせると
+        // 「存在する」を確認した直後に空のまま読むことがある (負荷の高い CI で発生した)。
+        // 一時ファイルへ書き切ってから同一ディレクトリ内の mv (rename) で置き、
+        // marker が見えた時点で中身が揃っているようにする。
+        let partial = marker.with_extension("partial");
         let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let partial_path = partial.to_string_lossy().replace('\'', "'\\''");
         let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&partial);
 
         spawn_detached_with_env(
             "sh",
             &[
                 "-c".to_string(),
-                format!("printf %s \"$DETACHED_VAR\" > '{}'", marker_path),
+                format!(
+                    "printf %s \"$DETACHED_VAR\" > '{partial_path}' && mv '{partial_path}' '{marker_path}'"
+                ),
             ],
             &[("DETACHED_VAR", "detached-env-ok")],
         )

@@ -834,6 +834,15 @@ mod tests {
         path.exists()
     }
 
+    /// `sh -c '...'` のスクリプトに埋め込むパス。スクリプトの中では `\` がエスケープになるので、
+    /// Windows のパスは `/` 区切りにする (sh は `C:/...` を読める)。フックのコマンド文字列を囲む
+    /// `'` はエスケープする。
+    fn sh_script_path(path: &std::path::Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "'\\''")
+    }
+
     #[test]
     fn test_conditional_hook_file_not_found_skips() {
         use crate::config::HookCondition;
@@ -1439,7 +1448,7 @@ mod tests {
         // マーカーファイルを使用: sleepプロセスはファイル作成前にkillされるべき
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-timeout-kill-{}", std::process::id()));
-        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let marker_path = sh_script_path(&marker);
         let _ = std::fs::remove_file(&marker);
 
         // コマンド: sleep 10後にマーカー作成。正しくkillされればマーカーは存在しない
@@ -1635,7 +1644,7 @@ mod tests {
         // ステージ順が正しければ、ステージ3の実行時点でマーカーが存在する。
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-stage-order-{}", std::process::id()));
-        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let marker_path = sh_script_path(&marker);
         let _ = std::fs::remove_file(&marker);
 
         let hooks = vec![
@@ -1782,7 +1791,7 @@ mod tests {
         // report=false は Hook 応答を待たせず、子プロセスだけが後続で完了する。
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-ff-complete-{}", std::process::id()));
-        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let marker_path = sh_script_path(&marker);
         let _ = std::fs::remove_file(&marker);
 
         let hooks = vec![StopHook {
@@ -1816,7 +1825,7 @@ mod tests {
     fn test_fire_and_forget_does_not_wait_for_slow_process() {
         let marker =
             std::env::temp_dir().join(format!("claw-hooks-drain-test-{}", std::process::id()));
-        let marker_path = marker.to_string_lossy().replace('\'', "'\\''");
+        let marker_path = sh_script_path(&marker);
         let _ = std::fs::remove_file(&marker);
 
         let hooks = vec![StopHook {

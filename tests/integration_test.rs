@@ -2358,10 +2358,12 @@ fn test_windsurf_post_write_code_reports_lint_output_to_agent() {
         "[extension_hooks]\n\".zzz\" = [\"sh -c 'echo LINT-FINDING {file}; exit 1'\"]\n",
     );
 
-    let input = format!(
-        r#"{{"agent_action_name":"post_write_code","tool_info":{{"file_path":"{}"}}}}"#,
-        target.display()
-    );
+    // パスは serde_json でエスケープする (Windows のパスの `\` を JSON にそのまま入れると壊れる)
+    let input = serde_json::json!({
+        "agent_action_name": "post_write_code",
+        "tool_info": {"file_path": target.to_str().unwrap()},
+    })
+    .to_string();
     let (stdout, stderr, exit_code) = run_hook_with_config_and_format(&input, "windsurf", &config);
 
     assert_eq!(
@@ -2389,10 +2391,11 @@ fn test_windsurf_post_write_code_stays_silent_without_findings() {
         "[extension_hooks]\n\".zzz\" = [\"sh -c 'true {file}'\"]\n",
     );
 
-    let input = format!(
-        r#"{{"agent_action_name":"post_write_code","tool_info":{{"file_path":"{}"}}}}"#,
-        target.display()
-    );
+    let input = serde_json::json!({
+        "agent_action_name": "post_write_code",
+        "tool_info": {"file_path": target.to_str().unwrap()},
+    })
+    .to_string();
     let (stdout, stderr, exit_code) = run_hook_with_config_and_format(&input, "windsurf", &config);
 
     assert_eq!(exit_code, 0, "診断が無ければ通常終了 (stderr={stderr})");
@@ -2411,10 +2414,12 @@ fn test_notebook_edit_triggers_extension_hooks() {
         "[extension_hooks]\n\".ipynb\" = [\"sh -c 'echo NOTEBOOK-CHECKED {file}; exit 1'\"]\n",
     );
 
-    let input = format!(
-        r#"{{"hook_event_name":"PostToolUse","tool_name":"NotebookEdit","tool_input":{{"notebook_path":"{}","new_source":"x = 1"}}}}"#,
-        target.display()
-    );
+    let input = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "NotebookEdit",
+        "tool_input": {"notebook_path": target.to_str().unwrap(), "new_source": "x = 1"},
+    })
+    .to_string();
     let (stdout, _stderr, exit_code) = run_hook_with_config_and_format(&input, "claude", &config);
 
     assert_eq!(exit_code, 0);

@@ -647,6 +647,9 @@ mod tests {
         let _ = child.unwrap().wait();
     }
 
+    // 存在しないプログラムが起動エラーになるのは Unix だけ。Windows は cmd /c 経由で起動するので
+    // cmd の起動は成功し、失敗は終了コードで返る (下の Windows 用のテスト)
+    #[cfg(unix)]
     #[test]
     fn test_spawn_piped_nonexistent_command() {
         let child = spawn_piped("nonexistent-command-xyz-abc-999", &[]);
@@ -657,6 +660,19 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_spawn_piped_nonexistent_command_fails_with_exit_code() {
+        let child = spawn_piped("nonexistent-command-xyz-abc-999", &[])
+            .expect("Windows は cmd /c の起動なので成功する");
+        let output = run_with_timeout(child, 10, "nonexistent-command-xyz-abc-999").unwrap();
+        assert!(
+            !output.status.success(),
+            "存在しないコマンドは失敗の終了コードで返るべき"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn test_spawn_piped_error_hides_program_directory() {
         let error = spawn_piped("/private/claw-hooks-secret/nonexistent-command", &[])
@@ -915,6 +931,8 @@ mod tests {
         let _ = std::fs::remove_file(marker);
     }
 
+    // 起動エラーになるのは Unix だけ (Windows は cmd /c の起動が成功する。上の spawn_piped と同じ)
+    #[cfg(unix)]
     #[test]
     fn test_spawn_detached_error_hides_program_directory() {
         let error = spawn_detached_with_env(

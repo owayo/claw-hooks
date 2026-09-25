@@ -1445,8 +1445,12 @@ mod tests {
 
     #[test]
     fn test_command_in_path_absolute_path_existing() {
-        // /bin/sh は Unix システムに存在するはず
-        assert!(HookCondition::command_in_path("/bin/sh"));
+        // 絶対パスで書いた実在のコマンド。Unix は /bin/sh、Windows は ComSpec (cmd.exe の絶対パス)
+        #[cfg(unix)]
+        let command = String::from("/bin/sh");
+        #[cfg(windows)]
+        let command = std::env::var("ComSpec").expect("ComSpec should be set on Windows");
+        assert!(HookCondition::command_in_path(&command));
     }
 
     #[test]

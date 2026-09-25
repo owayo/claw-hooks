@@ -1101,6 +1101,9 @@ mod tests {
         }
     }
 
+    // コマンドは sh の引用 (printf の引数の中の `|`) に頼る。Windows は cmd /c を経由するので、
+    // cmd が `|` をパイプとして読み、sh まで届かない
+    #[cfg(unix)]
     #[test]
     fn test_execute_suppresses_output_that_normalizes_to_empty() {
         // 正規化で全て落ちる出力（枠線のみ等）は空の追加コンテキストを返さない。

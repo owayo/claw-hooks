@@ -998,9 +998,11 @@ message = "project: use pnpm"
         let dir = tempfile::TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
         let log_dir = dir.path().join("custom-logs");
+        // TOML のリテラル文字列 ('...') で書く。基本文字列 ("...") だと Windows のパスの `\` が
+        // エスケープとして読まれて設定の読み込みに失敗する
         fs::write(
             &config_path,
-            format!("log_path = \"{}\"\n", log_dir.display()),
+            format!("log_path = '{}'\n", log_dir.display()),
         )
         .unwrap();
 

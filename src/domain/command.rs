@@ -51,6 +51,27 @@ const POLL_BACKOFF_INITIAL: Duration = Duration::from_millis(1);
 /// 指数的に伸ばしてここで頭打ちにする。タイムアウト判定の粒度もこの値になる。
 const POLL_BACKOFF_MAX: Duration = Duration::from_millis(50);
 
+/// 子プロセスの起動 (パイプの作成から fork / exec まで) を 1 つずつにするロック。
+///
+/// macOS の std はパイプを `pipe()` で作ってから `FD_CLOEXEC` を立てるため、Linux の
+/// `pipe2(O_CLOEXEC)` と違って不可分でない。その間に別のスレッドが子プロセスを起動すると、
+/// その子がこちらのパイプの書き込み側を継承して持ち続け、こちらのコマンドが終わっても
+/// パイプが EOF にならない。並列に走るフックの結果が出力の排出の猶予
+/// (`OUTPUT_DRAIN_GRACE_SECS`) まで待たされ、失敗したフックはタイムアウトと誤って
+/// 報告される (macOS の CI で、並列のテストの `true` が 5 秒待たされて見つかった)。
+/// 起動を直列にして、パイプの作成と別の起動が重ならないようにする。
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// `SPAWN_LOCK` を取って子プロセスを起動する。claw-hooks の子プロセスの起動は必ずここを通す。
+///
+/// ロックは `spawn()` の間だけ持つ (起動したコマンドの実行は並列のまま)。
+pub fn spawn_serialized(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cmd.spawn()
+}
+
 /// 実行ファイルのパスから、ログやエラー表示に使用できるファイル名だけを返す。
 ///
 /// 設定された絶対パスにはユーザー名や非公開のディレクトリ構成が含まれ得るため、
@@ -484,7 +505,7 @@ pub fn spawn_piped_with_env(
     }
     #[cfg(unix)]
     configure_unix_process_group(&mut cmd);
-    cmd.spawn()
+    spawn_serialized(&mut cmd)
         .map_err(|e| format!("Failed to execute '{}': {}", program_label(program), e))
 }
 
@@ -520,7 +541,7 @@ pub fn spawn_detached_with_env(
     }
     #[cfg(unix)]
     configure_unix_process_group(&mut cmd);
-    cmd.spawn()
+    spawn_serialized(&mut cmd)
         .map(|mut child| {
             let pid = child.id();
             // ゾンビを防ぐためバックグラウンドで wait する。

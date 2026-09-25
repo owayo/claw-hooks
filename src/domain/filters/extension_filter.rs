@@ -6,7 +6,9 @@ use std::process::{Command, Stdio};
 use tracing::{debug, info, warn};
 
 use super::Filter;
-use crate::domain::command::{configure_process_group, program_label, run_with_timeout};
+use crate::domain::command::{
+    configure_process_group, program_label, run_with_timeout, spawn_serialized,
+};
 use crate::domain::normalize::normalize_lint_output;
 use crate::domain::{Decision, FileOperationInput, HookEvent, HookInput, ToolInput};
 
@@ -234,9 +236,9 @@ impl ExtensionHookFilter {
         );
 
         let start = std::time::Instant::now();
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to execute hook: {}", e))?;
+        // 並列のフックとパイプを取り違えないよう、起動は spawn_serialized を通す
+        let child =
+            spawn_serialized(&mut cmd).map_err(|e| format!("Failed to execute hook: {}", e))?;
         // タイムアウト本文はエージェントへ返るので、プログラム名だけを渡す
         // （stop_filter 側と同じ扱い）。
         let result = run_with_timeout(child, self.timeout_secs, &display_label);

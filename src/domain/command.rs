@@ -732,6 +732,8 @@ mod tests {
     #[test]
     fn test_run_with_timeout_kills_on_timeout() {
         let child = spawn_piped("sleep", &["30".to_string()]).unwrap();
+        // 終了の確認 (kill -0) は Unix でだけ行う
+        #[cfg(unix)]
         let pid = child.id();
 
         let start = Instant::now();

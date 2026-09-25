@@ -114,14 +114,16 @@ jobs:
 
       # Windows は quality で make ci を回さないので、配る OS の裏付けとしてここでテストする。
       # Makefile の test と同じ 2 構成 (all-features と、fallback パーサーの no-default-features)。
-      # pwsh の複数行の run は最後のコマンドの終了コードしか見ないので、構成ごとにステップを分ける
+      # pwsh の複数行の run は最後のコマンドの終了コードしか見ないので、構成ごとにステップを分ける。
+      # Windows のテストは手元で回さないので、--no-fail-fast で落ちたテストを 1 回の実行で全部出し、
+      # 片方の構成が落ちても、もう片方の構成の結果も出す (!cancelled())
       - name: Test (Windows, all features)
         if: runner.os == 'Windows'
-        run: cargo test --locked --all-features
+        run: cargo test --locked --all-features --no-fail-fast
 
       - name: Test (Windows, no default features)
-        if: runner.os == 'Windows'
-        run: cargo test --locked --no-default-features
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: cargo test --locked --no-default-features --no-fail-fast
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}

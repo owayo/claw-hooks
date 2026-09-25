@@ -1970,11 +1970,25 @@ mod tests {
         );
     }
 
+    /// 終了コード 1 の `ExitStatus` を作る。`from_raw` の引数は OS ごとに意味が違う
+    /// (Unix は wait のステータスで終了コードは上位バイト、Windows は終了コードそのもの)。
+    fn exit_code_one() -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(256)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1)
+        }
+    }
+
     #[test]
     fn test_build_reason_stdout_only() {
-        use std::os::unix::process::ExitStatusExt;
         let output = std::process::Output {
-            status: std::process::ExitStatus::from_raw(256), // exit code 1
+            status: exit_code_one(),
             stdout: b"lint error found".to_vec(),
             stderr: Vec::new(),
         };
@@ -1985,9 +1999,8 @@ mod tests {
 
     #[test]
     fn test_build_reason_stderr_only() {
-        use std::os::unix::process::ExitStatusExt;
         let output = std::process::Output {
-            status: std::process::ExitStatus::from_raw(256),
+            status: exit_code_one(),
             stdout: Vec::new(),
             stderr: b"compile error".to_vec(),
         };
@@ -1997,9 +2010,8 @@ mod tests {
 
     #[test]
     fn test_build_reason_both_stdout_and_stderr() {
-        use std::os::unix::process::ExitStatusExt;
         let output = std::process::Output {
-            status: std::process::ExitStatus::from_raw(256),
+            status: exit_code_one(),
             stdout: b"stdout content".to_vec(),
             stderr: b"stderr content".to_vec(),
         };
@@ -2010,9 +2022,8 @@ mod tests {
 
     #[test]
     fn test_build_reason_empty_output() {
-        use std::os::unix::process::ExitStatusExt;
         let output = std::process::Output {
-            status: std::process::ExitStatus::from_raw(256),
+            status: exit_code_one(),
             stdout: Vec::new(),
             stderr: Vec::new(),
         };

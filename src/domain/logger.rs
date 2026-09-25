@@ -166,25 +166,11 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime};
 
+    /// ファイルのアクセス日時と更新日時を書き換える。libc の utimensat は Unix にしか無いので、
+    /// Windows でも動く std の `FileTimes` を使う。
     fn set_file_modified_time(path: &Path, time: SystemTime) -> std::io::Result<()> {
-        let since_epoch = time.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        let secs = since_epoch.as_secs();
-        let atime = libc::timespec {
-            tv_sec: secs as libc::time_t,
-            tv_nsec: 0,
-        };
-        let mtime = libc::timespec {
-            tv_sec: secs as libc::time_t,
-            tv_nsec: 0,
-        };
-        let times = [atime, mtime];
-        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-        let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
+        let file = fs::OpenOptions::new().write(true).open(path)?;
+        file.set_times(fs::FileTimes::new().set_accessed(time).set_modified(time))
     }
 
     #[test]

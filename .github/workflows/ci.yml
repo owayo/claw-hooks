@@ -1,3 +1,10 @@
+# CI。検査の中身は Makefile の ci が決める (手元の make ci が通れば CI も通る)。
+#
+# - quality: Linux と macOS で make setup と make ci だけを呼ぶ。make ci は test と clippy を
+#   all-features (tree-sitter の AST パーサー) と no-default-features (文字列の fallback パーサー) の
+#   2 構成で回す
+# - build: release.yml の build と同じ組 (os / target) でビルドする。release.yml の dry_run では build が
+#   走らないので、配布物を作れることはここで確かめる。Windows はここでテストも回す
 name: CI
 
 on:
@@ -6,100 +13,115 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Rust の版は mise.toml を正とする。Cargo.toml の rust-version も同じ値
-  # (tests/toolchain_sync.rs で検証) なので、このジョブが MSRV の検証を兼ねる。
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      # mise 本体の版は mise.toml に書けないため `version` で固定し、action も
-      # コミット SHA で固定する。版を上げるときは release.yml も同時に書き換える。
-      # cache は使わない。toolchain の実体は rustup 管理 (~/.rustup) でキャッシュに
-      # 入らず、復元すると clippy / rustfmt が欠けたまま進む (jdx/mise-action#215)。
-      - name: Install Rust toolchain (mise.toml)
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: 2026.9.4
-          cache: false
-
-      # runner に元から入っている stable ではなく、mise.toml の版が選ばれていることを確かめる。
-      - name: Verify Rust toolchain
-        run: |
-          rustc --version
-          cargo clippy --version
-          cargo fmt --version
-          test "$(rustc --version | cut -d' ' -f2)" = "$(mise current rust)"
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mise.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Run tests
-        run: cargo test --locked --all-features --verbose
-
-      # フォールバック(非 AST)パーサー経路も検証する。ast-parser を無効化した
-      # ビルドは独立した文字列パーサーを使うため、AST 経路のテストでは
-      # 検出漏れ(fail-open)を取りこぼし得る。両構成を CI で必ず通す。
-      - name: Run tests (no default features / fallback parser)
-        run: cargo test --locked --no-default-features --verbose
-
-      - name: Run clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Run clippy (no default features)
-        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-  build:
-    name: Build
-    needs: [test]
+  quality:
+    name: Quality (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        # Windows は入れない。ランナーの make は MinGW の mingw32-make の写しで、レシピの POSIX シェル前提
+        # ($$(...) や [ -n ... ]) の解釈に癖がある。Windows のテストは build で cargo を直接呼ぶ
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # ツールの版は mise.toml が正。mise 本体は公開から 14 日以上たった最新の版を、署名付きの checksum で
+      # 確かめて入れる。cache は切る (効いた回だけ clippy / rustfmt が欠ける。jdx/mise-action#215)
+      - uses: jdx/mise-action@v4
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      # target/ と ~/.cargo のキャッシュ (鍵に rustc の版が入るので、mise.toml の rust を上げると作り直す)
+      - uses: Swatinem/rust-cache@v2
+
+      - run: make setup
+      - run: make ci
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # release.yml の build と同じ組 (行を足したら両方に足す)。Linux ARM64 は arm64 のランナーでそのまま
+        # ビルドする。musl は GLIBC の版に縛られない静的なバイナリ (古いディストリビューションやコンテナ向け)
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-
     steps:
-      - uses: actions/checkout@v5
+      # Windows のランナーは既定で LF を CRLF に変えて checkout する。release.yml の build と同じく LF のまま取り、
+      # テストの期待値や include_str! で埋め込むファイルの改行を配布物とそろえる
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
 
-      - name: Install Rust toolchain (mise.toml)
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: actions/checkout@v7
         with:
-          version: 2026.9.4
+          persist-credentials: false
+
+      # ビルドに効く環境変数 (MACOSX_DEPLOYMENT_TARGET など) は mise.toml の [env] に置く。mise-action が
+      # 後続のステップへ渡すので、ci.yml と release.yml と手元の make で同じ値になる (mise-guide 18 章)
+      - uses: jdx/mise-action@v4
+        with:
+          minimum_release_age: 14d
           cache: false
 
-      - name: Verify Rust toolchain
+      # このジョブは make を通さず cargo を直接呼ぶ。ランナーに元から入っている stable ではなく、
+      # mise.toml の版が選ばれていることを確かめる
+      - name: Verify the Rust toolchain
         shell: bash
         run: |
           rustc --version
           test "$(rustc --version | cut -d' ' -f2)" = "$(mise current rust)"
 
-      # target は mise.toml に書かない (書くと全開発者・全ジョブが全 target を
-      # 入れることになる)。ビルドするジョブで mise.toml の toolchain に追加する。
-      - name: Add build target
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # mise.toml の rust はホストのツールチェーンと components だけを入れるので、配布のターゲットを足す
+      - name: Add the Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # Windows は quality で make ci を回さないので、配る OS の裏付けとしてここでテストする。
+      # Makefile の test と同じ 2 構成 (all-features と、fallback パーサーの no-default-features)。
+      # pwsh の複数行の run は最後のコマンドの終了コードしか見ないので、構成ごとにステップを分ける
+      - name: Test (Windows, all features)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --all-features
+
+      - name: Test (Windows, no default features)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --no-default-features
+
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}

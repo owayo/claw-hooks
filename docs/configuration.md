@@ -137,15 +137,15 @@ message = "Use pnpm instead"
 | `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence (none of these weaken a decision) |
 | `debug`, `log_path`, `nano_buddy` | **Global only** | Rejected as an error |
 
-Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks` and `extension_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated as strictly as before.
+Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks` and `extension_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated strictly.
 
 Validate with `claw-hooks check` — it reports whether a project config was found, whether it's valid, which entries are ignored, and any unknown (mistyped) keys.
 
-> **Migrating per-project formatters and linters.** If you were declaring `extension_hooks` or `stop_hooks` in a `.claw-hooks.toml`, move them to the global `config.toml` and target them with `condition = { file_exists = "…" }` — that gives the same per-project behavior without letting a repository decide what runs on your machine. Anything left in a project config is ignored and reported by `claw-hooks check`.
+> **Per-project formatters and linters.** Declare `extension_hooks` and `stop_hooks` in the global `config.toml` and target them with `condition = { file_exists = "…" }` — that gives per-project behavior without letting a repository decide what runs on your machine. Entries in a project config are ignored and reported by `claw-hooks check`.
 
-> **`hook_timeout = 0` is now rejected.** It never meant "unlimited" (only `output_max_length` uses `0` that way) — it made every hook time out instantly. Because claw-hooks fails closed on an invalid config, a config that still has it will deny every command until it is fixed; `claw-hooks check` names the problem.
+> **`hook_timeout = 0` is rejected.** It does not mean "unlimited" (only `output_max_length` uses `0` that way) — it would make every hook time out instantly. Because claw-hooks fails closed on an invalid config, a config with it denies every command until it is fixed; `claw-hooks check` names the problem.
 
-> **Custom filters now normalize the command name** the same way the built-in `rm`/`kill`/`dd` filters do, so `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` all match a `command = "npm"` filter. This blocks strictly more than before.
+> **Custom filters normalize the command name** the same way the built-in `rm`/`kill`/`dd` filters do, so `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` all match a `command = "npm"` filter.
 
 **2. `--config` — Full config replacement**
 

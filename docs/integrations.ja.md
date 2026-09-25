@@ -61,7 +61,7 @@
 
 > **コマンドブロック用フックには `failClosed: true` を推奨します。** Cursor は既定でフェイルオープンです。正常なブロック（exit `0` + stdout の `{"permission":"deny", …}`）は `failClosed` なしでも機能しますが、claw-hooks 自体がクラッシュ・タイムアウトした場合、`failClosed: true` を設定していないと Cursor はコマンドを通してしまいます。`afterFileEdit`/`stop` では付けません（フォーマッター/lint のクラッシュでエージェントを止めるべきではないため）。
 
-> **`preToolUse` には matcher を付けたままにしてください。** このフックは*すべての*ツールで発火するため、matcher が無いと巨大な `Write` も claw-hooks に届きます。stdin の 4 MiB 上限を超えるとパースできなくなり、`preToolUse` は実行前ゲートなのでフェイルクローズドの deny になって、claw-hooks が何の意見も持たないファイル書き込みを止めてしまいます。Cursor の matcher は正規表現なので、上の例はあえて広めにしてあります。誤って一致しても無害で（`tool_input.command` を持たない入力は従来どおりパススルーされます）、取りこぼしはツール名ではなくイベント単位でシェルを捉える `beforeShellExecution` が二重に受けます。
+> **`preToolUse` には matcher を付けたままにしてください。** このフックは*すべての*ツールで発火するため、matcher が無いと巨大な `Write` も claw-hooks に届きます。stdin の 4 MiB 上限を超えるとパースできなくなり、`preToolUse` は実行前ゲートなのでフェイルクローズドの deny になって、claw-hooks が何の意見も持たないファイル書き込みを止めてしまいます。Cursor の matcher は正規表現なので、上の例はあえて広めにしてあります。誤って一致しても無害で（`tool_input.command` を持たない入力はパススルーされます）、取りこぼしはツール名ではなくイベント単位でシェルを捉える `beforeShellExecution` が二重に受けます。
 
 > **停止時 lint を使うならプロジェクトフックに置いてください。** Cursor はプロジェクトフック（`<project>/.cursor/hooks.json`）をプロジェクトルートで、ユーザーフック（`~/.cursor/hooks.json`）を `~/.cursor/` で実行します。claw-hooks の `condition = { file_exists = "Cargo.toml" }` による判定、`.claw-hooks.toml` の探索、各フックの作業ディレクトリはいずれもそのディレクトリを基準にするため、ユーザーレベルに登録するとプロジェクト種別の条件が無言で不成立になります。条件なしのフック（`git-sc` の自動コミット等）はリポジトリではなく Cursor の設定ディレクトリで走ります。
 
@@ -115,7 +115,7 @@
 
 注意点:
 - **Antigravity では `--event` を指定してください。** Antigravity のペイロードにはイベント名フィールドが無く、`PreToolUse` と `PostToolUse` は形状で区別できません（どちらも `toolCall` と `stepIdx` を持ち、差は Optional な `error` のみ）。`hooks.json` はイベントごとに別エントリで登録するため、`--event` でどちらかを伝えます。未指定の場合は形状から推定し、区別できないケースは `PreToolUse` に倒します（コマンドブロックは維持されますが、保存後フックは動作しません）。
-- `--event PostToolUse` を指定すると Antigravity でも拡張子フックが動作します。編集対象は `toolCall.args.TargetFile` から復元します。ただし公式仕様で `PostToolUse` の出力は `{}` 固定のため、formatter/linter は**実行されますが診断結果をエージェントへ返せません**。診断を伝えたい場合は従来どおり Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` で再投入してください。
+- `--event PostToolUse` を指定すると Antigravity でも拡張子フックが動作します。編集対象は `toolCall.args.TargetFile` から復元します。ただし公式仕様で `PostToolUse` の出力は `{}` 固定のため、formatter/linter は**実行されますが診断結果をエージェントへ返せません**。診断を伝えたい場合は Stop hooks でプロジェクト全体の lint/typecheck を回し、失敗を `{"decision":"continue","reason":"..."}` で再投入してください。
 - **matcher は `run_command` に加えて `manage_task` も対象にします。** `manage_task` は `Action: "send_input"` のとき `Input` を実行中プロセスの標準入力へ書き込みます。`run_command` + `RunPersistent: true` で永続シェルを起動すれば、以降のコマンドは `CommandLine` を一度も通らずに `send_input` から届くため、`manage_task` を matcher から外すと rm/kill/dd フィルターを完全に迂回できてしまいます。それ以外のアクション（`list` / `status` / `kill`）はエージェント自身のバックグラウンドタスク管理（シェルの `kill` コマンドとは別物）なのでパススルーします。
 - Antigravity には `stop_hook_active`（Claude/Codex）や `loop_count`（Cursor）に相当する入力がありません（`executionNum` は実行試行の連番で、通常の初回停止でも `1` です）。そのため恒久的に失敗する stop hook によるループを claw-hooks 側では遮断できません。report=true の stop hook には自己完結する終了条件を持たせてください。
 - `PreInvocation` / `PostInvocation` は claw-hooks のスコープ外（モデル呼び出し前後のオーケストレーション）なので、自動的にパススルーされます。これらのイベントは hook 登録不要です。

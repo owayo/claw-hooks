@@ -5,7 +5,7 @@ edition = "2024"
 # mise.toml で固定した toolchain と同じ値にする (tests/toolchain_sync.rs で検証)。
 # CI はこの版だけでビルド・テストするので、それより古い版への対応は宣言しない。
 rust-version = "1.98.1"
-authors = ["owayo <yoheiowa@gmail.com>"]
+authors = ["owayo"]
 description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI"
 license = "MIT"
 repository = "https://github.com/owayo/claw-hooks"

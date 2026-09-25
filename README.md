@@ -8,53 +8,53 @@
   Simple TOML hooks for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI - Command blocking, auto-formatting, stop-time automation
 </p>
 
+<!-- standard:badges:start -->
 <h3 align="center">Supported Platforms</h3>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Linux-FCC624?logo=linux&amp;logoColor=black" alt="Linux">
   <img src="https://img.shields.io/badge/macOS-000000?logo=apple&amp;logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Windows-0078D6" alt="Windows">
-  <br>
-  <a href="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml">
-    <img alt="CI" src="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml/badge.svg?branch=main">
-  </a>
-  <a href="https://github.com/owayo/claw-hooks/releases/latest">
-    <img alt="Version" src="https://img.shields.io/github/v/release/owayo/claw-hooks">
-  </a>
-  <a href="LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/owayo/claw-hooks">
-  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml"><img src="https://github.com/owayo/claw-hooks/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/owayo/claw-hooks/releases/latest"><img src="https://img.shields.io/github/v/release/owayo/claw-hooks" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/owayo/claw-hooks" alt="License"></a>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.ja.md">日本語</a>
 </p>
+<!-- standard:badges:end -->
 
 ---
 
+claw-hooks is a single binary that plugs into the hook systems of Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI. One TOML file decides which shell commands the agent may not run, which formatters and linters run after a file edit, and what runs when the agent stops.
+
 ## Features
 
-- 🦀 **Built with Rust** - Low overhead, lightweight single binary, blazing fast (<10ms startup)
-- ⚡ **Kill Command Blocking** - Blocks `kill`, `pkill`, `killall`, `taskkill`, PowerShell's `Stop-Process` and its `spps` alias, and suggests [safe-kill](https://github.com/owayo/safe-kill)
-- 🗑️ **RM Command Blocking** - Blocks `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell's `Remove-Item` and suggests [safe-rm](https://github.com/owayo/safe-rm)
-- 🪟 **PowerShell Tool Coverage** - The same filters apply to Claude Code's `PowerShell` tool, which is the only shell tool on Windows without Git Bash. Configure the matcher as `Bash|PowerShell`
-- 💾 **DD Command Blocking** - Optionally blocks `dd` to prevent disk overwrite accidents
-- 🌳 **AST-based Parsing** - [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
-- 🔧 **Custom Command Filters** - Define custom filters with regex support
-- 📁 **Extension Hooks** - Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`; lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
-- ⏹️ **Stop Hooks** - Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
-- 🧹 **Project-wide Lint on Stop** - Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
-- ⏱️ **Hook Timeout** - Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
-- 📏 **Output Truncation** - Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
-- 🗜️ **Output Compression** - Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved. The no-op test runs on the *normalized* text, so a tool that pairs a success line with per-run config warnings (e.g. `ruff check --select D…`, which writes ruleset-incompatibility warnings to stderr on every run) is still recognised as a no-op instead of returning a bare `All checks passed!` after every edit. Biome's `Checked N file(s) in <duration>. No fixes applied.` counter and its closing `check ━` / `× Some errors were emitted while running checks.` block are dropped when diagnostics accompany them, and kept when they are the whole output. ANSI stripping also covers the general `ESC` + intermediate-byte escape form (terminfo's `sgr0`, e.g. `\E(B\E[m`) and bare `SO`/`SI`, which otherwise leak a stray character onto every colored `cargo fmt --check` diff line and defeat all the rules above
-- ♻️ **Repeated Source Excerpt Removal** - Within a single diagnostic, source-excerpt lines (`3 │ code`, `> 3 │ code`, `12 | code`) that repeat verbatim are dropped after the first occurrence: biome re-prints the same excerpt once per sub-block (the `!` message, the `i` note, the `i Safe fix:` block) and ruff re-prints context inside its fix diff, and those repeats carry no information. Diff lines (`- old` / `+ new`) survive because they *are* the fix. Measured on real output: ruff −6%, biome −14%
-- 🔁 **Cross-Diagnostic Excerpt Removal** - Consecutive diagnostics that point at the same place re-print the *whole* excerpt each time — one function definition draws `ANN201` / `D103` / `ANN001` / `ANN001`, one `let` draws `useConst` / `noUnusedVariables`. When a diagnostic's excerpt is byte-identical to the previous diagnostic's, the whole block is dropped; each diagnostic keeps its own header, so the file, line, and column are never lost, and a diagnostic separated by a different excerpt keeps its own copy. Measured on real output: a further ruff −15%, biome −8%. This directly buys information rather than just tokens, since the default 1000-character cap was otherwise spent re-printing the same code instead of showing the diagnostics that followed
-- 🛡️ **Debug Log Safety** - Logs persist only event/tool/session metadata, executable basenames, argument counts, and byte-size summaries. Stop/extension hook arguments and executable directories are stripped, so raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
-- 🛑 **Bounded I/O** - stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
-- 🔒 **Fail-Closed Gates** - Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` can no longer switch protection off: a config error now returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) instead of exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
-- 📂 **Project Config Merge** - Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension hooks are ignored with a warning
-- 🔌 **Multi-Agent Support** - Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
+- **Built with Rust**: Low overhead, lightweight single binary, blazing fast (<10ms startup)
+- **Kill Command Blocking**: Blocks `kill`, `pkill`, `killall`, `taskkill`, PowerShell's `Stop-Process` and its `spps` alias, and suggests [safe-kill](https://github.com/owayo/safe-kill)
+- **RM Command Blocking**: Blocks `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell's `Remove-Item` and suggests [safe-rm](https://github.com/owayo/safe-rm)
+- **PowerShell Tool Coverage**: The same filters apply to Claude Code's `PowerShell` tool, which is the only shell tool on Windows without Git Bash. Configure the matcher as `Bash|PowerShell`
+- **DD Command Blocking**: Optionally blocks `dd` to prevent disk overwrite accidents
+- **AST-based Parsing**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
+- **Custom Command Filters**: Define custom filters with regex support
+- **Extension Hooks**: Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`; lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
+- **Stop Hooks**: Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
+- **Project-wide Lint on Stop**: Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
+- **Hook Timeout**: Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
+- **Output Truncation**: Multi-byte-safe truncation of hook output (default 1000 chars) to protect the agent's context window
+- **Output Compression**: Collapses decorative runs (`.`, `=`, `-`, `─`, `━`, `^`, `·`, `→`, `_`), `\r`-overwriting progress bars, repeated cargo `Compiling`/`Blocking` lines, common absolute-path prefixes, rustc/ruff/biome span underlines and frame characters, and Biome's whitespace markers / duplicate diff line-number pairs. Successful no-op formatter/linter notices such as `All checks passed!` and `1 file already formatted` are omitted, while changed-file and failure output is preserved. The no-op test runs on the *normalized* text, so a tool that pairs a success line with per-run config warnings (e.g. `ruff check --select D…`, which writes ruleset-incompatibility warnings to stderr on every run) is still recognised as a no-op instead of returning a bare `All checks passed!` after every edit. Biome's `Checked N file(s) in <duration>. No fixes applied.` counter and its closing `check ━` / `× Some errors were emitted while running checks.` block are dropped when diagnostics accompany them, and kept when they are the whole output. ANSI stripping also covers the general `ESC` + intermediate-byte escape form (terminfo's `sgr0`, e.g. `\E(B\E[m`) and bare `SO`/`SI`, which otherwise leak a stray character onto every colored `cargo fmt --check` diff line and defeat all the rules above
+- **Repeated Source Excerpt Removal**: Within a single diagnostic, source-excerpt lines (`3 │ code`, `> 3 │ code`, `12 | code`) that repeat verbatim are dropped after the first occurrence: biome re-prints the same excerpt once per sub-block (the `!` message, the `i` note, the `i Safe fix:` block) and ruff re-prints context inside its fix diff, and those repeats carry no information. Diff lines (`- old` / `+ new`) survive because they *are* the fix. Measured on real output: ruff −6%, biome −14%
+- **Cross-Diagnostic Excerpt Removal**: Consecutive diagnostics that point at the same place re-print the *whole* excerpt each time — one function definition draws `ANN201` / `D103` / `ANN001` / `ANN001`, one `let` draws `useConst` / `noUnusedVariables`. When a diagnostic's excerpt is byte-identical to the previous diagnostic's, the whole block is dropped; each diagnostic keeps its own header, so the file, line, and column are never lost, and a diagnostic separated by a different excerpt keeps its own copy. Measured on real output: a further ruff −15%, biome −8%. This directly buys information rather than just tokens, since the default 1000-character cap was otherwise spent re-printing the same code instead of showing the diagnostics that followed
+- **Debug Log Safety**: Logs persist only event/tool/session metadata, executable basenames, argument counts, and byte-size summaries. Stop/extension hook arguments and executable directories are stripped, so raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
+- **Bounded I/O**: stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
+- **Fail-Closed Gates**: Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` can no longer switch protection off: a config error now returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) instead of exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
+- **Project Config Merge**: Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension hooks are ignored with a warning
+- **Multi-Agent Support**: Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
 
 ## Why claw-hooks?
 
@@ -113,15 +113,6 @@ sys.exit(0)
 Then duplicate it per agent, per dangerous command, per formatter — and re-implement quote/wrapper handling for every one.
 </details>
 
-### Extension hook rules
-
-- Each `{file}` template must contain exactly one `{file}` placeholder.
-- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`, Grok `PostToolUse` with a file path in `toolInput`, and Antigravity `PostToolUse` when the hook entry passes `--event PostToolUse` (the edited path comes from `toolCall.args.TargetFile`). Antigravity's post-hook output is fixed at `{}`, so diagnostics can't be returned there — use Stop hooks when you need the lint text itself.
-- Codex `PostToolUse` + `Bash` passes through; `apply_patch` is parsed for changed file paths (delete-only patches are skipped).
-- Grok `PostToolUse` runs the hooks whenever `toolInput` carries `file_path` / `filePath`, so formatters still rewrite the file. Grok ignores post-hook stdout, though, so the lint text itself is not returned to the agent.
-- Paths with `../`, shell redirection (`<`, `>`), tabs, newlines, or NUL bytes are rejected. Agent payloads missing required fields fail closed.
-- Successful no-op formatter/linter notices are not returned to the agent. Output that reports a rewritten file, a warning, or a failure remains visible; command labels expose only the configured program name, not the expanded file path or argument summary.
-
 ### Comparison
 
 | Feature | Native Hooks | claw-hooks |
@@ -135,69 +126,50 @@ Then duplicate it per agent, per dangerous command, per formatter — and re-imp
 
 \* Lint/formatter output is automatically passed via `additionalContext` where the agent hook runtime supports it, enabling the agent to fix warnings. Windsurf has no equivalent JSON field, so post-edit diagnostics are delivered as exit code 2 with the body on stderr — per the official spec only `pre_*` hooks can block, so this surfaces the diagnostics to the agent without reverting the edit (and to the user as well when `show_output` is `true`).
 
-## Requirements
-
-- **OS**: macOS, Linux, Windows
-- **Runtime dependencies**: None (single binary)
-- **Source builds / development**: Rust 1.98.1 or newer. The toolchain is pinned in `mise.toml`, and CI builds and tests with exactly that version, which is also the declared `rust-version`.
-
 ## Installation
 
+<!-- standard:install:start -->
 ### Homebrew (macOS/Linux)
 
 ```bash
 brew install owayo/claw-hooks/claw-hooks
 ```
 
+### Cargo
+
+Requires Rust 1.98.1 or later.
+
+```bash
+cargo install --git https://github.com/owayo/claw-hooks --locked
+```
+
+### From GitHub Releases
+
+Download the archive for your platform from [Releases](https://github.com/owayo/claw-hooks/releases/latest), extract it, and put `claw-hooks` on your `PATH`. Each release also includes `SHA256SUMS` for checking the downloads.
+
+| Platform | Archive |
+|---|---|
+| Linux (x86_64) | `claw-hooks-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (x86_64, musl) | `claw-hooks-x86_64-unknown-linux-musl.tar.gz` |
+| Linux (ARM64) | `claw-hooks-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS (Intel) | `claw-hooks-x86_64-apple-darwin.tar.gz` |
+| macOS (Apple Silicon) | `claw-hooks-aarch64-apple-darwin.tar.gz` |
+| Windows (x86_64) | `claw-hooks-x86_64-pc-windows-msvc.zip` |
+
+On macOS, if you downloaded the archive with a browser, remove the quarantine attribute before running it: `xattr -d com.apple.quarantine claw-hooks`.
+
 ### From Source
+
+Requires [mise](https://mise.jdx.dev/) (the Rust toolchain is pinned in `mise.toml`).
 
 ```bash
 git clone https://github.com/owayo/claw-hooks.git
 cd claw-hooks
-cargo build --release
+make install
 ```
 
-Binary: `target/release/claw-hooks`
-
-For contributor checks (the Rust toolchain is pinned in `mise.toml`):
-
-```bash
-mise install
-mise exec -- cargo test --all-features
-mise exec -- cargo test --no-default-features
-```
-
-`mise install` only fetches the toolchain and does not put it on `PATH`, hence `mise exec --`. You can omit it if mise is activated in your shell.
-
-### From GitHub Releases
-
-**macOS (Apple Silicon)**
-```bash
-curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv claw-hooks /usr/local/bin/
-```
-
-**macOS (Intel)**
-```bash
-curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv claw-hooks /usr/local/bin/
-```
-
-**Linux (x86_64)**
-```bash
-curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv claw-hooks /usr/local/bin/
-```
-
-**Linux (ARM64)**
-```bash
-curl -L https://github.com/owayo/claw-hooks/releases/latest/download/claw-hooks-aarch64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv claw-hooks /usr/local/bin/
-```
-
-**Windows**
-
-Download `claw-hooks-x86_64-pc-windows-msvc.zip` from [Releases](https://github.com/owayo/claw-hooks/releases/latest), extract, and add to PATH.
+`make install` installs to `/usr/local/bin`. Set `INSTALL_PATH` to change it (for example `make install INSTALL_PATH="$HOME/.local/bin"`).
+<!-- standard:install:end -->
 
 ## Quickstart
 
@@ -219,856 +191,69 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 ## Usage
 
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `hook` (alias: `run`) | Process hook events from stdin |
-| `init` | Generate default configuration |
-| `check` | Validate configuration |
-| `version` | Show version |
-
-### Options
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI) |
-| `--event` | `-e` | Hook event name (e.g. `PostToolUse`). For Antigravity CLI, whose payloads carry no event-name field and whose `PreToolUse` / `PostToolUse` are shape-identical. Omit for other agents |
-| `--config` | `-c` | Path to configuration file |
-| `--trace` | `-t` | Trace mode: write the raw input, parsed input, and output to stderr (not persisted to disk) |
-| `--help` | `-h` | Show help |
-
-### Examples
+`claw-hooks hook` reads one hook event from stdin and writes the agent's native response. `init` writes the default config, `check` validates it, and `version` prints the version.
 
 ```bash
 # Process Claude Code hooks (default)
 claw-hooks hook
 
-# Process Cursor hooks
+# Other agents: pass --format (cursor, windsurf, agy, codex, grok)
 claw-hooks hook --format cursor
 
-# Process Windsurf hooks
-claw-hooks hook --format windsurf
-
-# Process Antigravity CLI hooks (pass --event: its payloads have no event-name field)
-claw-hooks hook --format agy --event PreToolUse
+# Antigravity CLI payloads carry no event name, so pass --event as well
 claw-hooks hook --format agy --event PostToolUse
-
-# Process Codex CLI hooks
-claw-hooks hook --format codex
-
-# Process Grok CLI hooks
-claw-hooks hook --format grok
 
 # Use custom config
 claw-hooks hook --config /path/to/config.toml
 ```
 
+Every subcommand and option, how each `--format` reads its agent's payload, the output and exit code for every event, and the fail-closed rules: [docs/cli-reference.md](docs/cli-reference.md)
+
 ## Agent Integration
 
-### Claude Code
+Register `claw-hooks hook` in each agent's hooks file. Agents other than Claude Code need `--format`.
 
-Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
+| Agent | Hooks file (user / project) | Command |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` / `.claude/settings.json` | `claw-hooks hook` |
+| Cursor | `~/.cursor/hooks.json` / `<project>/.cursor/hooks.json` | `claw-hooks hook --format cursor` |
+| Windsurf (Cascade) | `~/.codeium/windsurf/hooks.json` / `.windsurf/hooks.json` | `claw-hooks hook --format windsurf` |
+| Antigravity CLI | `~/.gemini/config/hooks.json` / `<project>/.agents/hooks.json` | `claw-hooks hook --format agy --event <event>` |
+| Codex CLI | `~/.codex/hooks.json` | `claw-hooks hook --format codex` |
+| Grok CLI | `~/.grok/hooks/` / `<project>/.grok/hooks/` | `claw-hooks hook --format grok` |
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook" }]
-      }
-    ]
-  }
-}
-```
-
-### Cursor
-
-Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user):
-
-```json
-{
-  "version": 1,
-  "hooks": {
-    "preToolUse": [
-      {
-        "command": "claw-hooks hook --format cursor",
-        "matcher": "Shell|Bash|Terminal|Exec|Run|Command",
-        "failClosed": true
-      }
-    ],
-    "beforeShellExecution": [
-      { "command": "claw-hooks hook --format cursor", "failClosed": true }
-    ],
-    "afterFileEdit": [
-      { "command": "claw-hooks hook --format cursor" }
-    ],
-    "stop": [
-      { "command": "claw-hooks hook --format cursor" }
-    ]
-  }
-}
-```
-
-> **`failClosed: true` on the command-blocking hooks is recommended.** Cursor is fail-open by default: a clean block (exit `0` plus `{"permission":"deny", …}` on stdout) works without it, but if claw-hooks itself crashes or times out, Cursor lets the command through unless `failClosed: true` is set. Leave it off for `afterFileEdit`/`stop` (a formatter/lint crash should not block the agent).
-
-> **Keep the matcher on `preToolUse`.** That hook fires for *every* tool, so without a matcher a large `Write` also reaches claw-hooks; once the payload exceeds the 4 MiB stdin limit it can no longer be parsed, and `preToolUse` is a pre-execution gate, so the fail-closed path denies a file write that claw-hooks has no opinion about. Cursor matchers are regular expressions, so the pattern above stays deliberately broad — a false positive is harmless (claw-hooks still passes through anything without `tool_input.command`), and a false negative is covered by `beforeShellExecution`, which is shell-specific by event rather than by tool name.
-
-> **Prefer project hooks when you use stop-time lint.** Cursor runs project hooks (`<project>/.cursor/hooks.json`) from the project root, but user hooks (`~/.cursor/hooks.json`) from `~/.cursor/`. claw-hooks resolves `condition = { file_exists = "Cargo.toml" }`, the `.claw-hooks.toml` lookup, and each hook's own working directory from that directory, so a user-level registration makes every project-type condition fail silently — and a hook without a condition (a `git-sc` auto-commit, say) runs in your Cursor config directory instead of the repository.
-
-> **Post-edit diagnostics can't be returned to Cursor.** `afterFileEdit` has no documented output schema, so formatters still rewrite files but linter text has nowhere to go. Run project-wide lint as a `stop` hook when you need the diagnostics — those come back through `followup_message`.
-
-### Windsurf (Cascade)
-
-Add to `~/.codeium/windsurf/hooks.json` (user) or `.windsurf/hooks.json` (project):
-
-```json
-{
-  "hooks": {
-    "pre_run_command": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": true }
-    ],
-    "post_write_code": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": true }
-    ],
-    "post_cascade_response": [
-      { "command": "claw-hooks hook --format windsurf", "show_output": true }
-    ]
-  }
-}
-```
-
-### Antigravity CLI
-
-Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (project workspace):
-
-```json
-{
-  "claw-hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "run_command|manage_task",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PreToolUse" }]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format agy --event PostToolUse" }]
-      }
-    ],
-    "Stop": [
-      { "type": "command", "command": "claw-hooks hook --format agy --event Stop" }
-    ]
-  }
-}
-```
-
-Notes:
-- **The matcher covers `manage_task` as well as `run_command`.** With `Action: "send_input"`, `manage_task` writes its `Input` to a running process's stdin. Start a persistent shell with `run_command` + `RunPersistent: true` and every later command arrives through `send_input` without ever passing `CommandLine`, so leaving `manage_task` unmatched lets the rm/kill/dd filters be bypassed entirely. The other actions (`list` / `status` / `kill`) manage the agent's own background tasks — unrelated to the shell `kill` command — and pass through.
-- **Pass `--event` for Antigravity.** Antigravity payloads carry no event-name field, and `PreToolUse` and `PostToolUse` are indistinguishable by shape — both send `toolCall` plus `stepIdx`, differing only in an optional `error`. Since `hooks.json` registers each event separately, `--event` tells claw-hooks which one it is. Without it, claw-hooks infers the event and resolves the ambiguous case to `PreToolUse`, which keeps command blocking intact but leaves post-edit hooks inactive.
-- Extension hooks work on Antigravity when `--event PostToolUse` is set: the edited path is read from `toolCall.args.TargetFile`. The official `PostToolUse` output is fixed at `{}`, so formatters and linters **run** but their diagnostics cannot be returned to the agent. To surface diagnostics, run project-wide lint/typecheck as Stop hooks — those failures are injected back via `{"decision":"continue","reason":"..."}`.
-- Antigravity has no `stop_hook_active` / `loop_count` equivalent (`executionNum` is just an attempt counter and is `1` on a normal first stop), so claw-hooks cannot break a loop caused by a stop hook that fails forever. Give reported stop hooks a self-limiting exit condition.
-- `PreInvocation` / `PostInvocation` are out of claw-hooks' scope and pass through automatically; no hook entry is needed for those events.
-- Official Antigravity hooks docs: <https://antigravity.google/docs/customizations/hooks>
-
-### Codex CLI
-
-Add to `~/.codex/hooks.json` (user):
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claw-hooks hook --format codex"
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claw-hooks hook --format codex"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|apply_patch|Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claw-hooks hook --format codex"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claw-hooks hook --format codex"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Codex hooks are enabled by default. If you explicitly configure feature flags, use the current `[features] hooks` key; the older `codex_hooks` alias is deprecated.
-
-### Grok CLI
-
-Add a JSON file under `~/.grok/hooks/` (personal) or `<project>/.grok/hooks/` (project):
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format grok", "timeout": 10 }]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format grok", "timeout": 10 }]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [{ "type": "command", "command": "claw-hooks hook --format grok", "timeout": 10 }]
-      }
-    ]
-  }
-}
-```
-
-Notes:
-- `matcher` is a regular expression tested against the tool name; omit it to match every tool. Grok maps Claude-style names such as `Bash` and `Edit` onto its own tool names, but the mapped names are not published, so omitting `matcher` is the safer choice — claw-hooks decides what to do from the payload itself and passes everything irrelevant through (see [Format Detection Logic](#format-detection-logic)).
-- `timeout` is in **seconds** and defaults to `5`, which is short for formatters and project-wide lint. Raise it as shown above.
-- Project hooks only run after the repository is trusted: run `/hooks-trust` once, or start Grok with `--trust`.
-- Grok also loads Claude Code (`.claude/settings.json`) and Cursor (`.cursor/hooks.json`) hook files. If claw-hooks is already registered in one of those, keep a single registration so it does not run twice per event.
-- claw-hooks dispatches on the shape of `toolInput`, never on `toolName`: a `command` field means a shell command, a `file_path` / `filePath` / `notebook_path` / `notebookPath` field means a file edit, and anything else passes through. `toolName` and `toolInput` are both optional for the same reason — they are not what the decision is made from, and requiring them would deny unrelated tool calls (tools without arguments omit `toolInput` entirely).
-- `PreToolUse` is Grok's only blocking event. Every other event is a post-hook whose stdout is ignored, so extension hooks still reformat files and Stop hooks still run lint, but their output cannot be reported back to the agent — the same limitation as Windsurf's `post_cascade_response`.
-- Grok is fail-open for anything that is not an explicit deny: a timeout, a crash, or malformed output is recorded as a hook failure and the tool call proceeds. claw-hooks therefore emits the deny JSON **and** exit code `2` when it blocks, and uses exit `2` (never `1`) on its fail-closed paths, so the block holds under either reading of the contract.
+The hooks JSON for each agent, the events and matchers to register, and what each agent can receive back (for example, whether lint output reaches the agent): [docs/integrations.md](docs/integrations.md)
 
 ## Configuration
 
-Default location: `~/.config/claw-hooks/config.toml` (all platforms)
+claw-hooks reads `~/.config/claw-hooks/config.toml` on every platform. `claw-hooks init` writes a default config there (it never overwrites an existing one), and `claw-hooks check` validates it.
 
 ```toml
-# Command blocking
-rm_block = true                    # Block rm/rmdir/del/erase (default: true)
-kill_block = true                  # Block kill/pkill/killall/taskkill (default: true)
-dd_block = true                    # Block dd command (default: true)
-
-# Custom messages (recommended: use with safe-rm/safe-kill tools)
-# safe-rm: https://github.com/owayo/safe-rm
-# safe-kill: https://github.com/owayo/safe-kill
-rm_block_message = "🚫 Use safe-rm instead: safe-rm <file> (validates Git status and path containment). Only clean/ignored files in project allowed."
-kill_block_message = "🚫 Use safe-kill instead: safe-kill <PID> or safe-kill -n <name> (like pkill). Use -s <signal> for signal."
-dd_block_message = "🚫 dd command blocked for safety."
-
-# Debug logging
-debug = false
-# log_path = "~/.config/claw-hooks/logs"  # default: same directory as config.toml
-# A leading "~" is expanded to the home directory. A relative path would otherwise be
-# resolved against the hook process's working directory, i.e. the repository being edited.
-# Debug logs record hook event summaries and executable basenames only. Hook arguments,
-# executable directories, file contents, and agent messages are not written.
-
-# Hook command timeout in seconds (default: 60, max: 86400)
-# Applies to reported stop hooks and extension hook commands.
-# Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
-# report=false stop hooks are started detached and are not waited on.
-# hook_timeout = 60
-
-# Output max length in characters (default: 1000, 0 = unlimited)
-# Prevents AI agent context window overflow from large lint/typecheck output
-# output_max_length = 1000
-
-# Custom command filters (regex supported)
-[[custom_filters]]
-command = "yarn"
-message = "Use `pnpm` instead of `yarn`"
-
-# Args mode: command (regex) + args matching
-[[custom_filters]]
-command = "npm"
-args = ["install", "i", "add"]         # Blocks: npm install, npm i, npm add
-message = "Use `pnpm` instead of `npm`"
-
-[[custom_filters]]
-command = "pip3?"                       # Regex: matches pip or pip3
-args = ["install", "uninstall"]
-message = "Use `uv pip` instead"
-
-# Regex-only mode (when args is not specified)
-[[custom_filters]]
-command = "python[23]? -m pip"         # More complex patterns
-message = "Use `uv pip` instead"
-
-[[custom_filters]]
-command = "docker"
-args = ["rm", "rmi", "system prune"]   # Blocks: docker rm, docker rmi
-message = "Ask the user to run this command manually"
-
-# Extension hooks (triggered on file write/edit)
-# Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
-# Output (stdout/stderr) is passed as additionalContext where the hook runtime supports it
-# Each command template must contain exactly one {file}
-# Parent-directory traversal paths (../) are rejected for safety
-# Shell redirection metacharacters (<, >) in file paths are rejected for safety
-# Tabs/newlines/NUL are rejected to prevent argument splitting and malformed paths
-# On Windows, cmd metacharacters (%, !, ^, ") are also rejected to prevent variable-expansion injection
-[extension_hooks]
-".css" = ["biome format --write {file}", "biome lint --write {file}"]
-".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
-".rs" = ["rustfmt {file}"]
-".ts" = ["biome check {file}"]
-".tsx" = ["biome check {file}"]
-
-# Stop hooks (triggered when agent loop ends)
-# All commands in the array are executed in parallel.
-# Hooks without a condition default to report=false and are started detached;
-# stdout/stderr are discarded, so redirect output yourself if needed.
-# [[stop_hooks]]
-# commands = ["afplay /System/Library/Sounds/Glass.aiff"]  # macOS notification sound
-
-# [[stop_hooks]]
-# commands = ["notify-send 'Agent completed'"]  # Linux notification
-
-# Conditional stop hooks (project-wide lint on stop)
-# Detects project type by file existence and tool availability.
-# On failure, the result is returned to the AI agent so it can fix the issues
-# on runtimes that support stop-time feedback (Windsurf and Grok CLI remain best-effort).
-# condition fields (AND logic): file_exists, file_not_exists, command_exists, command_not_exists
-[[stop_hooks]]
-commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
-condition = { file_exists = "Cargo.toml" }
-
-[[stop_hooks]]
-commands = ["pnpm exec tsc --noEmit"]
-condition = { file_exists = "tsconfig.json" }
-
-[[stop_hooks]]
-commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
-condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
-
-[[stop_hooks]]
-commands = ["biome check --write ."]
-condition = { file_exists = "package.json" }
-```
-
-### Per-Project Configuration
-
-claw-hooks uses a global configuration file (`~/.config/claw-hooks/config.toml`) by default. You can customize behavior per project in three ways:
-
-**1. `.claw-hooks.toml` — Auto-detected project config (recommended)**
-
-Place a `.claw-hooks.toml` in your project root. claw-hooks automatically detects it in the current working directory and merges it with the global config. No `--config` flag needed.
-
-```toml
-# my-project/.claw-hooks.toml
-
-# Turn on a guard this project needs (enabling is always allowed)
-dd_block = true
-
-# Add project-specific filters on top of the global ones
-[[custom_filters]]
-command = "yarn"
-message = "Use pnpm instead"
-```
-
-**Merge rules.** A `.claw-hooks.toml` is also "a file inside a repository your agent just cloned", so it is treated as untrusted input: a project config may **strengthen** protection but never weaken it, and it can never introduce a new command execution.
-
-| Field | Rule | Behavior |
-|-------|------|----------|
-| `rm_block`, `kill_block`, `dd_block` | **Enable only** | `true` is honored; `false` is ignored with a warning |
-| `custom_filters` | **Add only** | Project entries are appended; global entries are never removed or replaced |
-| `stop_hooks` | **Ignored** | Would run arbitrary commands when the agent stops |
-| `extension_hooks` | **Ignored** | Would run arbitrary commands on every file edit |
-| `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence (none of these weaken a decision) |
-| `debug`, `log_path`, `nano_buddy` | **Global only** | Rejected as an error |
-
-Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks` and `extension_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated as strictly as before.
-
-Validate with `claw-hooks check` — it reports whether a project config was found, whether it's valid, which entries are ignored, and any unknown (mistyped) keys.
-
-> **Migrating per-project formatters and linters.** If you were declaring `extension_hooks` or `stop_hooks` in a `.claw-hooks.toml`, move them to the global `config.toml` and target them with `condition = { file_exists = "…" }` — that gives the same per-project behavior without letting a repository decide what runs on your machine. Anything left in a project config is ignored and reported by `claw-hooks check`.
-
-> **`hook_timeout = 0` is now rejected.** It never meant "unlimited" (only `output_max_length` uses `0` that way) — it made every hook time out instantly. Because claw-hooks fails closed on an invalid config, a config that still has it will deny every command until it is fixed; `claw-hooks check` names the problem.
-
-> **Custom filters now normalize the command name** the same way the built-in `rm`/`kill`/`dd` filters do, so `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` all match a `command = "npm"` filter. This blocks strictly more than before.
-
-**2. `--config` — Full config replacement**
-
-Use `--config` to specify a complete configuration file, replacing the global config entirely:
-
-```toml
-# my-project/.claude/claw-hooks.toml
+# Block dangerous commands and point the agent at safer tools
 rm_block = true
 kill_block = true
-dd_block = false  # Allow dd in this project
+rm_block_message = "🚫 Use safe-rm instead: safe-rm <file>"
 
+# Block a command only with specific arguments (command is a regex)
+[[custom_filters]]
+command = "npm"
+args = ["install", "i", "add"]
+message = "Use `pnpm` instead of `npm`"
+
+# Run formatters and linters after a file is written or edited
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
-```
+".ts" = ["biome check {file}"]
 
-```json
-// my-project/.claude/settings.json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash|PowerShell",
-      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
-    }],
-    "PostToolUse": [{
-      "matcher": "Write|Edit|MultiEdit|NotebookEdit",
-      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{ "type": "command", "command": "claw-hooks hook --config .claude/claw-hooks.toml" }]
-    }]
-  }
-}
-```
-
-**3. Conditional stop hooks — Automatic project detection**
-
-Stop hooks with `file_exists` conditions automatically adapt to the project type based on the working directory. A single global config can handle multiple project types:
-
-```toml
-# ~/.config/claw-hooks/config.toml
-
-# Runs only in Rust projects (where Cargo.toml exists)
-[[stop_hooks]]
-commands = ["cargo clippy -- -D warnings"]
-condition = { file_exists = "Cargo.toml" }
-
-# Runs only in TypeScript projects (where tsconfig.json exists)
-[[stop_hooks]]
-commands = ["pnpm exec tsc --noEmit"]
-condition = { file_exists = "tsconfig.json" }
-```
-
-All three approaches can be combined: use the global config for shared rules, `.claw-hooks.toml` for project-specific overrides, and conditional stop hooks for automatic project-type detection.
-
-### Conditional Stop Hooks (Project-wide Lint)
-
-Stop hooks with a `condition` field run lint/typecheck commands based on the project type. All commands in the `commands` array are executed **in parallel**. When any command fails (non-zero exit), all failure outputs are collected and returned to the AI agent as a block reason, prompting it to fix the issues.
-**Timeout handling:** `hook_timeout` accepts values up to `86400` seconds. For reported stop hooks (`report = true`), when a command exceeds `hook_timeout`, claw-hooks kills the process tree (SIGKILL) and returns the timeout as a block reason. A direct child that exits while a background grandchild still keeps stdout/stderr pipes open is also treated as timed out, so commands like `sh -c 'sleep 60 &'` cannot bypass the hook timeout. Normal command failures — including those that explicitly exit with code `124` — also block as usual. `report = false` stop hooks are started detached with stdin/stdout/stderr set to null, so claw-hooks does not wait for them or enforce `hook_timeout`; wrap the command itself with a timeout tool if needed.
-
-Windsurf and Grok CLI are the exceptions here: Windsurf's `post_cascade_response` is an asynchronous post-hook, and every Grok event except `PreToolUse` is a post-hook whose stdout the agent ignores. On both, stop hooks still run but failures are treated as best-effort and are not surfaced back to the agent as a block.
-
-**Stop hook fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `commands` | `string[]` | (required) | Commands to execute (in parallel within the same stage) |
-| `condition` | `object` | (none) | Execution condition (AND logic: `file_exists`, `file_not_exists`, `command_exists`, `command_not_exists`) |
-| `stage` | `1-5` | `5` | Execution order. Lower stages run first. Hooks in the same stage run in parallel. |
-| `report` | `bool` | (auto) | Whether to report results to the AI agent. Default: `true` if `condition` is set, `false` otherwise. |
-| `session_scope` | `"primary"` \| `"delegated"` \| `"all"` | `"primary"` | Which session kind runs this hook. `primary` = main session only, `delegated` = delegated agent sessions (e.g. Claude Code teammates) only, `all` = both. |
-
-**Condition fields** (AND logic — all specified conditions must be true):
-
-| Field | Description |
-|-------|-------------|
-| `file_exists` | Run only when this file exists in the working directory |
-| `file_not_exists` | Run only when this file does NOT exist in the working directory (useful for fallbacks such as "no lockfile of type X here") |
-| `command_exists` | Run only when this command is available in PATH (Windows `PATHEXT` is respected; on Unix the file must have an executable bit; explicit paths like `./tool` or `/usr/bin/tool` are also supported) |
-| `command_not_exists` | Run only when this command is NOT available in PATH |
-
-```toml
-# Stage-based execution: analysis → lint → commit
-[[stop_hooks]]
-commands = ["astro-sight impact --dir . --git"]
-stage = 1        # Run first
-report = true    # Return results to AI
-
+# Lint the whole project when the agent stops (only where Cargo.toml exists)
 [[stop_hooks]]
 commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 condition = { file_exists = "Cargo.toml" }
-stage = 3
-# report not set → condition present → true (default)
-
-[[stop_hooks]]
-commands = ["pnpm exec tsc --noEmit"]
-condition = { file_exists = "tsconfig.json" }
-stage = 3
-
-[[stop_hooks]]
-commands = ["git-sc --all --yes --quiet"]
-# stage not set → 5 (last)
-# report not set → no condition → false (fire-and-forget)
 ```
 
-**Stage execution order:** Stages are executed sequentially from 1 to 5. All hooks in the same stage run in parallel. A stage completes before the next one begins.
+A `.claw-hooks.toml` in the working directory is merged into the global config, but only toward more protection: enabling a guard and adding filters take effect, while disabling a guard and declaring stop or extension hooks are ignored with a warning. `--config <path>` uses that file instead of the global config.
 
-**Report behavior:** When `report = true` (or defaulting to true via `condition`), command failures are collected and returned to the AI agent as a block reason. When `report = false` (or defaulting to false without `condition`), commands are started fire-and-forget style and do not block the hook response. Detached commands run with stdin/stdout/stderr set to null; spawn failures are logged, but command output and exit status are not collected. On Windsurf and Grok CLI stop hooks, failures are always best-effort — the underlying hook is asynchronous (Windsurf) or its stdout is ignored (Grok).
-
-**Session scope (agent-session suppression):** claw-hooks tells a delegated agent session from the main one automatically: a delegated Stop payload carries both non-blank `agent_id` and `agent_type` fields (`agent_id` is documented as present only when the hook fires inside a subagent call). A main session launched with `--agent` can also carry `agent_type`, but it does not carry the subagent-specific `agent_id`, so it remains primary. By default (`session_scope = "primary"`), stop hooks run **only when the main session stops**, so a fleet of teammates does not trigger notification spam, redundant lints, or racing parallel `git` auto-commits. Set `session_scope = "all"` on a hook to restore the old run-everywhere behavior, or `"delegated"` for hooks that should run only for agent sessions (e.g. per-teammate cleanup). Missing, blank, or non-string discriminator fields fall back to primary; agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity, Grok CLI) are also treated as the main session.
-
-> **Agent-team teammates are out of scope.** Teammates run in-process and announce completion through Claude Code's separate `TeammateIdle` event, which claw-hooks deliberately does not handle: that event carries no loop counter (no `stop_hook_active`, no `loop_count`), and its only way to report a failure is "keep the teammate working", which a permanently failing lint would turn into an endless loop. **Stop-time lint and notifications therefore do not run when a teammate goes idle.**
-
-```toml
-# Runs only when the main session stops (default — no field needed)
-[[stop_hooks]]
-commands = ["cargo clippy --all-targets --all-features -- -D warnings"]
-condition = { file_exists = "Cargo.toml" }
-
-# Runs for both the main session and delegated agent sessions
-[[stop_hooks]]
-commands = ["collect-metrics"]
-report = false
-session_scope = "all"
-```
-
-```toml
-# More examples:
-
-# Python: run ruff format/check when pyproject.toml exists and ruff is installed
-[[stop_hooks]]
-commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
-condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
-
-# JavaScript/TypeScript: run biome check when package.json exists
-[[stop_hooks]]
-commands = ["biome check --write ."]
-condition = { file_exists = "package.json" }
-```
-
-### Stop Hook Environment Variables
-
-claw-hooks passes the following environment variables to stop hook child processes:
-
-| Variable | Description |
-|----------|-------------|
-| `CLAW_HOOKS_STOP_ACTIVE` | Always set to `1`. Prevents recursive stop hook execution when a child process triggers another claw-hooks stop event. |
-| `CLAW_HOOKS_AGENT_MESSAGE` | The AI agent's last message before stopping (if available). Contains what the agent was working on. |
-
-**`CLAW_HOOKS_AGENT_MESSAGE`** is populated from:
-- **Claude Code**: `last_assistant_message` field in the Stop event
-- **Windsurf**: `response` field in the `post_cascade_response` event
-- **Cursor**: Not available
-
-This is useful for tools that benefit from knowing the agent's context. For example, [git-sc](https://github.com/owayo/git-smart-commit) uses this to generate more accurate commit messages:
-
-```toml
-[[stop_hooks]]
-commands = ["git-sc --all --yes --quiet"]
-```
-
-When git-sc runs as a stop hook, it reads `CLAW_HOOKS_AGENT_MESSAGE` and includes the agent's context in the AI prompt, resulting in commit messages that reflect the intent of the changes rather than just the raw diff.
-
-### Custom Filter Behavior
-
-Custom filters support two modes:
-
-**Regex mode** (default): When only `command` is specified, it's treated as a regex pattern.
-
-```toml
-[[custom_filters]]
-command = "python[23]? -m pip"    # Complex regex pattern
-message = "Use uv pip instead"
-```
-
-**Args mode**: When `args` is specified, `command` is treated as a regex pattern (matched against the command name) and any of the args triggers the filter.
-
-```toml
-[[custom_filters]]
-command = "npm"                    # Regex pattern for command name
-args = ["install", "i", "add"]     # First argument must match one of these
-message = "Use pnpm instead"
-
-[[custom_filters]]
-command = "pip3?"                  # Matches both pip and pip3
-args = ["install", "uninstall"]    # First argument must match one of these
-message = "Use uv pip instead"
-```
-
-Both modes detect commands even when chained with `;`, `&&`, `||`, or `|`:
-
-```bash
-# Blocked: yarn is detected after semicolon
-echo "install"; yarn install
-# → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Use `pnpm` instead of `yarn`"}}
-
-# Allowed: "yarn" is inside quotes (not a command), pnpm is OK
-echo "not yarn install"; pnpm install
-# → {}
-```
-
-Commands inside quotes are ignored (they're arguments, not commands).
-
-## Format Detection Logic
-
-Each AI agent sends different JSON structures. claw-hooks uses `--format` to determine parsing.
-
-### Claude Code (`--format claude`)
-
-Uses the official Claude Code hooks specification:
-
-```jsonc
-// PreToolUse/PostToolUse events
-{
-  "hook_event_name": "PreToolUse",
-  "tool_name": "Bash",
-  "tool_input": { "command": "..." },
-  "session_id": "...",
-  "cwd": "/path/to/project"
-}
-
-// Stop event (no tool_name/tool_input)
-{
-  "hook_event_name": "Stop",
-  "stop_hook_active": true,
-  "session_id": "..."
-}
-```
-
-Handled hook events: `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, and `SubagentStop`. Known lifecycle events outside claw-hooks' scope — including `Notification`, `PermissionRequest`, `UserPromptSubmit`, `SessionStart`, and `SessionEnd` — pass through without a decision.
-
-`stop_hook_active` is required on Claude `Stop`. If it is absent or mistyped, claw-hooks treats the payload as malformed, does not run stop hooks, and allows the session to terminate (`{}` + exit `0`). Defaulting an unreadable guard to `false` would run the hooks and could make a failing reported hook re-trigger `Stop` forever.
-
-### Cursor (`--format cursor`)
-
-Uses the `hook_event_name` field for event detection:
-
-| `hook_event_name` | Required Fields | Internal Mapping |
-|-------------------|-----------------|------------------|
-| `preToolUse` (any tool) | — (`tool_input.command` selects the command path; without it the event passes through) | PreToolUse + Bash |
-| `beforeShellExecution` | `command` | PreToolUse + Bash |
-| `afterFileEdit` / `afterTabFileEdit` | `file_path` / `filePath` | PostToolUse + Write |
-| `stop` | — (`loop_count` is read when present) | Stop |
-
-Unsupported Cursor events, including non-shell `preToolUse` tools, pass through as an empty object (`{}`) rather than `{"permission":"allow"}`. Cursor merges hook responses from several sources and a higher-priority `allow` can override another hook's `deny`, so claw-hooks never votes to approve an event it did not inspect (`beforeReadFile`, `beforeMCPExecution`, `beforeTabFileRead`, `sessionStart`, `postToolUse`, …). Allowed commands return `{}` for the same reason.
-
-Blocks are returned as `{"permission":"deny", …}` on stdout with exit code `0`. Cursor only consumes the stdout JSON when the hook exits `0`, so exiting `2` would discard the `user_message` that carries the "use safe-rm instead" guidance. Claude Code differs here: its current hook contract reads valid stdout JSON on every exit code, while exit `2` remains unconditionally blocking.
-
-For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
-
-Malformed `stop` payloads let the stop through (`{}` + exit `0`) instead of failing closed: a `followup_message` is auto-submitted as the next user message, so returning one for a payload claw-hooks could not parse would re-trigger the same failure forever. See [Fail-Closed Behavior](#fail-closed-behavior).
-
-### Windsurf (`--format windsurf`)
-
-Uses `agent_action_name` field:
-
-| agent_action_name | Internal Mapping |
-|-------------------|------------------|
-| `pre_run_command` | PreToolUse + Bash |
-| `post_write_code` | PostToolUse + Write |
-| `post_cascade_response` | Stop |
-
-Unsupported Windsurf actions are passed through as allow.
-
-### Antigravity CLI (`--format agy`)
-
-camelCase schema. A representative PreToolUse payload:
-
-```jsonc
-{
-  "toolCall": {
-    "name": "run_command",
-    "args": { "CommandLine": "rm -rf /tmp/test", "Cwd": "/workspace" }
-  },
-  "stepIdx": 3,
-  "conversationId": "…",
-  "workspacePaths": ["/workspace/project"],
-  "transcriptPath": "~/.gemini/antigravity-cli/brain/…/transcript.jsonl",
-  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/…"
-}
-```
-
-Official Antigravity payloads do not include an event-name field, and `PreToolUse` and `PostToolUse` are **shape-identical** — both carry `toolCall` and `stepIdx`, differing only in an optional `error`. Pass `--event <name>` so claw-hooks knows which one it received; `hooks.json` registers each event separately, so the calling entry always knows. Resolution order is `--event`, then a legacy non-blank `hook_event_name` / `event` field, then shape inference (`toolCall` → PreToolUse, Stop fields → Stop, invocation fields → Pre/PostInvocation). Inference resolves the PreToolUse/PostToolUse ambiguity to **PreToolUse**, keeping command blocking intact — the opposite choice would let a not-yet-executed command through. `error` is deliberately not used as a discriminator: the spec marks it Optional ("Empty if successful"), so keying on it would misclassify every *successful* tool call.
-
-Required-field validation is limited to what claw-hooks actually uses for a decision. The spec marks only Stop's `fullyIdle` (and the output `decision`) as **Required**, so `stepIdx`, `executionNum` and `terminationReason` are all optional here. Requiring them would answer every `run_command` with a deny — which Antigravity documents as an immediate hard block — and, on Stop, would silently skip every stop hook. A Stop parse error therefore resolves to `{"decision":"stop"}` + exit 0: this satisfies the required output schema without returning `continue`, which would create a re-entry loop. `toolCall.args` is required only for `run_command`, because the spec documents zero-argument tools and allows `matcher: ""` / `"*"`. Missing, blank, or incorrectly typed required fields fail closed using the inferred event's native response.
-
-| Inferred event shape | toolCall.name | Internal Mapping |
-|---|---|---|
-| `toolCall` + `stepIdx` (PreToolUse) | `run_command` | BeforeCommand (`toolCall.args.CommandLine` → Bash) |
-| `toolCall` + `stepIdx` (PreToolUse) | other (`write_to_file`, `replace_file_content`, …) | pass-through allow |
-| `stepIdx` without `toolCall`, or invocation fields | n/a | PostToolUse / invocation pass-through allow (out of claw-hooks scope) |
-| `executionNum` / `terminationReason` / `fullyIdle` | n/a | Stop |
-
-> **Extension hooks**: Antigravity's `PostToolUse` carries `toolCall` (`name` and `args`), so the edited path is recoverable from `args.TargetFile` for `write_to_file` / `replace_file_content` / `multi_replace_file_content`. Add `--event PostToolUse` to that hook entry — the payload is shape-identical to `PreToolUse`, so without the flag claw-hooks infers `PreToolUse` and the post-edit hooks stay inactive. The official output is fixed at `{}`, so formatters and linters run but their diagnostics can't be returned; run project-wide lint/typecheck as Stop hooks and surface failures via `"decision":"continue"` when you need the text. `PostToolUse` for `run_command` passes through — the command already ran, and blocking it afterwards is neither possible nor meaningful. The output JSON shapes are listed in [Input/Output Reference](#inputoutput-reference). Explicitly named unsupported events pass through as allow; an unidentifiable nameless payload fails closed because no event-specific response shape can be selected safely.
-
-### Codex CLI (`--format codex`)
-
-Standard `hook_event_name` + `tool_name` + `tool_input` schema. `apply_patch`'s `tool_input.command` is parsed for the `*** Add/Update/Move to File:` headers to drive extension hooks (delete-only patches are skipped).
-
-Validation is limited to the fields claw-hooks actually reads: the event name, `tool_name` / `tool_input` (plus `tool_input.command` for `Bash` and the patch body for `apply_patch`), and `stop_hook_active` on `Stop`. The official docs present `session_id`, `cwd`, `model`, `transcript_path`, `turn_id`, and `permission_mode` as the shared fields you will usually see rather than as a strict schema — their own `SessionEnd` example payload omits `model` — so requiring them meant a single absent field could fail closed on every hook call. Out-of-scope pass-through events are not validated at all.
-
-`PostToolUse` for non-file tools (for example `Bash`) is also passed through without strict validation, because a Codex `PostToolUse` block *replaces the real tool output* with the hook message: failing closed there would hide the command's own output from the model while gaining nothing, since only file paths matter for post-edit hooks. Fields that claw-hooks does read still fail closed with the event's native deny/block response when they are missing or mistyped.
-
-`Interrupt` and MCP/function tools that claw-hooks does not inspect, including `mcp__*`, are out of scope. They pass through with the neutral `{}` response rather than an explicit allow, so claw-hooks does not override Codex's own permission flow or another hook's decision.
-
-| hook_event_name | Internal Mapping |
-|-----------------|------------------|
-| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PreCompact` / `PostCompact` / `Interrupt` | pass-through allow |
-| `PreToolUse` | BeforeCommand |
-| `PermissionRequest` | command guard before approval prompts (deny for dangerous Bash, `{}` for safe) |
-| `PostToolUse` | AfterFileEdit (`Bash` pass-through; `apply_patch` → MultiEdit) |
-| `Stop` | Stop |
-
-Codex returns all decisions — allow, block, and fail-closed — with exit code `0`; non-zero is treated as hook infrastructure failure. See [Input/Output Reference](#inputoutput-reference) for the per-event output JSON.
-
-### Grok CLI (`--format grok`)
-
-camelCase schema with an explicit `hookEventName` field:
-
-```jsonc
-{
-  "hookEventName": "PreToolUse",
-  "sessionId": "…",
-  "cwd": "/path/to/project",
-  "workspaceRoot": "/path/to/project",
-  "toolName": "Bash",
-  "toolInput": { "command": "rm -rf /tmp/test" }
-}
-```
-
-| hookEventName | `toolInput` shape | Internal Mapping |
-|---|---|---|
-| `PreToolUse` | `command` | BeforeCommand (the only event Grok lets a hook block) |
-| `PreToolUse` | file path, or neither | pass-through allow |
-| `PostToolUse` | `file_path` / `filePath` | AfterFileEdit (extension hooks) |
-| `PostToolUse` | `command`, or neither | pass-through allow |
-| `Stop` | n/a | Stop |
-| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `PostToolUseFailure` / `PermissionDenied` / `StopFailure` / `Notification` / `PreCompact` / `PostCompact` | n/a | pass-through allow |
-
-claw-hooks dispatches on the **shape of `toolInput`, not on `toolName`**. Grok states that it maps Claude tool names such as `Bash` and `Edit` onto its own, but the mapped names are not part of the published spec, so matching by name would let an unanticipated shell tool slip past the command filter. A payload carrying `command` therefore goes to the command filters and one carrying `file_path` / `filePath` goes to the extension hooks; anything else passes through. `toolName` and `toolInput` are both **optional** for the same reason: neither is what the decision is made from, so requiring them would deny unrelated tool calls (a tool without arguments omits `toolInput` entirely), and `PreToolUse` is the one path where claw-hooks can hard-block on Grok. Legacy snake_case keys (`hook_event_name`, `session_id`, `tool_name`, `tool_input`) are accepted as well, because Grok also reads Claude Code and Cursor hook files.
-
-Grok's contract is fail-open: exit `0` allows, exit `2` denies, and every other outcome — timeout, crash, malformed stdout — records a failure but lets the tool call proceed. claw-hooks therefore blocks with the deny JSON **and** exit code `2` so the decision holds under either interpretation, and never exits `1` on a fail-closed path. Allowed commands return `{}` rather than an `allow` decision, since `deny` is the only documented `decision` value.
-
-### Event Mapping Summary
-
-```mermaid
-graph LR
-    subgraph Before Command
-        CC1[Claude: PreToolUse + Bash]
-        CU1[Cursor: preToolUse Shell / beforeShellExecution]
-        WS1[Windsurf: pre_run_command]
-        AG1[Antigravity: PreToolUse + run_command]
-        CX1[Codex: PreToolUse + Bash]
-        GR1[Grok: PreToolUse + command]
-    end
-    CH1[🛡️ Validate & suggest alternatives]
-    CC1 --> CH1
-    CU1 --> CH1
-    WS1 --> CH1
-    AG1 --> CH1
-    CX1 --> CH1
-    GR1 --> CH1
-
-    subgraph After File Save
-        CC2[Claude: PostToolUse + Write/Edit]
-        CU2[Cursor: afterFileEdit]
-        WS2[Windsurf: post_write_code]
-        CX2[Codex: PostToolUse + apply_patch]
-        GR2[Grok: PostToolUse + file path]
-    end
-    CH2[🔧 Run commands by extension]
-    CC2 --> CH2
-    CU2 --> CH2
-    WS2 --> CH2
-    CX2 --> CH2
-    GR2 --> CH2
-
-    subgraph Agent Stop
-        CC3[Claude: Stop]
-        CU3[Cursor: stop]
-        WS3[Windsurf: post_cascade_response]
-        AG3[Antigravity: Stop]
-        CX3[Codex: Stop]
-        GR3[Grok: Stop]
-    end
-    CH3[⏹️ Lint / notifications / cleanup]
-    CC3 --> CH3
-    CU3 --> CH3
-    WS3 --> CH3
-    AG3 --> CH3
-    CX3 --> CH3
-    GR3 --> CH3
-```
-
-Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events. Antigravity CLI joins the "After File Save" flow only when its hook entry passes `--event PostToolUse`; claw-hooks recovers the edited path from `toolCall.args.TargetFile`. Its output remains fixed at `{}`, so use Stop hooks when the lint text itself must reach the agent. Grok CLI appears in all three groups, but only its `PreToolUse` can block; the other two are post-hooks whose output Grok ignores, so their work is real but their feedback is not.
-
-## Input/Output Reference
-
-Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detection-logic) for per-agent payloads). Stdout/stderr: one of the JSON bodies below, picked by `(format, event)`.
-
-| Agent | Event | Allow | Block / fail-closed |
-|---|---|---|---|
-| Claude Code | PreToolUse | `{}` (no decision — the normal permission flow still applies) | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
-| Claude Code | PostToolUse | `{}` or `…additionalContext:"…"` (lint feedback) | `{"decision":"block","reason":"…"}` |
-| Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
-| Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}` (exit 0 — Cursor reads the stdout JSON only on exit 0) |
-| Cursor | stop | `{}` | `{"followup_message":"…"}` |
-| Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** plain text (not JSON) |
-| Windsurf | post_write_code | `{}` (no findings) | exit code 2 + **stderr** plain text (lint findings; post-hooks cannot block, so the edit stands) |
-| Windsurf | post_cascade_response | `{}` | `{}` (best-effort post-hook; cannot block) |
-| Antigravity | PreToolUse | `{"decision":"allow"}` | `{"decision":"deny","reason":"…"}` |
-| Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}` (spec defines no block path) |
-| Antigravity | Stop | `{"decision":"stop"}` | `{"decision":"continue","reason":"…"}` (re-enters the agent loop, `reason` injected as a system message) |
-| Codex CLI | any | `{}` or `…additionalContext:"…"` | PreToolUse: `…permissionDecision:"deny",…`. PermissionRequest: `…decision:{behavior:"deny",message:"…"}`. PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
-| Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
-| Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
-
-`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
-
-claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's event schemas require explicit decisions: safe `PreToolUse` returns `"allow"`, while an allowed Stop returns the non-continuing value `"stop"`.
-
-### Exit Codes
-
-| Agent | Allow | Block | Fail-closed parse error |
-|---|---|---|---|
-| Claude Code | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `2` + **stderr** plain text |
-| Cursor | `0` | `0` (deny JSON in stdout; exit `2` would make Cursor discard the message) | `2` |
-| Windsurf | `0` | `2` (BeforeCommand writes plain text to stderr; AfterFileEdit uses the same channel to report lint findings without blocking; Stop stays `0`) | `2` (`pre_run_command` only; post-hooks return `{}` + `0`) |
-| Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny JSON |
-| Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny/block JSON (non-zero is treated as hook infra failure and discarded) |
-| Grok CLI | `0` | `2` + deny JSON in stdout (PreToolUse only; other events return `0`) | `2` (never `1` — Grok treats anything other than `2` as fail-open) |
-
-The "fail-closed parse error" column applies to the pre-execution gates only. Every other event — stop events, post-edit hooks, and the lifecycle events claw-hooks passes through — returns a neutral `{}` + exit `0` instead of the deny shown above. See below.
-
-### Fail-Closed Behavior
-
-**Pre-execution gates fail closed.** When the payload cannot be parsed, stdin is empty or oversized, or a field claw-hooks actually reads is missing, the command-blocking events (`PreToolUse`, `beforeShellExecution`, `pre_run_command`, `PermissionRequest`) return the agent's native deny response. A broken hook never turns into a silent approval.
-
-**A broken config denies too, instead of disabling protection.** If the TOML config fails to load or validate, claw-hooks answers with that same deny response, writes the diagnostic to stderr, and suggests running `claw-hooks check`. It no longer exits `1` with empty stdout — Codex CLI and Antigravity CLI read that as "the hook failed, ignore its decision", so one typo in `config.toml` used to switch off command blocking entirely. Logging is diagnostics rather than a control, so a logger that cannot be initialized only prints a warning and claw-hooks keeps running without logs.
-
-**Stop events allow instead.** On a stop event, "block" does not mean deny — it means *don't stop, here is a new prompt*: `decision:"block"` for Claude Code and Codex CLI, `decision:"continue"` for Antigravity CLI, and Cursor's `followup_message` is auto-submitted as the next user message. Returning that for a malformed payload or a broken config is self-sustaining: fail → continue → `Stop` fires again → same failure. None of the loop guards (`stop_hook_active`, `loop_count`, `CLAW_HOOKS_STOP_ACTIVE`) can break the cycle, because all of them only engage after a successful parse. Stop is not a pre-execution gate, so claw-hooks returns the event-specific stop-allow response + exit `0` (`{"decision":"stop"}` for Antigravity, `{}` for the other agents). This adds no new side effects, whereas auto-continuing would invite more tool calls.
-
-**Events claw-hooks never inspects allow too.** Denying an event whose contents claw-hooks never looks at buys no safety and costs real work: a `UserPromptSubmit` deny erases the user's prompt, a Codex `PostToolUse` deny replaces the actual tool output with the hook's message, and Cursor's `beforeReadFile` carries the whole file body — so a large file trivially exceeds the 4 MiB stdin limit and the read would be blocked by a tool that has no opinion on reads. Windsurf's post-hooks and every Grok event except `PreToolUse` cannot block at all, so a deny there only injects a spurious error. These all return `{}` + exit `0`.
-
-**An unidentifiable payload still blocks.** The rules above are keyed on the event name. When the payload is damaged badly enough that claw-hooks cannot recover the event name, it falls back to the deny response — so a truncated or oversized `PreToolUse` is still blocked.
+Every setting and its default, the project merge rules, staged and session-scoped stop hooks, the environment passed to stop hooks, and the custom filter modes: [docs/configuration.md](docs/configuration.md)
 
 ## Performance
 
@@ -1078,36 +263,37 @@ The "fail-closed parse error" column applies to the pre-execution gates only. Ev
 
 ## Development
 
-### Prerequisites
-
-- Rust 1.98.1+ (pinned in `mise.toml`; with [mise](https://mise.jdx.dev/), run `mise install`)
-- Cargo
-
-### Build
+<!-- standard:dev:start -->
+Requires [mise](https://mise.jdx.dev/). Tool versions are pinned in `mise.toml`.
 
 ```bash
-cargo build           # Debug
-cargo build --release # Release
+make setup   # Install the toolchain (mise) and dependencies
+make ci      # Run the same checks as CI (no changes)
 ```
 
-### Test
+| Command | Description |
+|---|---|
+| `make setup` | Install the toolchain (mise) and dependencies |
+| `make build` | Build a debug binary |
+| `make release` | Build a release binary |
+| `make run` | Run the debug binary (arguments via ARGS="...") |
+| `make test` | Run the tests |
+| `make lint` | Run clippy with warnings as errors |
+| `make fmt` | Format the code (rewrites files) |
+| `make fmt-check` | Check the formatting (no changes) |
+| `make check` | Run fmt-check and lint (no changes) |
+| `make ci` | Run the same checks as CI (no changes) |
+| `make install` | Install the release binary to INSTALL_PATH (default /usr/local/bin) |
+| `make uninstall` | Remove the binary from INSTALL_PATH |
+| `make clean` | Remove build artifacts |
 
-```bash
-cargo test
-cargo test -- --nocapture  # Verbose
-```
+Run `make` to list every target. Releases are published from GitHub Actions (**Actions → Release → Run workflow**).
+<!-- standard:dev:end -->
 
-### Lint
-
-```bash
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --check
-```
+`make test` and `make lint` run in two configurations, with all features (the tree-sitter AST parser) and with `--no-default-features` (the string fallback parser), because the fallback build has a parser of its own.
 
 ## License
 
+<!-- standard:license:start -->
 [MIT](LICENSE)
-
-## Contributing
-
-Contributions welcome! Please submit a Pull Request.
+<!-- standard:license:end -->

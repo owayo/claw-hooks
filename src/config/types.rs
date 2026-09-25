@@ -32,7 +32,7 @@ fn default_output_max_length() -> usize {
 /// 3. `ProjectConfig`（プロジェクト上書き用の `Option<T>` 版）
 /// 4. `Config::merge_project`（上書き/マージの規則）
 /// 5. `config/validation.rs`（値域チェックが必要な場合）
-/// 6. `config/service.rs` のデフォルト設定テンプレートと README（ユーザ向け文書）
+/// 6. `config/service.rs` のデフォルト設定テンプレートと docs/configuration.md / docs/configuration.ja.md（ユーザ向け文書）
 /// 7. `merge_project` / デシリアライズのテスト
 /// 8. `config/service.rs` の `KNOWN_GLOBAL_KEYS` / `KNOWN_PROJECT_KEYS`
 ///    （未知キー警告の対象外にする。漏れると新しいキーが「タイポ」として警告される）

@@ -73,33 +73,37 @@ src/
 
 ## Development Commands
 
+Run `make help` for every target. Tool versions are pinned in `mise.toml`, and the Makefile calls every tool through `mise exec --`.
+
 ```bash
+# Toolchain (mise) and dependencies
+make setup
+
 # Build
-cargo build              # Debug
-cargo build --release    # Release
+make build               # Debug
+make release             # Release
 
-# Test
-cargo test
-cargo test -- --nocapture
+# Test and lint: both run with --all-features (AST parser) and --no-default-features (fallback parser)
+make test
+make lint
+make fmt                 # Format (rewrites files)
+make ci                  # The same checks as CI (fmt-check, lint, cargo check, test)
 
-# Lint
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --check
-
-# Toolchain (pinned in mise.toml)
-mise install
+# Test with output (no make target)
+mise exec -- cargo test -- --nocapture
 
 # Run
-cargo run -- hook        # Process hook from stdin
-cargo run -- init        # Generate default config
-cargo run -- check       # Validate config
-cargo run -- version     # Show version
+make run ARGS="hook"     # Process hook from stdin
+make run ARGS="init"     # Generate default config
+make run ARGS="check"    # Validate config
+make run ARGS="version"  # Show version
 ```
 
 ## Toolchain
 
 - The Rust version is defined only in `mise.toml` (`[tools] rust`). `Cargo.toml`'s `rust-version` must stay identical: CI builds and tests with that single version, so a lower `rust-version` would declare support for versions nothing verifies. `tests/toolchain_sync.rs` fails when the two diverge — bump both together, because dependency updaters (e.g. `depup`) may bump only one of them. Do not add `rust-toolchain.toml` or pin the version anywhere else. Raising `rust-version` also switches on clippy's MSRV-gated lints — moving from 1.85 to 1.98.1 surfaced 27 `collapsible_if` findings (nested `if let` collapsed into let chains) with no code change — so run `cargo clippy --fix` for both feature sets (`--all-features` and `--no-default-features`) in the same commit.
-- CI (`ci.yml`) and the release build (`release.yml`) install the toolchain from `mise.toml` via `jdx/mise-action`, pinned by commit SHA with a fixed mise version. Keep both workflows on the same values, and choose releases that are at least 14 days old. The action's cache stays off: the toolchain itself lives under rustup (`~/.rustup`), outside the cache, and a restored cache skips installing clippy/rustfmt (jdx/mise-action#215). Each job then checks that `rustc` matches `mise current rust`, so a runner's preinstalled stable cannot slip in unnoticed.
+- CI (`ci.yml`) and the release build (`release.yml`) install the toolchain from `mise.toml` via `jdx/mise-action@v4` with `minimum_release_age: 14d`: mise itself is the newest release that is at least 14 days old, and no mise version is pinned in the workflows. The action's cache stays off: the toolchain itself lives under rustup (`~/.rustup`), outside the cache, and a restored cache skips installing clippy/rustfmt (jdx/mise-action#215). The build jobs call cargo directly, so they check that `rustc` matches `mise current rust`, and a runner's preinstalled stable cannot slip in unnoticed.
+- The checks are defined once, in the Makefile's `ci` target. The `quality` job of `ci.yml` runs only `make setup` and `make ci` on Linux and macOS, so add a new check to the Makefile rather than to the workflow. The `build` job builds every release target with the same matrix as `release.yml` (keep the two in sync) and runs both test configurations on Windows.
 - Build targets are not listed in `mise.toml` (every developer and job would install all of them); each build job adds its own with `rustup target add`.
 - `mise.lock` is not committed: `core:rust` delegates to rustup, so the lockfile would carry no checksums.
 - The release workflow syncs only the package's own version into `Cargo.lock` (`cargo update --workspace`) and builds with `--locked`. `cargo generate-lockfile` must not come back: it re-resolves every dependency to the newest release, shipping versions CI never tested and bypassing the release-age policy dependency updates follow.
@@ -154,7 +158,7 @@ cargo run -- version     # Show version
 - **既知の制約 — `TeammateIdle` は意図的に未対応**。agent team の teammate が idle になる直前に発火する新イベントで、claw-hooks の「Stop 時の lint/通知」と目的は重なるが、入力に `stop_hook_active` / `loop_count` に相当する**ループカウンタが無い**（受け取るのは `teammate_name` と `team_name` だけ）。command hook の出力契約は「exit 2 + stderr = idle させず作業を継続させる」「`{"continue":false,"stopReason":"..."}` = teammate を完全停止させる」の二択で、前者は恒久的に失敗する lint で無限ループになり、後者は Stop hook の意味（失敗を伝えて直させる）を変えてしまう。有限な再試行上限を安全に持てるようになるまでは、未知イベントとして `{}` + exit 0（idle 許可）でパススルーする。したがって **teammate の idle 時には停止時 lint も通知も走らない**
 
 ### Cursor
-- Refer to README.md for integration examples
+- Refer to docs/integrations.md for integration examples
 - Use `--format cursor` when testing
 - Input parsing uses `hook_event_name` field for event identification (not field-structure matching)
 - Supported events: `preToolUse` for `Shell`/`Bash`, `beforeShellExecution`, `afterFileEdit`, `afterTabFileEdit`, `stop`, `subagentStart`, `subagentStop`
@@ -172,7 +176,7 @@ cargo run -- version     # Show version
 - **既知の制約 — 保存後 lint の診断は Cursor へ返せない**。`afterFileEdit` には公式に Output スキーマが存在せず（Input のみ定義）、formatter の書き換えはファイルに反映されるが linter の診断テキストを渡す先が無い。汎用の `postToolUse` には `additional_context` があるため経路自体は存在するが、`afterFileEdit` と二重に登録するとフォーマッタが 2 回走るため、どちらの経路に寄せるかを設定で排他にする必要がある。現状は `afterFileEdit` に統一し、診断は Stop hooks 経由で返す
 
 ### Windsurf
-- Refer to README.md for integration examples
+- Refer to docs/integrations.md for integration examples
 - Use `--format windsurf` when testing
 - BeforeCommand (pre_run_command) Block: exit code 2 + stderr にメッセージ本文をプレーンテキストで出力（Windsurf は stdout/stderr を JSON 解析せず stderr を表示用テキストとして扱うため、`{"decision":...}` のような JSON ではなく本文のみを出す）。本文は他エージェントと同様に `normalize_lint_output` で ANSI/空白を正規化してから返す（ANSI エスケープが残ると Windsurf UI の表示が壊れるため）
 - AfterFileEdit (post_write_code) で formatter/linter の診断があるとき: exit code 2 + stderr に診断本文を出力する。公式仕様は「exit 2 = Cascade エージェントが stderr のメッセージを見る」かつ「ブロックできるのは pre_* フックだけ」なので、事後フックでの exit 2 は**編集を巻き戻さずに診断だけを伝える**経路になる。`show_output: true` を設定していればユーザーにも同じ本文が表示される。Windsurf には `additionalContext` に相当する JSON フィールドが無いため、これが保存後 lint の結果をエージェントへ届ける唯一の手段である。診断が空のときは `{}` + exit 0 に倒す（編集のたびに無用なエラー表示を出さないため）
@@ -244,6 +248,8 @@ cargo run -- version     # Show version
 - `SubagentStart` and `SubagentStop` events are internal features and MUST NOT be documented in README.md or README.ja.md
 - The `init` command's default config should not reference subagent events
 - When updating READMEs, keep the supported hook events list as: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`
+- Keep README.md and README.ja.md under 400 lines each, with the same sections in both. Details live in `docs/` as English / Japanese pairs: `docs/cli-reference.md` (subcommands, options, per-agent payloads and outputs, exit codes, fail-closed rules), `docs/configuration.md` (every setting), and `docs/integrations.md` (per-agent hook registration), each with a `.ja.md` counterpart. Update both languages in the same change.
+- The blocks between `<!-- standard:<name>:start -->` and `<!-- standard:<name>:end -->` (badges, installation, development, license) are generated from the workflows, the Makefile, and Cargo.toml. Do not edit them by hand; change those files instead.
 
 ## Configuration
 
@@ -251,4 +257,4 @@ Default: `~/.config/claw-hooks/config.toml`
 
 `log_path` accepts a leading `~` and expands it to the home directory. TOML has no shell-style expansion of its own, so an unexpanded `~/…` is simply a relative path resolved against the hook process's cwd — the repository the agent is working in — and the generated default config offers exactly that form as a commented example. Without expansion it creates a literal `~` directory inside the user's project, and a `git` auto-commit stop hook then sweeps the hook logs into their repository. `~user` is left untouched because the target user's home cannot be resolved.
 
-See README.md for full configuration reference.
+See docs/configuration.md for the full configuration reference.

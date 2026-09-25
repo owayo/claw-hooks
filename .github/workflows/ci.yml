@@ -84,7 +84,7 @@ jobs:
           persist-credentials: false
 
       # ビルドに効く環境変数 (MACOSX_DEPLOYMENT_TARGET など) は mise.toml の [env] に置く。mise-action が
-      # 後続のステップへ渡すので、ci.yml と release.yml と手元の make で同じ値になる (mise-guide 18 章)
+      # 後続のステップへ渡すので、ci.yml と release.yml と手元の make で同じ値になる
       - uses: jdx/mise-action@v4
         with:
           minimum_release_age: 14d

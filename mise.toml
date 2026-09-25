@@ -1,6 +1,7 @@
 # Rust ツールチェーンの版はここを正とする。Cargo.toml の rust-version も同じ値に
-# そろえること (tests/toolchain_sync.rs が一致を検証する)。CI も jdx/mise-action で
-# このファイルを読む。mise 自身の版はここに書けないため、CI の mise-action の
-# `version` で固定している。
+# そろえること (tests/toolchain_sync.rs が一致を検証する)。Makefile は `mise exec --`
+# 経由で、CI は jdx/mise-action でこのファイルを読む。
 [tools]
-rust = { version = "1.98.1", profile = "minimal", components = "clippy,rustfmt" }
+# profile と components を明示する。未指定だと rustup の既定の profile 次第で入るものが変わり、
+# GitHub Actions のランナー (minimal) では cargo fmt / clippy が無いと言われて落ちる
+rust = { version = "1.98.1", profile = "minimal", components = ["rustfmt", "clippy"] }

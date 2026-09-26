@@ -179,8 +179,14 @@ fn take_shared_output(shared: &SharedOutput) -> Vec<u8> {
 /// 残り時間で頭打ちにする。
 fn sleep_with_backoff(backoff: Duration, deadline: Instant) -> Duration {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    std::thread::sleep(backoff.min(remaining));
-    (backoff * 2).min(POLL_BACKOFF_MAX)
+    let (sleep, next_backoff) = poll_backoff_step(backoff, remaining);
+    std::thread::sleep(sleep);
+    next_backoff
+}
+
+/// 今回の待機時間と次の間隔を計算する。時計・OS のスケジューリングから分離して検証する。
+fn poll_backoff_step(backoff: Duration, remaining: Duration) -> (Duration, Duration) {
+    (backoff.min(remaining), (backoff * 2).min(POLL_BACKOFF_MAX))
 }
 
 #[cfg(unix)]
@@ -1350,21 +1356,34 @@ mod tests {
         );
     }
 
-    /// 固定 100ms スリープのポーリングを指数バックオフへ置き換えたことの回帰テスト。
-    /// 旧実装は即終了するコマンドでも最低 100ms（`try_wait` の固定スリープ）待っていた。
-    /// 90ms は「旧実装の下限を確実に下回る」かつ「実測 2〜7ms に対して十分な余裕がある」値。
+    /// 固定 100ms 待機への退行を、OS の負荷に依存しない待機時間列で検出する。
+    /// 実コマンドの所要時間には起動・スレッドのスケジューリングも含まれるため、
+    /// 90ms 未満という判定は Windows CI で正常な実装でも失敗していた。
     #[test]
-    fn test_run_with_timeout_returns_without_fixed_poll_delay() {
-        let child = spawn_piped("true", &[]).unwrap();
-        let start = Instant::now();
-        let result = run_with_timeout(child, 60, "true").unwrap();
-        let elapsed = start.elapsed();
+    fn test_poll_backoff_starts_short_and_caps_long_waits() {
+        let mut backoff = POLL_BACKOFF_INITIAL;
+        let mut sleeps = Vec::new();
 
-        assert!(result.status.success());
-        assert!(
-            elapsed < Duration::from_millis(90),
-            "即終了するコマンドで固定ポーリング遅延を払うべきではない: {:?}",
-            elapsed
+        for _ in 0..9 {
+            let (sleep, next_backoff) = poll_backoff_step(backoff, Duration::from_secs(60));
+            sleeps.push(sleep);
+            backoff = next_backoff;
+        }
+
+        assert_eq!(
+            sleeps,
+            [1, 2, 4, 8, 16, 32, 50, 50, 50].map(Duration::from_millis)
         );
+    }
+
+    #[test]
+    fn test_poll_backoff_does_not_sleep_past_deadline() {
+        // 期限直前では通常の間隔より短く待ち、期限を過ぎていれば待たない。
+        for remaining in [Duration::from_micros(500), Duration::ZERO] {
+            let (sleep, _) = poll_backoff_step(POLL_BACKOFF_INITIAL, remaining);
+            assert_eq!(sleep, remaining);
+        }
+        let (sleep, _) = poll_backoff_step(POLL_BACKOFF_MAX, Duration::from_millis(3));
+        assert_eq!(sleep, Duration::from_millis(3));
     }
 }

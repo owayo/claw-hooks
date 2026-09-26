@@ -27,6 +27,7 @@ debug = false
 # Applies to reported stop hooks and extension hook commands.
 # Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
 # report=false stop hooks are started detached and are not waited on.
+# Not used by command hooks: each checker run is limited by its own timeout.
 # hook_timeout = 60
 
 # Output max length in characters (default: 1000, 0 = unlimited)
@@ -58,6 +59,14 @@ message = "Use `uv pip` instead"
 command = "docker"
 args = ["rm", "rmi", "system prune"]   # Blocks: docker rm, docker rmi
 message = "Ask the user to run this command manually"
+
+# Command hooks: pass each call of a program in a shell command to an external checker
+# before the command runs (global config only; see "Command Hooks" below)
+# [[command_hooks]]
+# command = "gws"                  # program name (basename, extension and case are normalized)
+# run = "noslop hook command"      # checker command line (no shell; cmd /c on Windows)
+# timeout = 5                      # seconds per checker run (default: 5)
+# on_error = "allow"               # "allow" (default) or "block" when the checker fails
 
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
@@ -134,10 +143,11 @@ message = "Use pnpm instead"
 | `custom_filters` | **Add only** | Project entries are appended; global entries are never removed or replaced |
 | `stop_hooks` | **Ignored** | Would run arbitrary commands when the agent stops |
 | `extension_hooks` | **Ignored** | Would run arbitrary commands on every file edit |
+| `command_hooks` | **Ignored** | Would run arbitrary commands before matching shell commands |
 | `*_block_message`, `hook_timeout`, `output_max_length` | **Replace** | Project value takes precedence (none of these weaken a decision) |
 | `debug`, `log_path`, `nano_buddy` | **Global only** | Rejected as an error |
 
-Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks` and `extension_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated strictly.
+Omitted fields keep the global value. Ignored entries are reported as warnings, so a setting that has no effect is visible rather than silently dropped. Because `stop_hooks`, `extension_hooks`, and `command_hooks` are discarded rather than applied, their contents are also **not validated** — a malformed entry in a project config is ignored like a well-formed one instead of failing the whole config load, which would otherwise let two lines in a cloned repository deny every command in that directory. The global `config.toml` is validated strictly.
 
 Validate with `claw-hooks check` — it reports whether a project config was found, whether it's valid, which entries are ignored, and any unknown (mistyped) keys.
 
@@ -349,6 +359,37 @@ echo "not yarn install"; pnpm install
 ```
 
 Commands inside quotes are ignored (they're arguments, not commands).
+
+## Command Hooks
+
+A command hook passes each call of one program in a shell command to an external checker before the command runs. The checker blocks the command, adds context for the agent, or does nothing. claw-hooks finds the calls with the same parser it uses for dangerous commands, so a call behind a wrapper (`sudo gws …`) or inside `bash -c '…'` is found as well. The checker receives the arguments of that one call after quote removal, not the command string.
+
+```toml
+[[command_hooks]]
+command = "gws"
+run = "noslop hook command"
+timeout = 5
+on_error = "allow"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `command` | `string` | (required) | Program name to match. A name, not a regular expression, and it cannot contain whitespace |
+| `run` | `string` | (required) | The checker's command line |
+| `timeout` | `integer` | `5` | Seconds allowed for one checker run, from `1` to `86400` |
+| `on_error` | `"allow"` \| `"block"` | `"allow"` | What to do when the checker fails (see below) |
+
+**Matching.** `command` and the program name of each call are both normalized the way the built-in filters normalize names (basename, the `.exe` / `.cmd` / `.bat` / `.com` extension removed, lowercase) and must then be equal. `command = "gws"` therefore matches `gws`, `/usr/local/bin/gws`, `GWS` and `gws.exe`, and a path written in `command` matches by its basename alone. A call whose program name is only known at run time (`$CMD args`) matches no hook.
+
+**Starting the checker.** `run` is split into words the way a shell splits them, honoring quotes and backslashes. On Linux and macOS the program is then started directly, without a shell, so pipes, redirections, variables and globs in `run` are not interpreted. On Windows it is started through `cmd /c`, as extension and stop hooks are, so that `.cmd` / `.bat` wrappers resolve. On every platform the call being checked reaches the checker only on stdin, never on its command line.
+
+**Failures.** The checker fails when it exits with a code other than `0` or `2`, is killed by a signal, cannot be started, or runs out of time. With `on_error = "allow"`, the command goes through and the failure is recorded only as a warning in the debug log, so a broken advisory checker such as a linter does not stop the agent. With `on_error = "block"`, the command is blocked with a reason such as `[noslop] command hook failed: timed out after 5s`.
+
+**Timeouts.** Each checker run is limited by its hook's own `timeout` alone. `hook_timeout` does not apply to command hooks: a project `.claw-hooks.toml` can override `hook_timeout`, so using it as the checkers' time budget would let a repository time out an `on_error = "allow"` checker and slip the command past it. A hook event makes at most 32 checker runs, so the checks for one command take at most 32 runs of `timeout` seconds each (160 seconds with the default).
+
+**Global config only.** A `command_hooks` entry in a project `.claw-hooks.toml` is ignored with a warning and is not validated. A checker is an arbitrary command that would run before every matching shell command, so it gets the same treatment as `stop_hooks` and `extension_hooks` (see [Per-Project Configuration](#per-project-configuration)).
+
+What the checker receives, how its exit code is read, which agents receive its context, and the order and limits of checker runs: [Command Hook Protocol](cli-reference.md#command-hook-protocol)
 
 ## Extension Hook Rules
 

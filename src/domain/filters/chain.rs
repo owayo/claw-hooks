@@ -3,12 +3,13 @@
 use tracing::warn;
 
 use crate::config::Config;
+use crate::domain::AgentProfile;
 use crate::domain::Decision;
 use crate::domain::HookInput;
 
 use super::{
-    CustomCommandFilter, ExtensionHookFilter, Filter, StopHookFilter, SubagentFilter,
-    new_dd_filter, new_kill_filter, new_rm_filter,
+    CommandHookFilter, CustomCommandFilter, ExtensionHookFilter, Filter, StopHookFilter,
+    SubagentFilter, new_dd_filter, new_kill_filter, new_rm_filter,
 };
 
 /// フック入力を処理するフィルターチェーン。
@@ -17,8 +18,19 @@ pub struct FilterChain {
 }
 
 impl FilterChain {
-    /// 設定からFilterChainを作成する。
+    /// 設定からFilterChainを作成する（呼び出し元エージェントの性質は既定値）。
+    ///
+    /// 本番経路（`HookService::new`）はアダプターから得たエージェントの性質を渡す
+    /// `with_agent` を使うため、テストビルドでのみコンパイルする。
+    #[cfg(test)]
     pub fn new(config: &Config) -> Self {
+        Self::with_agent(config, AgentProfile::default())
+    }
+
+    /// 呼び出し元エージェントの性質を指定して FilterChain を作成する。
+    ///
+    /// command hooks の判定器へエージェント名と補足の配送可否を渡すために使う。
+    pub fn with_agent(config: &Config, agent: AgentProfile) -> Self {
         let mut filters: Vec<Box<dyn Filter>> = Vec::new();
 
         // 組み込みフィルターを追加
@@ -69,6 +81,16 @@ impl FilterChain {
                 }
             };
             filters.push(filter);
+        }
+
+        // command hooks のフィルターを追加。hook_timeout は渡さない（判定器の時間は各 hook の
+        // timeout だけで決める）。hook_timeout は未信頼のプロジェクト設定から上書きできるため、
+        // 渡すと判定器を時間切れにして on_error = "allow" の判定器を素通りさせられる。
+        if !config.command_hooks.is_empty() {
+            filters.push(Box::new(CommandHookFilter::new(
+                &config.command_hooks,
+                agent,
+            )));
         }
 
         // 拡張子フックフィルターを追加
@@ -312,6 +334,126 @@ mod tests {
         // npm run は許可する
         let input = make_bash_input("npm run build");
         assert!(matches!(chain.execute(&input), Decision::Allow { .. }));
+    }
+
+    fn gws_command_hook(run: &str) -> crate::config::CommandHook {
+        crate::config::CommandHook {
+            command: "gws".to_string(),
+            run: run.to_string(),
+            timeout: None,
+            on_error: crate::config::CommandHookErrorPolicy::Block,
+        }
+    }
+
+    #[test]
+    fn test_filter_chain_adds_command_hook_filter_only_when_configured() {
+        use super::super::priority;
+        let has_command_hooks = |chain: &FilterChain| {
+            chain
+                .filters
+                .iter()
+                .any(|filter| filter.priority() == priority::COMMAND_HOOK)
+        };
+
+        assert!(!has_command_hooks(&FilterChain::new(&Config::default())));
+
+        let config = Config {
+            command_hooks: vec![gws_command_hook("noslop hook command")],
+            ..Config::default()
+        };
+        let agent = AgentProfile {
+            id: "claude-code",
+            pre_command_context: true,
+        };
+        assert!(has_command_hooks(&FilterChain::with_agent(&config, agent)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filter_chain_builtin_block_wins_before_command_hooks_run() {
+        // 組み込みフィルターが拒否したコマンドでは判定器を起動しない（優先度が後のため）
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("judged");
+        let judge = dir.path().join("judge.sh");
+        std::fs::write(&judge, format!("touch '{}'\n", marker.display())).unwrap();
+        let config = Config {
+            command_hooks: vec![gws_command_hook(&format!("sh '{}'", judge.display()))],
+            ..Config::default()
+        };
+        let chain = FilterChain::new(&config);
+
+        let decision = chain.execute(&make_bash_input("rm -rf /tmp/claw-hooks-x && gws docs"));
+
+        assert!(matches!(decision, Decision::Block { .. }));
+        assert!(
+            !marker.exists(),
+            "拒否済みのコマンドで判定器を起動してはいけない"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filter_chain_passes_agent_profile_and_returns_command_hook_advice() {
+        // with_agent で渡したエージェントの性質が判定器の入力に載り、補足が Allow に積まれる
+        let dir = tempfile::tempdir().unwrap();
+        let judge = dir.path().join("judge.sh");
+        std::fs::write(
+            &judge,
+            "grep -q '\"agent\":\"codex\".*\"context_delivery\":true' && echo 'check the draft'\n",
+        )
+        .unwrap();
+        let mut hook = gws_command_hook(&format!("sh '{}'", judge.display()));
+        hook.on_error = crate::config::CommandHookErrorPolicy::Allow;
+        let config = Config {
+            command_hooks: vec![hook],
+            ..Config::default()
+        };
+        let agent = AgentProfile {
+            id: "codex",
+            pre_command_context: true,
+        };
+        let chain = FilterChain::with_agent(&config, agent);
+
+        match chain.execute(&make_bash_input("gws docs create")) {
+            Decision::Allow { additional_context } => {
+                assert_eq!(additional_context.as_deref(), Some("[sh] check the draft"));
+            }
+            other => panic!("補足付きの Allow を期待したが {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filter_chain_command_hooks_ignore_project_hook_timeout() {
+        // プロジェクト設定で hook_timeout = 1 を置かれても、判定器は hook 自身の timeout
+        // （グローバル設定の値）の範囲で最後まで走る
+        let dir = tempfile::tempdir().unwrap();
+        let judge = dir.path().join("judge.sh");
+        std::fs::write(&judge, "sleep 2\necho 'still judged'\n").unwrap();
+        let mut hook = gws_command_hook(&format!("sh '{}'", judge.display()));
+        hook.timeout = Some(5);
+        hook.on_error = crate::config::CommandHookErrorPolicy::Allow;
+        let mut config = Config {
+            command_hooks: vec![hook],
+            ..Config::default()
+        };
+        config.merge_project(&crate::config::ProjectConfig {
+            hook_timeout: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(config.hook_timeout, 1);
+        let agent = AgentProfile {
+            id: "claude-code",
+            pre_command_context: true,
+        };
+        let chain = FilterChain::with_agent(&config, agent);
+
+        match chain.execute(&make_bash_input("gws docs")) {
+            Decision::Allow { additional_context } => {
+                assert_eq!(additional_context.as_deref(), Some("[sh] still judged"));
+            }
+            other => panic!("判定器の補足付きの Allow を期待したが {other:?}"),
+        }
     }
 
     #[test]

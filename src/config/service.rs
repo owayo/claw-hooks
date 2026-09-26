@@ -30,6 +30,7 @@ const KNOWN_GLOBAL_KEYS: &[&str] = &[
     "custom_filters",
     "extension_hooks",
     "stop_hooks",
+    "command_hooks",
     "nano_buddy",
     "hook_timeout",
     "output_max_length",
@@ -38,8 +39,9 @@ const KNOWN_GLOBAL_KEYS: &[&str] = &[
 /// プロジェクト設定 `.claw-hooks.toml` で解釈されるトップレベルキー。
 ///
 /// `GLOBAL_ONLY_KEYS` は含まない（そちらは警告ではなくエラーで拒否する）。
-/// `stop_hooks` / `extension_hooks` は「未知キー」ではなく「意図的に無視するキー」
-/// なので含める。無視した理由は `Config::merge_project` が別の警告で伝える。
+/// `stop_hooks` / `extension_hooks` / `command_hooks` は「未知キー」ではなく
+/// 「意図的に無視するキー」なので含める。無視した理由は `Config::merge_project` が
+/// 別の警告で伝える。
 const KNOWN_PROJECT_KEYS: &[&str] = &[
     "rm_block",
     "rm_block_message",
@@ -50,6 +52,7 @@ const KNOWN_PROJECT_KEYS: &[&str] = &[
     "custom_filters",
     "extension_hooks",
     "stop_hooks",
+    "command_hooks",
     "hook_timeout",
     "output_max_length",
 ];
@@ -1019,5 +1022,115 @@ message = "project: use pnpm"
 
         let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
         assert_eq!(config.log_path, PathBuf::from("~other/logs"));
+    }
+
+    // === command hooks ===
+
+    #[test]
+    fn test_default_config_template_command_hooks_example_is_valid() {
+        // テンプレートでコメントアウトした例は、コメントを外せばそのまま有効な設定になるべき
+        // （古い書式の例を案内すると、利用者が最初の一歩で設定エラーに当たる）。
+        let content = ConfigService::default_config_content();
+        let example = content
+            .lines()
+            .skip_while(|line| *line != "# [[command_hooks]]")
+            .take_while(|line| !line.trim().is_empty())
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !example.is_empty(),
+            "テンプレートに [[command_hooks]] の例があるべき"
+        );
+
+        let config: Config = toml::from_str(&example)
+            .unwrap_or_else(|e| panic!("例は Config としてパースできるべき: {e}\n{example}"));
+        assert_eq!(config.command_hooks.len(), 1);
+        validation::validate_values(&config).expect("例は検証を通るべき");
+    }
+
+    #[test]
+    fn test_load_accepts_global_command_hooks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[[command_hooks]]
+command = "gws"
+run = "checker hook command"
+timeout = 10
+on_error = "block"
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+
+        assert_eq!(config.command_hooks.len(), 1);
+        assert_eq!(config.command_hooks[0].command_key(), "gws");
+        assert_eq!(config.command_hooks[0].timeout_secs(), 10);
+        // 既知のキーなので「タイポ」の警告を出さない
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn test_load_rejects_invalid_global_command_hook() {
+        // グローバル設定の command hook は適用されるので、従来の設定と同じく検証エラーにする。
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[[command_hooks]]\ncommand = \"gws docs\"\nrun = \"checker\"\n",
+        )
+        .unwrap();
+
+        let err = ConfigService::load_inner(Some(&config_path), None).unwrap_err();
+        let message = format!("{:#}", err);
+        assert!(message.contains("command_hooks[0]"), "{message}");
+    }
+
+    #[test]
+    fn test_load_project_config_ignores_command_hooks() {
+        // clone してきたリポジトリの .claw-hooks.toml から判定器（= 任意コマンド）を
+        // 仕込めてはならない。適用しない値の書き損じで読み込みを止めてもいけない
+        // （止めるとそのディレクトリでは無関係なコマンドまでフェイルクローズドで deny になる）。
+        let dir = tempfile::TempDir::new().unwrap();
+        let global_path = dir.path().join("config.toml");
+        fs::write(
+            &global_path,
+            "[[command_hooks]]\ncommand = \"gws\"\nrun = \"global-checker\"\n",
+        )
+        .unwrap();
+
+        let project_dir = dir.path().join("untrusted-repo");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join(PROJECT_CONFIG_NAME),
+            r#"
+[[command_hooks]]
+command = "git"
+run = "touch /tmp/pwned"
+
+# 適用されるなら不正な記述（run の欠落、空白を含む command、timeout = 0）
+[[command_hooks]]
+command = "gws docs"
+timeout = 0
+"#,
+        )
+        .unwrap();
+
+        let config = ConfigService::load_inner(Some(&global_path), Some(&project_dir))
+            .expect("適用されない command_hooks の書き損じで読み込みを止めてはいけない");
+
+        assert_eq!(config.command_hooks.len(), 1);
+        assert_eq!(config.command_hooks[0].run, "global-checker");
+        // 無視した理由だけが残り、未知キー（タイポ）の警告は出ない
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert!(
+            config.warnings[0].contains("2 command_hooks entries were ignored"),
+            "{:?}",
+            config.warnings
+        );
     }
 }

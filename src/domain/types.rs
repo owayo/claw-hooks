@@ -138,6 +138,38 @@ pub struct BashInput {
     #[serde(default)]
     #[allow(dead_code)]
     pub timeout: Option<u64>,
+
+    /// コマンドが実行される作業ディレクトリ（エージェントが報告した場合のみ）。
+    ///
+    /// エージェントごとに入り方が違うため、各アダプターが取り出して設定する
+    /// （Claude / Codex / Grok はトップレベルの `cwd`、Cursor の preToolUse は
+    /// `tool_input.working_directory`、Antigravity は `toolCall.args.Cwd` 等）。
+    /// command hooks の判定器へ渡し、判定器の作業ディレクトリにも使う。
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// フィルターが必要とする範囲での、フックの呼び出し元エージェントの性質。
+///
+/// エージェントの種類はセッション中に変わらないため、`FilterChain` の構築時に
+/// アダプターから受け取る（`FormatAdapter::agent_profile`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentProfile {
+    /// command hooks の判定器へ渡す機械可読な識別子
+    /// （"claude-code" / "codex" / "cursor" / "windsurf" / "antigravity" / "grok"）。
+    pub id: &'static str,
+    /// BeforeCommand（PreToolUse）の Allow に付けた `additional_context` が
+    /// エージェントへ届くか。届かない形式ではアダプターが捨てる。
+    pub pre_command_context: bool,
+}
+
+impl Default for AgentProfile {
+    fn default() -> Self {
+        Self {
+            id: "unknown",
+            pre_command_context: false,
+        }
+    }
 }
 
 /// ファイル操作入力。
@@ -304,7 +336,8 @@ impl Decision {
 
     /// 指定イベントに対して判定を HookOutput に変換する（Claude Code 形式）。
     ///
-    /// - BeforeCommand (PreToolUse): hookSpecificOutput のみ（トップレベル decision は deprecated）
+    /// - BeforeCommand (PreToolUse): hookSpecificOutput のみ（トップレベル decision は deprecated）。
+    ///   Allow は判定なし。補足があれば additionalContext だけを返す
     /// - PermissionRequest: Codex 専用のため各フォーマットアダプター側で処理する
     /// - AfterFileEdit (PostToolUse): Allow は hookSpecificOutput.additionalContext、Block はトップレベル decision/reason
     /// - Stop: format_claude_output 側で ClaudeStopOutput を使用するため、ここには来ない
@@ -312,7 +345,7 @@ impl Decision {
         match self {
             Decision::Allow { additional_context } => {
                 let hook_specific_output = match event {
-                    // PreToolUse: 判定を返さず空オブジェクト（{}）にして、Claude 本来の
+                    // PreToolUse: 判定（permissionDecision）は返さず、Claude 本来の
                     // 権限フローに委ねる。公式仕様では permissionDecision "allow" は
                     // 「権限プロンプトをスキップする」であり、exit 0 かつ判定なしが
                     // 「異議なし（通常の権限フローが適用される）」を意味する。
@@ -320,7 +353,19 @@ impl Decision {
                     // 拒否しなかったコマンドを自動承認する権限は持たない
                     // （matcher "Bash" で導入するだけで Bash の承認プロンプトが
                     // 全て消えてしまうため）。
-                    HookEvent::BeforeCommand => None,
+                    //
+                    // 補足（command hooks の判定器の出力など）は additionalContext で返す。
+                    // 公式仕様上 additionalContext は permissionDecision とは独立した
+                    // フィールドで、判定なしでも「ツール結果の隣」でエージェントに届く。
+                    // 補足が無い（空白のみを含む）ときは従来どおり `{}` にする。
+                    HookEvent::BeforeCommand => additional_context
+                        .filter(|ctx| !ctx.trim().is_empty())
+                        .map(|ctx| HookSpecificOutput {
+                            hook_event_name: "PreToolUse".to_string(),
+                            additional_context: Some(ctx),
+                            permission_decision: None,
+                            permission_decision_reason: None,
+                        }),
                     // PostToolUse では hookSpecificOutput.additionalContext を使用する。
                     HookEvent::AfterFileEdit => additional_context.map(|ctx| HookSpecificOutput {
                         hook_event_name: "PostToolUse".to_string(),
@@ -488,15 +533,56 @@ mod tests {
 
     #[test]
     fn test_decision_into_output_allow_with_context_before_command() {
-        // BeforeCommand の Allow は additional_context があっても無出力（{}）にする。
-        // PreToolUse で additionalContext を返すには permissionDecision が必要になり、
-        // 権限プロンプトのスキップを招くため、コンテキストは付けずに権限フローへ委ねる。
+        // BeforeCommand の Allow に補足があれば additionalContext だけを返す。
+        // 公式仕様の additionalContext は permissionDecision と独立したフィールドなので、
+        // 判定を付けずに（= 権限プロンプトをスキップさせずに）補足だけを届けられる。
         let decision = Decision::allow_with_context("Some context".to_string());
         let output = decision.into_output(HookEvent::BeforeCommand);
 
         assert!(output.decision.is_none());
         assert!(output.reason.is_none());
-        assert!(output.hook_specific_output.is_none());
+        let hook_output = output
+            .hook_specific_output
+            .expect("補足付きの BeforeCommand Allow は hookSpecificOutput を持つべき");
+        assert_eq!(hook_output.hook_event_name, "PreToolUse");
+        assert_eq!(
+            hook_output.additional_context,
+            Some("Some context".to_string())
+        );
+        // Deny-Only Policy: 補足を返すときも自動承認の判定は付けない
+        assert!(hook_output.permission_decision.is_none());
+        assert!(hook_output.permission_decision_reason.is_none());
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_with_context_before_command_serializes_without_decision() {
+        // シリアライズ結果にも permissionDecision が現れないこと（キーの出し忘れ防止）。
+        let output = Decision::allow_with_context("Some context".to_string())
+            .into_output(HookEvent::BeforeCommand);
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": "Some context"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_decision_into_output_allow_with_blank_context_before_command_is_empty() {
+        // 空白だけの補足は補足なしと同じ扱い（`{}`）にする。
+        for context in ["", "  \n\t"] {
+            let output = Decision::allow_with_context(context.to_string())
+                .into_output(HookEvent::BeforeCommand);
+            assert!(output.decision.is_none());
+            assert!(
+                output.hook_specific_output.is_none(),
+                "{context:?} では hookSpecificOutput を返さない"
+            );
+        }
     }
 
     #[test]

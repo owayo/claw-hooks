@@ -60,7 +60,13 @@ pub(crate) fn summarize_hook_input(input: &str) -> String {
 pub(crate) fn summarize_parsed_hook_input(input: &HookInput) -> String {
     let session_id = input.session_id.as_deref().unwrap_or("-");
     let detail = match &input.tool_input {
-        ToolInput::Bash(bash) => format!("input=Bash command_bytes={}", bash.command.len()),
+        // 作業ディレクトリはユーザーのディレクトリ階層（社内のプロジェクト名などを含み得る）
+        // なので、値ではなく有無だけを残す（アダプターの parsed input ログの `has_cwd` と同じ方針）。
+        ToolInput::Bash(bash) => format!(
+            "input=Bash command_bytes={} has_cwd={}",
+            bash.command.len(),
+            bash.cwd.is_some()
+        ),
         ToolInput::File(file) => format!(
             "input=File file_path_bytes={} content_bytes={}",
             file.file_path.len(),
@@ -169,6 +175,7 @@ mod tests {
                 tool_input: ToolInput::Bash(BashInput {
                     command: "echo super-secret-token".to_string(),
                     timeout: None,
+                    cwd: None,
                 }),
                 session_id: Some("session-1".to_string()),
             },
@@ -237,5 +244,34 @@ mod tests {
             assert!(!summary.contains("private-agent"));
             assert!(!summary.contains("prompt secret"));
         }
+    }
+
+    #[test]
+    fn summarize_parsed_hook_input_records_only_whether_cwd_was_reported() {
+        let with_cwd = HookInput {
+            event: HookEvent::BeforeCommand,
+            tool_name: "Bash".to_string(),
+            tool_input: ToolInput::Bash(BashInput {
+                command: "ls".to_string(),
+                timeout: None,
+                cwd: Some("/home/someone/secret-project".to_string()),
+            }),
+            session_id: None,
+        };
+
+        let summary = summarize_parsed_hook_input(&with_cwd);
+        assert!(summary.contains("has_cwd=true"), "{summary}");
+        assert!(!summary.contains("secret-project"), "{summary}");
+        assert!(!summary.contains("/home/someone"), "{summary}");
+
+        let without_cwd = HookInput {
+            tool_input: ToolInput::Bash(BashInput {
+                command: "ls".to_string(),
+                timeout: None,
+                cwd: None,
+            }),
+            ..with_cwd
+        };
+        assert!(summarize_parsed_hook_input(&without_cwd).contains("has_cwd=false"));
     }
 }

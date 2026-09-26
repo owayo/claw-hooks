@@ -75,6 +75,10 @@ pub struct Config {
     #[serde(default)]
     pub stop_hooks: Vec<StopHook>,
 
+    /// シェルコマンド中の特定プログラムの呼び出しを外部の判定器へ渡すフック
+    #[serde(default)]
+    pub command_hooks: Vec<CommandHook>,
+
     /// NanoBuddy連携を有効化（隠しオプション）
     #[serde(default)]
     pub nano_buddy: bool,
@@ -112,6 +116,7 @@ impl Default for Config {
             custom_filters: Vec::new(),
             extension_hooks: BTreeMap::new(),
             stop_hooks: Vec::new(),
+            command_hooks: Vec::new(),
             nano_buddy: false,
             hook_timeout: default_hook_timeout(),
             output_max_length: default_output_max_length(),
@@ -148,10 +153,16 @@ impl Config {
     /// | `custom_filters` | 追加のみ（グローバル定義の削除・置換は無視） |
     /// | `stop_hooks` | 禁止（エージェント停止時に任意コマンドが走る = コード実行） |
     /// | `extension_hooks` | 禁止（ファイル編集時に任意コマンドが走る = コード実行） |
+    /// | `command_hooks` | 禁止（コマンド実行前に任意コマンドが走る = コード実行） |
     /// | メッセージ文言 / `hook_timeout` / `output_max_length` | 従来どおり上書き可 |
     ///
     /// 最後の行を許すのは、ブロック判定そのものを弱めず、新しいコマンド実行も生まないため
     /// （メッセージはブロック時にエージェントへ返す文言で、ブロック自体は成立したままになる）。
+    /// `hook_timeout` を上書き可にしておけるのは、ブロックの成否を左右する時間予算に
+    /// 使っていないからでもある。command hooks の判定器は `hook_timeout` を使わず、
+    /// グローバル設定にしか書けない各 hook の `timeout` だけで打ち切る。連動させると
+    /// `hook_timeout = 1` の 1 行で判定器を時間切れにでき、`on_error = "allow"` の判定器が
+    /// 素通しになる。
     ///
     /// 無視した項目は `self.warnings` に理由付きで記録する。無言で無視すると
     /// 「設定を書いたのに効かない」理由が利用者から見えなくなるため。
@@ -230,6 +241,23 @@ impl Config {
                     if v.len() == 1 { "y was" } else { "ies were" }
                 ));
         }
+        // command hooks も判定器という任意コマンドを、しかもシェルコマンドの実行前に毎回走らせる。
+        // 値は形を問わず受けている（`ProjectConfig::command_hooks` 参照）ため、件数は
+        // 配列なら要素数、それ以外の形（`[command_hooks]` のような書き損じ）は 1 件と数える。
+        if let Some(ref v) = project.command_hooks {
+            let count = match v {
+                toml::Value::Array(entries) => entries.len(),
+                _ => 1,
+            };
+            if count > 0 {
+                self.warnings.push(format!(
+                    "project config: {} command_hooks entr{} ignored \
+                     (command hooks run arbitrary commands before shell commands execute and are only accepted from the global config)",
+                    count,
+                    if count == 1 { "y was" } else { "ies were" }
+                ));
+            }
+        }
     }
 
     /// ブロック設定を「有効化のみ」でマージする。
@@ -278,8 +306,8 @@ impl Config {
 ///
 /// **未信頼の入力**として扱うため、ここでデシリアライズできることと実際に適用される
 /// ことは別である。適用範囲の規則は `Config::merge_project` を参照
-/// （`stop_hooks` / `extension_hooks` は受理するが適用しない。無視した理由を警告に
-/// 残すために、パースエラーにせず一度受け取っている）。
+/// （`stop_hooks` / `extension_hooks` / `command_hooks` は受理するが適用しない。
+/// 無視した理由を警告に残すために、パースエラーにせず一度受け取っている）。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
     /// rm ブロックの上書き（有効化のみ。`false` は無視）
@@ -304,6 +332,12 @@ pub struct ProjectConfig {
     pub extension_hooks: Option<BTreeMap<String, Vec<String>>>,
     /// Stop フック（**適用されない**。任意コマンド実行のためグローバル設定限定）
     pub stop_hooks: Option<Vec<StopHook>>,
+    /// command hooks（**適用されない**。任意コマンド実行のためグローバル設定限定）。
+    ///
+    /// 型付きで受けると、無視するだけの項目の書き損じ（`run` の欠落など）で
+    /// デシリアライズ全体が失敗し、そのディレクトリでは全コマンドがフェイルクローズドで
+    /// deny になる。適用しない値で読み込みを落とさないよう、形を問わず受ける。
+    pub command_hooks: Option<toml::Value>,
 }
 
 /// カスタムコマンドフィルター設定。
@@ -541,6 +575,68 @@ impl StopHook {
     /// 明示的な `report` 値が優先され、未指定時は `condition` の有無に基づくデフォルト。
     pub fn should_report(&self) -> bool {
         self.report.unwrap_or(self.condition.is_some())
+    }
+}
+
+/// command hook の判定器が失敗したときの扱い。
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandHookErrorPolicy {
+    /// 通す（既定）。lint のような助言の判定器の障害で作業を止めないため。
+    #[default]
+    Allow,
+    /// 拒否する。判定器を必須の検査として使う場合に選ぶ。
+    Block,
+}
+
+/// シェルコマンド中の特定プログラムの呼び出しを外部の判定器へ渡すフック。
+///
+/// ```toml
+/// [[command_hooks]]
+/// command = "gws"
+/// run = "noslop hook command"
+/// timeout = 5
+/// on_error = "allow"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandHook {
+    /// 対象のプログラム名。呼び出しのプログラム名を `command_key`
+    /// （basename・実行拡張子除去・小文字化）で正規化した値と完全一致で照合する。
+    pub command: String,
+
+    /// 判定器のコマンドライン。argv に分割して起動する（Linux / macOS はシェルを介さず、
+    /// Windows では他のフックと同じく `cmd /c` 経由）。
+    pub run: String,
+
+    /// 判定器 1 回あたりのタイムアウト秒数（未指定時は `DEFAULT_TIMEOUT_SECS`）。
+    ///
+    /// 判定器の時間はこの値だけで決まり、`hook_timeout` とは連動しない。`hook_timeout` は
+    /// 未信頼のプロジェクト設定から上書きできるため、連動させると `.claw-hooks.toml` の
+    /// 1 行で判定器を時間切れにして `on_error = "allow"` の判定器を素通しにできてしまう。
+    #[serde(default)]
+    pub timeout: Option<u64>,
+
+    /// 判定器が失敗したとき（起動失敗・タイムアウト・0 と 2 以外の終了コード）の扱い。
+    #[serde(default)]
+    pub on_error: CommandHookErrorPolicy,
+}
+
+impl CommandHook {
+    /// 判定器 1 回あたりの既定タイムアウト秒数。
+    ///
+    /// 判定器はコマンドの実行前に同期で走り、その間エージェントは待たされる。
+    /// Stop フック向けの `hook_timeout`（既定 60 秒）ほど長くは待てないため、短い既定値を持つ
+    /// （`hook_timeout` とは独立。`timeout` フィールドの doc を参照）。
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
+
+    /// 有効なタイムアウト秒数を返す。
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT_SECS)
+    }
+
+    /// 照合に使う正規化済みのプログラム名を返す。
+    pub fn command_key(&self) -> String {
+        crate::domain::parser::command_key(self.command.trim())
     }
 }
 
@@ -1757,5 +1853,226 @@ mod tests {
 
         assert_eq!(config.output_max_length, 5000);
         assert_ne!(config.output_max_length, default_max);
+    }
+
+    // === command hooks ===
+
+    #[test]
+    fn test_command_hook_deserializes_with_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+            [[command_hooks]]
+            command = "gws"
+            run = "checker hook command"
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.command_hooks.len(), 1);
+        let hook = &config.command_hooks[0];
+        assert_eq!(hook.command, "gws");
+        assert_eq!(hook.run, "checker hook command");
+        assert_eq!(hook.timeout, None);
+        assert_eq!(hook.timeout_secs(), CommandHook::DEFAULT_TIMEOUT_SECS);
+        // 既定は通す側。助言用の判定器の障害で作業を止めない。
+        assert_eq!(hook.on_error, CommandHookErrorPolicy::Allow);
+    }
+
+    #[test]
+    fn test_command_hook_deserializes_all_fields() {
+        let config: Config = toml::from_str(
+            r#"
+            [[command_hooks]]
+            command = "gws"
+            run = "checker hook command"
+            timeout = 10
+            on_error = "block"
+        "#,
+        )
+        .unwrap();
+
+        let hook = &config.command_hooks[0];
+        assert_eq!(hook.timeout_secs(), 10);
+        assert_eq!(hook.on_error, CommandHookErrorPolicy::Block);
+    }
+
+    #[test]
+    fn test_command_hook_rejects_unknown_on_error() {
+        // 綴り違いを既定値（allow）へ黙って倒すと、必須の検査のつもりの判定器が
+        // 失敗時に素通しになる。グローバル設定では読み込みエラーにする。
+        let result: std::result::Result<Config, _> = toml::from_str(
+            r#"
+            [[command_hooks]]
+            command = "gws"
+            run = "checker"
+            on_error = "deny"
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_command_hook_command_key_is_normalized() {
+        // 照合は呼び出し側と同じ command_key（basename・実行拡張子除去・小文字化）で行う。
+        let hook = CommandHook {
+            command: "  /usr/local/bin/GWS.exe ".to_string(),
+            run: "checker".to_string(),
+            timeout: None,
+            on_error: CommandHookErrorPolicy::Allow,
+        };
+        assert_eq!(hook.command_key(), "gws");
+    }
+
+    #[test]
+    fn test_project_config_accepts_command_hooks_of_any_shape() {
+        // プロジェクト設定の command_hooks は適用しない。適用しない値の書き損じで
+        // デシリアライズ全体を落とすと、そのディレクトリでは全コマンドが
+        // フェイルクローズドで deny になるため、形を問わず受け取る。
+        for toml_str in [
+            "[[command_hooks]]\ncommand = \"gws\"\nrun = \"checker\"\n",
+            // run の欠落
+            "[[command_hooks]]\ncommand = \"gws\"\n",
+            // 型違い
+            "[[command_hooks]]\ncommand = 1\nrun = true\n",
+            // 配列ではなくテーブル
+            "[command_hooks]\ncommand = \"gws\"\n",
+            // スカラー
+            "command_hooks = \"gws\"\n",
+        ] {
+            let pc: ProjectConfig = toml::from_str(toml_str)
+                .unwrap_or_else(|e| panic!("{toml_str:?} を受理すべき: {e}"));
+            assert!(pc.command_hooks.is_some(), "{toml_str:?}");
+        }
+    }
+
+    #[test]
+    fn test_merge_project_ignores_command_hooks() {
+        // clone したリポジトリの .claw-hooks.toml から、シェルコマンドの実行前に
+        // 走る判定器（= 任意コマンド）を仕込めてはならない。
+        let mut config = Config {
+            command_hooks: vec![CommandHook {
+                command: "gws".to_string(),
+                run: "global-checker".to_string(),
+                timeout: None,
+                on_error: CommandHookErrorPolicy::Block,
+            }],
+            ..Default::default()
+        };
+
+        let project: ProjectConfig = toml::from_str(
+            r#"
+            [[command_hooks]]
+            command = "gws"
+            run = "touch /tmp/pwned"
+
+            [[command_hooks]]
+            command = "git"
+            run = "touch /tmp/pwned"
+        "#,
+        )
+        .unwrap();
+        config.merge_project(&project);
+
+        // グローバルの定義だけが残り、プロジェクトの定義は置換も追加もされない
+        assert_eq!(config.command_hooks.len(), 1);
+        assert_eq!(config.command_hooks[0].run, "global-checker");
+        assert_eq!(
+            config.warnings,
+            vec![
+                "project config: 2 command_hooks entries were ignored \
+                 (command hooks run arbitrary commands before shell commands execute \
+                 and are only accepted from the global config)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_project_hook_timeout_does_not_shorten_command_hook_timeout() {
+        // プロジェクト設定の hook_timeout は上書きできるが、判定器の時間には影響しない。
+        // 影響すると `.claw-hooks.toml` の `hook_timeout = 1` で判定器を時間切れにでき、
+        // `on_error = "allow"` の判定器が素通しになる（信頼境界の違反）。
+        let mut config = Config {
+            command_hooks: vec![
+                CommandHook {
+                    command: "gws".to_string(),
+                    run: "checker".to_string(),
+                    timeout: None,
+                    on_error: CommandHookErrorPolicy::Allow,
+                },
+                CommandHook {
+                    command: "git".to_string(),
+                    run: "checker".to_string(),
+                    timeout: Some(30),
+                    on_error: CommandHookErrorPolicy::Allow,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let project = ProjectConfig {
+            hook_timeout: Some(1),
+            ..Default::default()
+        };
+        config.merge_project(&project);
+
+        assert_eq!(config.hook_timeout, 1);
+        assert_eq!(
+            config.command_hooks[0].timeout_secs(),
+            CommandHook::DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(config.command_hooks[1].timeout_secs(), 30);
+    }
+
+    #[test]
+    fn test_merge_project_command_hooks_warning_counts_entries() {
+        // 件数は配列なら要素数、それ以外の形は 1 件。0 件なら無視する中身が無いので黙る。
+        let cases = [
+            ("command_hooks = []\n", None),
+            (
+                "[[command_hooks]]\ncommand = \"gws\"\nrun = \"checker\"\n",
+                Some("1 command_hooks entry was ignored"),
+            ),
+            (
+                "[[command_hooks]]\ncommand = \"a\"\n\n[[command_hooks]]\ncommand = \"b\"\n",
+                Some("2 command_hooks entries were ignored"),
+            ),
+            (
+                "[command_hooks]\ncommand = \"gws\"\n",
+                Some("1 command_hooks entry was ignored"),
+            ),
+            (
+                "command_hooks = \"gws\"\n",
+                Some("1 command_hooks entry was ignored"),
+            ),
+        ];
+
+        for (toml_str, expected) in cases {
+            let project: ProjectConfig = toml::from_str(toml_str).unwrap();
+            let mut config = Config::default();
+            config.merge_project(&project);
+
+            assert!(config.command_hooks.is_empty(), "{toml_str:?}");
+            match expected {
+                None => assert!(
+                    config.warnings.is_empty(),
+                    "{toml_str:?}: {:?}",
+                    config.warnings
+                ),
+                Some(fragment) => {
+                    assert_eq!(
+                        config.warnings.len(),
+                        1,
+                        "{toml_str:?}: {:?}",
+                        config.warnings
+                    );
+                    assert!(
+                        config.warnings[0].starts_with(&format!("project config: {fragment} (")),
+                        "{toml_str:?}: {:?}",
+                        config.warnings
+                    );
+                }
+            }
+        }
     }
 }

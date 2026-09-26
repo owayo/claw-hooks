@@ -16,6 +16,9 @@ pub(crate) mod priority {
     pub(crate) const RM: u32 = 20;
     /// ユーザー定義のカスタムフィルター
     pub(crate) const CUSTOM: u32 = 50;
+    /// command hooks（外部の判定器）。組み込み rm/kill/dd とカスタムフィルターの後に置き、
+    /// それらが拒否したコマンドでは判定器を起動しない（無駄な待ちと副作用を生まないため）。
+    pub(crate) const COMMAND_HOOK: u32 = 60;
     /// サブエージェント通知（観測用）
     pub(crate) const SUBAGENT: u32 = 90;
     /// 拡張子フック（AfterFileEdit のみ）。STOP と同値だがイベントが排他のため順序は無関係。
@@ -26,6 +29,7 @@ pub(crate) mod priority {
 
 pub mod builtin_filter;
 mod chain;
+mod command_hook_filter;
 mod custom_filter;
 mod dd_filter;
 mod extension_filter;
@@ -36,6 +40,7 @@ mod stop_filter;
 mod subagent_filter;
 
 pub use chain::FilterChain;
+pub use command_hook_filter::CommandHookFilter;
 pub use custom_filter::CustomCommandFilter;
 pub use dd_filter::new_dd_filter;
 pub use extension_filter::ExtensionHookFilter;

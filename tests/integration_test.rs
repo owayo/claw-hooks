@@ -2536,3 +2536,406 @@ fn test_init_writes_to_the_config_flag_target() {
         "--config で指定した場所に生成されること"
     );
 }
+
+// === command hooks のテスト ===
+//
+// 判定器は一時ディレクトリに書いた sh スクリプトを使う（Windows の CI では動かさない）。
+// 設定は必ず一時ファイルを `--config` で渡す（ユーザーの実設定の stop hooks を動かさないため）。
+//
+// スクリプトは直接実行せず `sh <path>` で読ませる。書き込んだ直後の実行ファイルを
+// exec すると、並列に走る別のテストの fork が書き込み用の fd を一瞬持っているだけで
+// Linux では ETXTBSY（Text file busy）になり、テストがまれに落ちるため。
+// そのため判定器のラベルは `sh` になる。
+
+/// command hooks の検証環境（一時ディレクトリ・判定器・設定ファイル）。
+#[cfg(unix)]
+struct CommandHookFixture {
+    dir: tempfile::TempDir,
+    config: std::path::PathBuf,
+}
+
+/// 判定器スクリプトを書き、`gws` に対する command hook の設定を返す。
+#[cfg(unix)]
+fn write_command_hook_config(dir: &std::path::Path, body: &str, extra: &str) -> String {
+    let judge = dir.join("judge.sh");
+    std::fs::write(&judge, format!("#!/bin/sh\n{body}\n")).unwrap();
+    format!(
+        "[[command_hooks]]\ncommand = \"gws\"\nrun = \"sh '{}'\"\n{extra}\n",
+        judge.display()
+    )
+}
+
+#[cfg(unix)]
+impl CommandHookFixture {
+    /// `body` を本体とする判定器を置き、`gws` に対する command hook を設定する。
+    /// `extra` は `[[command_hooks]]` の表に追加する行。
+    fn new(body: &str, extra: &str) -> Self {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, write_command_hook_config(dir.path(), body, extra)).unwrap();
+        Self { dir, config }
+    }
+
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// 判定器が受け取った JSON（判定器が `input.json` に書き出したもの）。
+    fn received(&self) -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(self.path("input.json")).ok()?;
+        Some(serde_json::from_str(text.trim()).expect("judge input should be JSON"))
+    }
+
+    fn run(&self, payload: &serde_json::Value, format: &str) -> (String, String, i32) {
+        run_hook_with_config_and_format(&payload.to_string(), format, &self.config)
+    }
+}
+
+/// 入力を `input.json` に保存してから `rest` を実行する判定器の本体。
+#[cfg(unix)]
+fn recording_judge(rest: &str) -> String {
+    format!("cat > \"$(dirname \"$0\")/input.json\"\n{rest}")
+}
+
+#[cfg(unix)]
+fn claude_bash_payload(command: &str, cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "session-1",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": {"command": command}
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_passes_invocation_to_judge_and_returns_context() {
+    let fixture = CommandHookFixture::new(
+        &recording_judge("pwd -P > \"$(dirname \"$0\")/cwd.txt\"\necho 'hint from judge'"),
+        "",
+    );
+    let payload = claude_bash_payload(
+        "gws docs documents create --json '{\"title\":\"週報\"}'",
+        fixture.dir.path(),
+    );
+    let (stdout, stderr, code) = fixture.run(&payload, "claude");
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let specific = &output["hookSpecificOutput"];
+    assert_eq!(specific["hookEventName"], "PreToolUse");
+    assert_eq!(specific["additionalContext"], "[sh] hint from judge");
+    // Deny-only: 補足だけを返し、許可の判定は付けない
+    assert!(specific.get("permissionDecision").is_none(), "{stdout}");
+
+    let input = fixture.received().expect("judge should be invoked");
+    assert_eq!(input["version"], 1);
+    assert_eq!(input["agent"], "claude-code");
+    assert_eq!(input["event"], "PreToolUse");
+    assert_eq!(input["tool_name"], "Bash");
+    assert_eq!(input["session_id"], "session-1");
+    // 文字列ベースのフォールバック（ast-parser なしのビルド）が見つけた呼び出しは候補扱い
+    let expected_analysis = if cfg!(feature = "ast-parser") {
+        "complete"
+    } else {
+        "uncertain"
+    };
+    assert_eq!(input["analysis"], expected_analysis);
+    assert_eq!(input["context_delivery"], true);
+    assert_eq!(input["stdin"], serde_json::Value::Null);
+    let values: Vec<&serde_json::Value> = input["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|word| &word["value"])
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "gws",
+            "docs",
+            "documents",
+            "create",
+            "--json",
+            "{\"title\":\"週報\"}"
+        ]
+    );
+    assert!(
+        input["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|word| word["static"] == true && word["cardinality"] == "one")
+    );
+    // 元のコマンド文字列は渡さない
+    assert!(input.get("command").is_none());
+
+    // 判定器はエージェントが報告した作業ディレクトリで走る
+    let cwd = std::fs::read_to_string(fixture.path("cwd.txt")).unwrap();
+    assert_eq!(
+        std::path::Path::new(cwd.trim()),
+        fixture.dir.path().canonicalize().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_heredoc_body_reaches_judge_as_static_value() {
+    let fixture = CommandHookFixture::new(&recording_judge("exit 0"), "");
+    let command = "gws docs documents create --json \"$(cat <<'EOF'\n{\"title\": \"週報\", \"body\": \"$HOME は展開されない\"}\nEOF\n)\"";
+    let (stdout, stderr, code) =
+        fixture.run(&claude_bash_payload(command, fixture.dir.path()), "claude");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // 判定器が何も出力しなければ応答は従来どおり空
+    assert_eq!(stdout.trim(), "{}");
+
+    let input = fixture.received().expect("judge should be invoked");
+    let last = input["argv"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(
+        last["value"],
+        "{\"title\": \"週報\", \"body\": \"$HOME は展開されない\"}"
+    );
+    assert_eq!(last["static"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_deny_blocks_with_reason() {
+    let fixture = CommandHookFixture::new("cat > /dev/null\necho 'slop found' >&2\nexit 2", "");
+    let (stdout, stderr, code) = fixture.run(
+        &claude_bash_payload("sudo -u me gws docs x", fixture.dir.path()),
+        "claude",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        output["hookSpecificOutput"]["permissionDecisionReason"],
+        "[sh] slop found"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_not_invoked_for_other_programs() {
+    let fixture = CommandHookFixture::new(&recording_judge("exit 2"), "");
+    for command in ["echo gws docs", "ls -la", "grep gws file.txt"] {
+        let (stdout, _, code) =
+            fixture.run(&claude_bash_payload(command, fixture.dir.path()), "claude");
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), "{}", "{command}");
+    }
+    assert!(fixture.received().is_none(), "judge must not run");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_does_not_run_after_builtin_block() {
+    let fixture = CommandHookFixture::new(&recording_judge("exit 0"), "");
+    let (stdout, _, _) = fixture.run(
+        &claude_bash_payload("rm -rf /tmp/x; gws docs x", fixture.dir.path()),
+        "claude",
+    );
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(fixture.received().is_none(), "judge must not run");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_on_error_policy() {
+    // 既定（allow）: 失敗した判定器はコマンドを止めない
+    let fixture = CommandHookFixture::new("cat > /dev/null\nexit 1", "");
+    let (stdout, _, code) = fixture.run(
+        &claude_bash_payload("gws docs x", fixture.dir.path()),
+        "claude",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "{}");
+
+    // block: 失敗したらコマンドを拒否する
+    let fixture = CommandHookFixture::new("cat > /dev/null\nexit 1", "on_error = \"block\"");
+    let (stdout, _, _) = fixture.run(
+        &claude_bash_payload("gws docs x", fixture.dir.path()),
+        "claude",
+    );
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        output["hookSpecificOutput"]["permissionDecisionReason"],
+        "[sh] command hook failed: exit code 1"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_codex_context_and_permission_request() {
+    let fixture = CommandHookFixture::new(&recording_judge("echo 'codex hint'"), "");
+    let pre_tool_use = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session",
+        "cwd": fixture.dir.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "gws docs x"}
+    });
+    let (stdout, stderr, code) = fixture.run(&pre_tool_use, "codex");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    assert_eq!(
+        output["hookSpecificOutput"]["additionalContext"],
+        "[sh] codex hint"
+    );
+    assert_eq!(fixture.received().unwrap()["agent"], "codex");
+
+    // PermissionRequest には補足の経路が無い
+    let permission_request = serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "session_id": "codex-session",
+        "cwd": fixture.dir.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "gws docs x"}
+    });
+    let (stdout, _, code) = fixture.run(&permission_request, "codex");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "{}");
+    let input = fixture.received().unwrap();
+    assert_eq!(input["event"], "PermissionRequest");
+    assert_eq!(input["context_delivery"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_cursor_drops_context_but_blocks() {
+    let fixture = CommandHookFixture::new(&recording_judge("echo 'dropped hint'"), "");
+    let payload = serde_json::json!({
+        "hook_event_name": "beforeShellExecution",
+        "command": "gws docs x",
+        "cwd": fixture.dir.path()
+    });
+    let (stdout, _, code) = fixture.run(&payload, "cursor");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "{}");
+    let input = fixture.received().unwrap();
+    assert_eq!(input["agent"], "cursor");
+    assert_eq!(input["context_delivery"], false);
+
+    let fixture = CommandHookFixture::new("cat > /dev/null\necho 'no' >&2\nexit 2", "");
+    let (stdout, _, code) = fixture.run(&payload, "cursor");
+    assert_eq!(code, 0);
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(output["permission"], "deny");
+    assert_eq!(output["agent_message"], "[sh] no");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_command_hook_grok_deny_uses_exit_code_two() {
+    let fixture = CommandHookFixture::new("cat > /dev/null\necho 'no' >&2\nexit 2", "");
+    let payload = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "sessionId": "grok-session",
+        "cwd": fixture.dir.path(),
+        "toolName": "run_terminal_cmd",
+        "toolInput": {"command": "gws docs x"}
+    });
+    let (stdout, _, code) = fixture.run(&payload, "grok");
+    assert_eq!(code, 2);
+    let output: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(output["decision"], "deny");
+    assert_eq!(output["reason"], "[sh] no");
+}
+
+/// プロジェクト設定の `command_hooks` は適用しない（任意コマンドの実行を生むため）。
+#[cfg(unix)]
+#[test]
+fn test_command_hook_in_project_config_is_ignored() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join(".claw-hooks.toml"),
+        write_command_hook_config(dir.path(), &recording_judge("exit 2"), ""),
+    )
+    .unwrap();
+    let global = dir.path().join("global.toml");
+    std::fs::write(&global, "").unwrap();
+
+    let payload = claude_bash_payload("gws docs x", dir.path());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .args(["hook", "--format", "claude", "--config"])
+        .arg(&global)
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn claw-hooks");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    assert!(
+        !dir.path().join("input.json").exists(),
+        "a judge declared in the project config must not run"
+    );
+}
+
+/// 判定器の中から呼ばれた claw-hooks は command hooks を丸ごと飛ばす（再帰防止）。
+#[cfg(unix)]
+#[test]
+fn test_command_hook_skipped_inside_judge() {
+    let fixture = CommandHookFixture::new(&recording_judge("exit 2"), "");
+    let payload = claude_bash_payload("gws docs x", fixture.dir.path());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .args(["hook", "--format", "claude", "--config"])
+        .arg(&fixture.config)
+        .env("CLAW_HOOKS_COMMAND_HOOK_ACTIVE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn claw-hooks");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    assert!(fixture.received().is_none(), "judge must not run");
+}
+
+/// 設定の検証: `claw-hooks check` が壊れた command_hooks を拒否する。
+#[test]
+fn test_check_rejects_invalid_command_hook() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "[[command_hooks]]\ncommand = \"gws docs\"\nrun = \"noslop\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run check");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("command_hooks[0]"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

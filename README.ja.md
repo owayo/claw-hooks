@@ -42,6 +42,7 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **DDコマンドブロック**: ディスク上書き事故を防ぐため、オプションで`dd`をブロック
 - **AST解析**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - **カスタムコマンドフィルター**: 正規表現サポート付きのカスタムフィルターを定義
+- **コマンドフック**: シェルコマンドの中にある特定のプログラムの呼び出し（たとえば `gws` の呼び出しすべて）を、実行前に外部の判定器へ渡す。呼び出しは危険コマンドの検出と同じパーサーで探すので、`sudo gws …` や `bash -c 'gws …'` の中の呼び出しも対象になる。判定器に渡すのはその呼び出しのクォート除去後の引数を収めた JSON で、コマンド全体は渡さない。判定器はコマンドを拒否する、エージェントへ補足を返す（Claude Code と Codex CLI）、何もしない、のいずれかを選べる
 - **拡張子フック**: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` のファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行し、lint 出力を Claude Code / Codex CLI に `additionalContext`、Windsurf に exit 2 + stderr で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
 - **Stopフック**: エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
 - **Stop時プロジェクト全体Lint**: プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf と Grok CLI はベストエフォート）
@@ -53,7 +54,7 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **デバッグログ安全性**: 永続化するのはイベント/ツール/セッション、実行ファイルの basename、引数数、バイト数サマリーのみ。Stop/拡張子フックの引数と実行ファイルのディレクトリを除去し、生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
 - **入出力サイズ上限**: stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
 - **フェイルクローズドのゲート**: コマンドブロックはパースエラー、読み取り不能な入力、設定の破損時に拒否を返す。`config.toml` のタイポ 1 つで保護が無効になることは無い。設定エラーでは exit `1` + stdout 空で終了せず、エージェント固有の拒否応答を返し、診断は stderr へ、あわせて `claw-hooks check` を案内する（exit 1 + stdout 空は一部のエージェントで「フック失敗＝判定を無視」と解釈されるため）。ただしフェイルクローズドにするのは実行前ゲートだけ。Stop 系での「ブロック」は「停止せず継続」を意味し、claw-hooks が中身を検査しないイベントでの拒否はユーザーのプロンプトを消去したり実際のツール出力を置き換えたりするだけで安全性を上げないため、いずれも許可に倒す。イベントを特定できないほど壊れたペイロードはブロックする
-- **プロジェクト設定マージ**: プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに拡張。プロジェクト設定は未信頼の入力として扱われ（エージェントが clone したリポジトリにも置かれ得るため）、防御を**強める**方向のみ反映されます。ガードの有効化とフィルターの追加は反映され、ガードの無効化・グローバルフィルターの置換・stop/extension フックの宣言は警告付きで無視されます
+- **プロジェクト設定マージ**: プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに拡張。プロジェクト設定は未信頼の入力として扱われ（エージェントが clone したリポジトリにも置かれ得るため）、防御を**強める**方向のみ反映されます。ガードの有効化とフィルターの追加は反映され、ガードの無効化・グローバルフィルターの置換・stop/extension/command フックの宣言は警告付きで無視されます
 - **マルチエージェント対応**: Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLI、Grok CLIに対応
 
 ## なぜ claw-hooks？
@@ -207,7 +208,7 @@ claw-hooks hook --format agy --event PostToolUse
 claw-hooks hook --config /path/to/config.toml
 ```
 
-全サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力と終了コード、フェイルクローズドの規則: [docs/cli-reference.ja.md](docs/cli-reference.ja.md)
+全サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力と終了コード、フェイルクローズドの規則、コマンドフックのプロトコル: [docs/cli-reference.ja.md](docs/cli-reference.ja.md)
 
 ## エージェント統合
 
@@ -240,6 +241,11 @@ command = "npm"
 args = ["install", "i", "add"]
 message = "`npm`の代わりに`pnpm`を使用してください"
 
+# gws の呼び出しを、実行前にすべて外部の判定器へ渡す
+[[command_hooks]]
+command = "gws"
+run = "noslop hook command"
+
 # ファイルの書き込み・編集の後にフォーマッターとリンターを実行する
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
@@ -251,9 +257,9 @@ commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo f
 condition = { file_exists = "Cargo.toml" }
 ```
 
-作業ディレクトリの `.claw-hooks.toml` はグローバル設定にマージされますが、反映されるのは防御を強める方向だけです。ガードの有効化とフィルターの追加は効き、ガードの無効化と Stop フック・拡張子フックの宣言は警告付きで無視されます。`--config <path>` を渡すと、グローバル設定の代わりにそのファイルを使います。
+作業ディレクトリの `.claw-hooks.toml` はグローバル設定にマージされますが、反映されるのは防御を強める方向だけです。ガードの有効化とフィルターの追加は効き、ガードの無効化と、Stop フック・拡張子フック・コマンドフックの宣言は警告付きで無視されます。`--config <path>` を渡すと、グローバル設定の代わりにそのファイルを使います。
 
-全設定項目と既定値、プロジェクト設定のマージルール、ステージとセッションスコープを使う Stop フック、Stop フックに渡す環境変数、カスタムフィルターのモード: [docs/configuration.ja.md](docs/configuration.ja.md)
+全設定項目と既定値、プロジェクト設定のマージルール、ステージとセッションスコープを使う Stop フック、Stop フックに渡す環境変数、カスタムフィルターのモード、コマンドフック: [docs/configuration.ja.md](docs/configuration.ja.md)
 
 ## パフォーマンス
 

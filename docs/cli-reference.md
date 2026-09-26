@@ -1,6 +1,6 @@
 # CLI Reference
 
-claw-hooks reads one hook event from stdin and answers in the calling agent's native format. This page covers the subcommands and options, how each `--format` reads its agent's payload, the output for every event, the exit codes, and the fail-closed rules. Registering claw-hooks in each agent is covered in [Agent Integration](integrations.md).
+claw-hooks reads one hook event from stdin and answers in the calling agent's native format. This page covers the subcommands and options, how each `--format` reads its agent's payload, the output for every event, the exit codes, the fail-closed rules, and the protocol between claw-hooks and a command hook's checker. Registering claw-hooks in each agent is covered in [Agent Integration](integrations.md).
 
 ## Commands
 
@@ -250,7 +250,7 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 
 | Agent | Event | Allow | Block / fail-closed |
 |---|---|---|---|
-| Claude Code | PreToolUse | `{}` (no decision — the normal permission flow still applies) | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
+| Claude Code | PreToolUse | `{}` (no decision — the normal permission flow still applies), or `…additionalContext:"…"`, still without a decision, when a command hook returns context | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
 | Claude Code | PostToolUse | `{}` or `…additionalContext:"…"` (lint feedback) | `{"decision":"block","reason":"…"}` |
 | Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
 | Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}` (exit 0 — Cursor reads the stdout JSON only on exit 0) |
@@ -265,7 +265,7 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
 | Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
 
-`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
+`additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`, and command hook context to Claude `PreToolUse` and Codex `PreToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
 
 claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's event schemas require explicit decisions: safe `PreToolUse` returns `"allow"`, while an allowed Stop returns the non-continuing value `"stop"`.
 
@@ -293,3 +293,109 @@ The "fail-closed parse error" column applies to the pre-execution gates only. Ev
 **Events claw-hooks never inspects allow too.** Denying an event whose contents claw-hooks never looks at buys no safety and costs real work: a `UserPromptSubmit` deny erases the user's prompt, a Codex `PostToolUse` deny replaces the actual tool output with the hook's message, and Cursor's `beforeReadFile` carries the whole file body — so a large file trivially exceeds the 4 MiB stdin limit and the read would be blocked by a tool that has no opinion on reads. Windsurf's post-hooks and every Grok event except `PreToolUse` cannot block at all, so a deny there only injects a spurious error. These all return `{}` + exit `0`.
 
 **An unidentifiable payload still blocks.** The rules above are keyed on the event name. When the payload is damaged badly enough that claw-hooks cannot recover the event name, it falls back to the deny response — so a truncated or oversized `PreToolUse` is still blocked.
+
+**Command hook checkers follow `on_error` instead.** A checker that crashes, times out, or cannot be started is not covered by the rules above. Its hook's `on_error` decides, and the default lets the command through. See [Command Hook Protocol](#command-hook-protocol).
+
+## Command Hook Protocol
+
+A command hook (`[[command_hooks]]`, see [Configuration](configuration.md#command-hooks)) runs its checker once for each matching call in a shell command. This section is the contract between claw-hooks and the checker.
+
+### When Checkers Run
+
+Checkers run only for shell tool calls (`Bash` / `PowerShell`) on the events in the "Before Command" group of the [event mapping](#event-mapping-summary), and on Codex CLI's `PermissionRequest`. They run after the built-in `rm` / `kill` / `dd` filters and the custom filters, so a command that one of those blocks never reaches a checker.
+
+Calls are checked in the order they appear in the command, and several hooks matching the same call run in config order. A check with the same hook and the same input as an earlier one is not repeated. The first block ends the event: later checkers do not run, and any context collected so far is dropped.
+
+Calls behind wrappers (`sudo`, `env`, `timeout`, …), in shell strings (`bash -c`, `eval`, `env -S`, `trap`), in here-documents and here-strings fed to a shell, and under `xargs` / `find -exec` are calls of their own. `sudo gws docs …`, for example, yields a `sudo` call and a `gws` call.
+
+### Input
+
+claw-hooks writes one line of JSON to the checker's stdin and closes it.
+
+```json
+{
+  "version": 1,
+  "agent": "claude-code",
+  "event": "PreToolUse",
+  "tool_name": "Bash",
+  "session_id": "abc",
+  "cwd": "/path/to/project",
+  "analysis": "complete",
+  "context_delivery": true,
+  "argv": [
+    {"value": "gws", "static": true, "cardinality": "one"},
+    {"value": "docs", "static": true, "cardinality": "one"},
+    {"value": null, "static": false, "cardinality": "zero_or_more"}
+  ],
+  "stdin": null
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | Always `1` |
+| `agent` | The agent that sent the event: `claude-code`, `codex`, `cursor`, `windsurf`, `antigravity`, or `grok` |
+| `event` | claw-hooks' own name for the event: `PreToolUse` for every agent's pre-execution command event (Cursor's `beforeShellExecution` and Windsurf's `pre_run_command` included), `PermissionRequest` for Codex CLI's `PermissionRequest` |
+| `tool_name` | `Bash` or `PowerShell` |
+| `session_id` | The agent's session ID, or `null` |
+| `cwd` | The directory the command runs in, as reported by the agent. If the agent reports none, claw-hooks' own working directory; `null` if that cannot be read either |
+| `analysis` | `complete` or `uncertain` (see below) |
+| `context_delivery` | Whether stdout on exit `0` reaches the agent: `true` for Claude Code and Codex CLI on `PreToolUse`, `false` otherwise. A checker can use it to skip writing context that would be dropped |
+| `argv` | The words of the call, program name first. Each element has `value`, `static` and `cardinality` |
+| `stdin` | What the call reads on standard input (see below) |
+
+The command string itself is not passed. It can hold secrets, or text that has nothing to do with the program being checked, so the checker sees the matching call only.
+
+With Codex CLI, when both `PreToolUse` and `PermissionRequest` are registered, a command that asks for approval reaches the checker at each of the two events. `event` tells them apart.
+
+**`argv` elements.** `value` is the argument's run-time value after quote removal when claw-hooks can determine it statically, and `null` when it cannot (`$VAR`, `$(date)`). `static` is `true` exactly when `value` is not `null`. `cardinality` is `"one"` when the element becomes exactly one argument at run time, and `"zero_or_more"` when it can expand to any number of arguments, including none: an unquoted expansion, a glob, a brace expansion, or the arguments `xargs` appends. After a `zero_or_more` element, the positions of the remaining arguments are not fixed.
+
+Two cases are worth knowing when writing a checker:
+
+- Inside double quotes, `$(cat <<'EOF' … EOF)` (a `cat` with no arguments reading a single here-document) is static. Its value is the here-document body with the trailing newlines removed, as command substitution does. This covers the `gws … --json "$(cat <<'EOF' … EOF)"` form.
+- Under `xargs`, the inner call ends with one extra `zero_or_more` element that stands for the arguments `xargs` appends. With `-I`, nothing is appended; instead, each word containing the replacement string is not static. The `{}` of `find -exec` is not static either.
+
+**`analysis`.** `"complete"` means the call is certain from the command's syntax. `"uncertain"` means the call is a candidate whose words may not be exactly what runs: it was found by re-parsing a string that is not static (`bash -c "gws docs $ARGS"`), in a command that contains syntax errors, or in a `PowerShell` tool command, which claw-hooks reads with shell grammar. Candidates that claw-hooks builds only for dangerous-command detection, such as the one made by folding a brace expansion in the program name to its first choice, are never passed to a checker.
+
+**`stdin`.** `null` when the call has no input redirection and is not fed by a pipe, so it inherits the agent's standard input. `{"value": "…", "static": true}` when the input is a here-document or here-string whose body is known statically, as in `gws … <<'EOF'`. `{"value": null, "static": false}` when something is fed in but its content is unknown: a pipe, `< file`, or a here-document or here-string that is not static (`<<< "$TEXT"`).
+
+### Output and Exit Code
+
+| Checker result | What claw-hooks does |
+|---|---|
+| Exit `0`, stdout empty or whitespace only | Nothing |
+| Exit `0`, output on stdout | No objection. Where `context_delivery` is `true`, the output goes to the agent as context, as `[<label>] <output>`; elsewhere it is dropped |
+| Exit `2` | Blocks the command with `[<label>] <reason>`. The reason is stderr; if stderr is empty, stdout; if both are empty, `blocked by command hook` |
+| Any other exit code, a signal, a start failure, a timeout, or a reported working directory that is not a directory | A checker failure, handled by `on_error`. `allow` lets the command through and records a warning in the debug log. `block` blocks it with `[<label>] command hook failed: <cause>`, where `<cause>` is, for example, `timed out after 5s`, `exit code 1`, `terminated by a signal`, or `could not be started` |
+
+`<label>` is the basename of the program in `run`: `noslop` for `run = "noslop hook command"`. ANSI escape sequences are removed from the checker's output and surrounding whitespace is trimmed; the text sent to the agent is then cut to `output_max_length` like any other hook output. claw-hooks keeps at most 4 MiB each of stdout and stderr. A checker that exits without reading its stdin is not treated as failing.
+
+### Where Context Reaches the Agent
+
+| Agent | Context from exit `0` |
+|---|---|
+| Claude Code | `PreToolUse`: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"…"}}` with no `permissionDecision`, so the normal permission flow still applies |
+| Codex CLI | `PreToolUse`: the same shape. `PermissionRequest`: dropped, and `{}` is returned |
+| Cursor, Windsurf, Antigravity CLI, Grok CLI | Dropped; the usual allow response is returned |
+
+Blocks work on every agent and use the same deny response as the built-in filters (see [Input/Output Reference](#inputoutput-reference)). Context is returned only when no checker blocked the command.
+
+### Limits
+
+- **At most 32 checker runs per hook event.** Runs beyond that are not made, and each skipped hook's `on_error` decides; `block` blocks with `[<label>] command hook skipped: too many invocations to check`.
+- **Each run is limited by its hook's `timeout` alone.** Command hooks do not use `hook_timeout`, which a project config can override (see [Configuration](configuration.md#command-hooks)). Together with the 32-run cap, one hook event spends at most 32 runs of `timeout` seconds each (160 seconds with the default).
+- **Commands too large to analyze.** When a command is too long or nested too deeply for the parser, no checker runs. The command is blocked with `[<label>] command hook could not analyze the command` if any command hook sets `on_error = "block"`, and allowed otherwise.
+
+### Working Directory and Environment
+
+The checker runs in the working directory the agent reported for the command, when that is an existing directory. When the reported path is not a directory, the checker is not started and `on_error` decides. When the agent reported none, the checker inherits claw-hooks' working directory.
+
+The checker inherits claw-hooks' environment plus `CLAW_HOOKS_COMMAND_HOOK_ACTIVE=1`. A claw-hooks process that starts with that variable set skips command hooks entirely, so a checker that drives an agent whose hooks call claw-hooks again cannot recurse. The other filters still run in that process.
+
+### Calls That Are Not Checked
+
+A hook matches a call by its program name, so the name has to be written out in the command. When it is only known at run time, as in `$CMD args` or `"$(which gws)" docs …`, claw-hooks cannot tell which program will run, and the call is not checked. Command hooks are therefore no defense against an agent that deliberately hides the program name.
+
+### Logging
+
+Debug logs keep only the checker's program name, the number of matching calls, exit codes, byte counts, durations and the `on_error` policy. The arguments, the input JSON and the checker's output are not written to the log.

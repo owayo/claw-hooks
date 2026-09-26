@@ -110,6 +110,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "kill -9 1234".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };

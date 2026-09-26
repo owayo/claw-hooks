@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::cli::Format;
-use crate::domain::{Decision, HookEvent, HookInput, normalize_lint_output, truncate_output};
+use crate::domain::{
+    AgentProfile, Decision, HookEvent, HookInput, normalize_lint_output, truncate_output,
+};
 use crate::service::log_sanitizer::summarize_hook_input;
 
 /// 壊れた JSON からイベント名を走査する際に読む先頭バイト数。
@@ -129,6 +131,20 @@ fn scan_json_string_value(after_key: &str) -> Option<String> {
     None
 }
 
+/// 作業ディレクトリとして報告された値を取り出す。
+///
+/// 文字列以外（数値・オブジェクト等）と空白のみの文字列は「報告なし」として `None` にする。
+/// 作業ディレクトリは判定そのものには使わない補助情報（command hooks の判定器へ渡す値と、
+/// 判定器を起動するディレクトリ）なので、型の食い違いでパース全体を落とさない
+/// （判定に使わないフィールドを必須にしない方針。AGENTS.md の Fail-Closed Security 参照）。
+/// 値は trim しない。前後に空白を持つディレクトリ名も正当なパスだからである。
+fn reported_cwd(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
+
 /// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
     format: Format,
@@ -162,6 +178,29 @@ impl FormatAdapter {
             .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty());
         self
+    }
+
+    /// 呼び出し元エージェントの性質を返す（`FilterChain::with_agent` へ渡す）。
+    ///
+    /// `pre_command_context` は「BeforeCommand（実行前フック）の Allow に付けた補足が
+    /// エージェントへ届くか」で、`format_output` の実際の挙動と一致していなければならない
+    /// （食い違うと command hooks の判定器に「補足が届く」と誤って伝えてしまう。
+    /// テストで全形式を突き合わせて固定している）。
+    /// - Claude Code / Codex: PreToolUse の `hookSpecificOutput.additionalContext` で届く
+    /// - Cursor / Windsurf / Antigravity / Grok: 実行前フックに判定なしの補足経路が無く、捨てる
+    pub fn agent_profile(&self) -> AgentProfile {
+        let (id, pre_command_context) = match self.format {
+            Format::Claude => ("claude-code", true),
+            Format::Codex => ("codex", true),
+            Format::Cursor => ("cursor", false),
+            Format::Windsurf => ("windsurf", false),
+            Format::Agy => ("antigravity", false),
+            Format::Grok => ("grok", false),
+        };
+        AgentProfile {
+            id,
+            pre_command_context,
+        }
     }
 
     /// ログ出力用のプレフィックス（例: "✴️ Claude Code"）を返す。
@@ -643,10 +682,14 @@ impl FormatAdapter {
     /// `ToolInput` は untagged enum なので直接デシリアライズすると、空オブジェクトが
     /// 全フィールド optional の StopInput に誤マッチする。ツール種別ごとの必須項目を
     /// ここで検証して fail-closed にする。
+    ///
+    /// `cwd` はエージェントが報告したコマンドの作業ディレクトリで、シェルツールの
+    /// `BashInput::cwd` にだけ設定する（Claude / Codex ともトップレベルの `cwd`）。
     fn parse_tool_input_for_tool(
         agent: &str,
         tool_name: &str,
         raw_tool_input: &serde_json::Value,
+        cwd: Option<String>,
     ) -> Result<crate::domain::ToolInput> {
         match tool_name {
             // PowerShell ツールの tool_input は Bash と同一形状（`command` にコマンド文字列）。
@@ -663,6 +706,7 @@ impl FormatAdapter {
                 Ok(crate::domain::ToolInput::Bash(crate::domain::BashInput {
                     command: command.to_string(),
                     timeout: raw_tool_input.get("timeout").and_then(|v| v.as_u64()),
+                    cwd,
                 }))
             }
             // NotebookEdit は `.ipynb` の編集ツール。ファイルパスのキーが `file_path` ではなく
@@ -884,6 +928,9 @@ impl FormatAdapter {
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => event == HookEvent::AfterFileEdit,
             _ => false,
         };
+        // 公式仕様の共通入力 `cwd` は「フック発火時の作業ディレクトリ」で、Claude が `cd` や
+        // worktree への移動をすると追従する。つまりこれから実行するコマンドの作業ディレクトリ。
+        let cwd = reported_cwd(claude_input.cwd.as_ref());
         let Some(raw_tool_input) = claude_input.tool_input else {
             if inspects_tool_input {
                 return Err(anyhow!("Missing tool_input field"));
@@ -903,7 +950,7 @@ impl FormatAdapter {
             });
         };
         let tool_input =
-            match Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input) {
+            match Self::parse_tool_input_for_tool("Claude", &tool_name, &raw_tool_input, cwd) {
                 Ok(parsed) => parsed,
                 // 判定に使わない組み合わせ（PreToolUse のファイル編集ツール等）では、
                 // 形が想定と違っても素通しする。ここで落とすと PreToolUse では deny =
@@ -925,6 +972,7 @@ impl FormatAdapter {
             agent = self.format.label(),
             event = ?event,
             tool_name = %tool_name,
+            has_cwd = matches!(&tool_input, crate::domain::ToolInput::Bash(bash) if bash.cwd.is_some()),
             "{} parsed input", self.log_prefix()
         );
 
@@ -1016,12 +1064,13 @@ impl FormatAdapter {
         if parsed.command.trim().is_empty() {
             return Err(anyhow!("Missing command for Cursor beforeShellExecution"));
         }
+        let cwd = reported_cwd(parsed.cwd.as_ref());
 
         debug!(
             agent = self.format.label(),
             hook_type = "beforeShellExecution",
             command_bytes = parsed.command.len(),
-            has_cwd = parsed.cwd.is_some(),
+            has_cwd = cwd.is_some(),
             mapped_event = ?HookEvent::BeforeCommand,
             mapped_tool = "Bash",
             "{} parsed input", self.log_prefix()
@@ -1033,6 +1082,7 @@ impl FormatAdapter {
             tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                 command: parsed.command,
                 timeout: None,
+                cwd,
             }),
             session_id: None,
         })
@@ -1079,11 +1129,20 @@ impl FormatAdapter {
             });
         };
 
+        // コマンドの作業ディレクトリはツール引数の `working_directory` が最も直接的で、
+        // 無ければセッションの `cwd` を使う（公式の入力例は両方を載せている）。
+        let cwd = reported_cwd(
+            raw.get("tool_input")
+                .and_then(|v| v.get("working_directory")),
+        )
+        .or_else(|| reported_cwd(raw.get("cwd")));
+
         debug!(
             agent = self.format.label(),
             hook_type = "preToolUse",
             raw_tool_name = %tool_name,
             command_bytes = command.len(),
+            has_cwd = cwd.is_some(),
             mapped_event = ?HookEvent::BeforeCommand,
             mapped_tool = "Bash",
             "{} parsed input", self.log_prefix()
@@ -1095,6 +1154,7 @@ impl FormatAdapter {
             tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                 command: command.to_string(),
                 timeout: None,
+                cwd,
             }),
             session_id: None,
         })
@@ -1302,6 +1362,7 @@ impl FormatAdapter {
                     crate::domain::ToolInput::Bash(crate::domain::BashInput {
                         command,
                         timeout: None,
+                        cwd: reported_cwd(tool_info.cwd.as_ref()),
                     }),
                 )
             }
@@ -1369,7 +1430,7 @@ impl FormatAdapter {
             has_cwd = windsurf_input
                 .tool_info
                 .as_ref()
-                .and_then(|ti| ti.cwd.as_ref())
+                .and_then(|ti| reported_cwd(ti.cwd.as_ref()))
                 .is_some(),
             "{} parsed input", self.log_prefix()
         );
@@ -1471,6 +1532,12 @@ struct ClaudeInput {
     /// サブエージェント固有の識別子。メインセッションの `--agent` には付かない。
     #[serde(default)]
     agent_id: Option<serde_json::Value>,
+
+    /// フック発火時の作業ディレクトリ（`cd` / worktree への移動に追従する）。
+    /// command hooks の判定器へ渡す補助情報で判定には使わないため、型不一致で
+    /// パース全体を落とさないよう Value で受け、文字列だけを採用する。
+    #[serde(default)]
+    cwd: Option<serde_json::Value>,
 }
 
 /// Claude Code の Stop イベント出力フォーマット。
@@ -1493,10 +1560,10 @@ struct ClaudeStopOutput {
 struct CursorShellInput {
     /// 実行するコマンド
     command: String,
-    /// 現在の作業ディレクトリ
+    /// 現在の作業ディレクトリ。判定には使わない補助情報のため、型不一致で
+    /// パース全体（= 実行前ゲート）を落とさないよう Value で受け、文字列だけを採用する。
     #[serde(default)]
-    #[allow(dead_code)]
-    cwd: Option<String>,
+    cwd: Option<serde_json::Value>,
 }
 
 /// Cursor の afterFileEdit 入力フォーマット。
@@ -1593,10 +1660,10 @@ struct WindsurfToolInfo {
     /// pre_run_command 用のコマンドライン
     #[serde(default)]
     command_line: Option<String>,
-    /// 現在の作業ディレクトリ
+    /// 現在の作業ディレクトリ。判定には使わない補助情報のため、型不一致で
+    /// パース全体を落とさないよう Value で受け、文字列だけを採用する。
     #[serde(default)]
-    #[allow(dead_code)]
-    cwd: Option<String>,
+    cwd: Option<serde_json::Value>,
     /// post_write_code 用のファイルパス
     #[serde(default)]
     file_path: Option<String>,
@@ -1871,7 +1938,14 @@ impl FormatAdapter {
                 .ok_or_else(|| anyhow!("Missing tool_input.command field"))?;
             crate::domain::ToolInput::Files(Self::parse_apply_patch_file_inputs(command))
         } else {
-            Self::parse_tool_input_for_tool("Codex", &mapped_tool_name, raw_tool_input)?
+            // 公式仕様の共通入力 `cwd` はセッションの作業ディレクトリで、コマンドはそこで
+            // 実行される。存在すれば取り出すだけで、必須にはしない（上の session_id と同じ）。
+            Self::parse_tool_input_for_tool(
+                "Codex",
+                &mapped_tool_name,
+                raw_tool_input,
+                reported_cwd(raw.get("cwd")),
+            )?
         };
 
         debug!(
@@ -1880,6 +1954,7 @@ impl FormatAdapter {
             mapped_event = ?event,
             raw_tool_name = %raw_tool_name,
             mapped_tool = %mapped_tool_name,
+            has_cwd = matches!(&tool_input, crate::domain::ToolInput::Bash(bash) if bash.cwd.is_some()),
             "{} parsed input", self.log_prefix()
         );
 
@@ -1905,6 +1980,22 @@ impl FormatAdapter {
                 serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
+                        "additionalContext": truncated
+                    }
+                })
+            }
+            // PreToolUse の補足（command hooks の判定器の出力など）は、公式仕様の
+            // 「ブロックせずにモデルへ文脈を足す」形式で返す。permissionDecision は付けない
+            // （Deny-Only Policy。claw-hooks は拒否以外の判定を返さない）。
+            // PermissionRequest の出力は allow / deny の判定だけで判定なしの補足経路が無いため、
+            // ここには含めず `{}` に落とす。
+            Decision::Allow {
+                additional_context: Some(ctx),
+            } if event == HookEvent::BeforeCommand && !ctx.trim().is_empty() => {
+                let truncated = truncate_output(ctx, self.output_max_length);
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
                         "additionalContext": truncated
                     }
                 })
@@ -2161,6 +2252,10 @@ impl FormatAdapter {
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| anyhow!("Missing toolCall.args.CommandLine field"))?;
 
+                // `args.Cwd` がコマンドの作業ディレクトリ。無ければワークスペースの先頭に倒す。
+                let cwd = reported_cwd(raw_args.and_then(|args| args.get("Cwd")))
+                    .or_else(|| Self::agy_first_workspace_path(raw));
+
                 debug!(
                     agent = self.format.label(),
                     raw_event = "PreToolUse",
@@ -2168,6 +2263,7 @@ impl FormatAdapter {
                     raw_tool_name = %raw_tool_name,
                     mapped_tool = "Bash",
                     command_bytes = command.len(),
+                    has_cwd = cwd.is_some(),
                     "{} parsed input", self.log_prefix()
                 );
 
@@ -2177,6 +2273,7 @@ impl FormatAdapter {
                     tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                         command: command.to_string(),
                         timeout: None,
+                        cwd,
                     }),
                     session_id,
                 })
@@ -2214,6 +2311,11 @@ impl FormatAdapter {
                     });
                 };
 
+                // `send_input` の引数には作業ディレクトリが無い（流し込む先は起動済みの
+                // 永続シェルで、その時点の cwd は入力からは分からない）。ワークスペースの
+                // 先頭を近似値として渡す。
+                let cwd = Self::agy_first_workspace_path(raw);
+
                 debug!(
                     agent = self.format.label(),
                     raw_event = "PreToolUse",
@@ -2221,6 +2323,7 @@ impl FormatAdapter {
                     raw_tool_name = %raw_tool_name,
                     mapped_tool = "Bash",
                     command_bytes = command.len(),
+                    has_cwd = cwd.is_some(),
                     "{} parsed input", self.log_prefix()
                 );
 
@@ -2230,6 +2333,7 @@ impl FormatAdapter {
                     tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                         command: command.to_string(),
                         timeout: None,
+                        cwd,
                     }),
                     session_id,
                 })
@@ -2265,6 +2369,11 @@ impl FormatAdapter {
                 })
             }
         }
+    }
+
+    /// Antigravity の共通入力 `workspacePaths`（マウント済みワークスペースの絶対パス）の先頭。
+    fn agy_first_workspace_path(raw: &serde_json::Value) -> Option<String> {
+        reported_cwd(raw.get("workspacePaths").and_then(|paths| paths.get(0)))
     }
 
     /// Antigravity の PostToolUse を内部 HookInput に変換する。
@@ -2557,6 +2666,11 @@ impl FormatAdapter {
                 ));
             }
 
+            // 公式仕様の共通入力は `cwd` と `workspaceRoot`。セッションの `cwd` を優先し、
+            // 無ければワークスペースのルートに倒す。
+            let cwd =
+                reported_cwd(raw.get("cwd")).or_else(|| reported_cwd(raw.get("workspaceRoot")));
+
             debug!(
                 agent = self.format.label(),
                 raw_event = "PreToolUse",
@@ -2564,6 +2678,7 @@ impl FormatAdapter {
                 mapped_event = ?HookEvent::BeforeCommand,
                 mapped_tool = "Bash",
                 command_bytes = command.len(),
+                has_cwd = cwd.is_some(),
                 "{} parsed input", self.log_prefix()
             );
 
@@ -2573,6 +2688,7 @@ impl FormatAdapter {
                 tool_input: crate::domain::ToolInput::Bash(crate::domain::BashInput {
                     command: command.to_string(),
                     timeout: tool_input.get("timeout").and_then(|v| v.as_u64()),
+                    cwd,
                 }),
                 session_id,
             });
@@ -6933,5 +7049,351 @@ mod tests {
         let adapter = FormatAdapter::new(Format::Codex, 0);
         let input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
         assert_eq!(adapter.format_error_for_input("boom", input), "{}");
+    }
+
+    // === command hooks: エージェントの性質・実行前フックの補足・作業ディレクトリ ===
+
+    const ALL_FORMATS: [Format; 6] = [
+        Format::Claude,
+        Format::Codex,
+        Format::Cursor,
+        Format::Windsurf,
+        Format::Agy,
+        Format::Grok,
+    ];
+
+    #[test]
+    fn test_agent_profile_matches_each_format() {
+        let cases = [
+            (Format::Claude, "claude-code", true),
+            (Format::Codex, "codex", true),
+            (Format::Cursor, "cursor", false),
+            (Format::Windsurf, "windsurf", false),
+            (Format::Agy, "antigravity", false),
+            (Format::Grok, "grok", false),
+        ];
+        for (format, id, pre_command_context) in cases {
+            assert_eq!(
+                FormatAdapter::new(format, 0).agent_profile(),
+                AgentProfile {
+                    id,
+                    pre_command_context
+                },
+                "{format:?}"
+            );
+        }
+    }
+
+    /// `agent_profile().pre_command_context` は判定器へ「補足が届くか」として渡される。
+    /// `format_output` の実際の挙動と食い違うと、届かない補足を書かせたり、
+    /// 届く補足を諦めさせたりするため、全形式で突き合わせて固定する。
+    #[test]
+    fn test_agent_profile_pre_command_context_matches_format_output() {
+        let decision = Decision::allow_with_context("[checker] context-marker".to_string());
+        for format in ALL_FORMATS {
+            let adapter = FormatAdapter::new(format, 0);
+            let output = adapter
+                .format_output(&decision, HookEvent::BeforeCommand)
+                .unwrap();
+            assert_eq!(
+                output.contains("context-marker"),
+                adapter.agent_profile().pre_command_context,
+                "{format:?}: {output}"
+            );
+            // 補足を付けても Allow のまま（exit 0・stdout）。Windsurf の exit 2 + stderr は
+            // 実行前フックではブロックを意味するため、補足で経路が変わってはならない。
+            assert_eq!(
+                adapter.exit_code(&decision, HookEvent::BeforeCommand),
+                0,
+                "{format:?}"
+            );
+            assert!(
+                !adapter.use_stderr(&decision, HookEvent::BeforeCommand),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_before_command_allow_without_context_is_unchanged() {
+        // 補足の無い Allow（空白だけの補足を含む）は全形式で従来どおりの応答のまま。
+        let cases = [
+            (Format::Claude, "{}"),
+            (Format::Codex, "{}"),
+            (Format::Cursor, "{}"),
+            (Format::Windsurf, "{}"),
+            (Format::Agy, r#"{"decision":"allow"}"#),
+            (Format::Grok, "{}"),
+        ];
+        for (format, expected) in cases {
+            let adapter = FormatAdapter::new(format, 0);
+            for decision in [
+                Decision::allow(),
+                Decision::allow_with_context(" \n\t".to_string()),
+            ] {
+                let output = adapter
+                    .format_output(&decision, HookEvent::BeforeCommand)
+                    .unwrap();
+                assert_eq!(output, expected, "{format:?}: {decision:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_claude_output_before_command_allow_with_context() {
+        // 補足は additionalContext だけで返し、permissionDecision は付けない
+        // （Deny-Only Policy。"allow" を付けると Claude の承認プロンプトが飛ぶ）。
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let output = adapter
+            .format_output(
+                &Decision::allow_with_context("[checker] note".to_string()),
+                HookEvent::BeforeCommand,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": "[checker] note"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_codex_output_before_command_allow_with_context() {
+        let adapter = FormatAdapter::new(Format::Codex, 0);
+        let decision = Decision::allow_with_context("[checker] note".to_string());
+        let output = adapter
+            .format_output(&decision, HookEvent::BeforeCommand)
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": "[checker] note"
+                }
+            })
+        );
+
+        // PermissionRequest は allow / deny の判定しか返せず、判定なしの補足経路が無い。
+        // allow を返すと承認プロンプトを飛ばすことになるため、補足は捨てて `{}` にする。
+        assert_eq!(
+            adapter
+                .format_output(&decision, HookEvent::PermissionRequest)
+                .unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn test_before_command_context_is_truncated_to_output_max_length() {
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 50);
+            let output = adapter
+                .format_output(
+                    &Decision::allow_with_context("a".repeat(100)),
+                    HookEvent::BeforeCommand,
+                )
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let context = parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(
+                context.len() <= 50,
+                "{format:?}: additionalContext は切り詰められるべき: len={}",
+                context.len()
+            );
+        }
+    }
+
+    /// パース結果の `BashInput::cwd` を返す（Bash として解釈されなければ panic）。
+    fn parsed_bash_cwd(adapter: &FormatAdapter, input: &str) -> Option<String> {
+        let parsed = adapter
+            .parse_input(input)
+            .unwrap_or_else(|e| panic!("パースできるべき: {e}\n{input}"));
+        match parsed.tool_input {
+            crate::domain::ToolInput::Bash(bash) => bash.cwd,
+            other => panic!("Bash として解釈されるべき: {other:?}\n{input}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_cwd_is_taken_from_each_agents_reported_directory() {
+        let codex_pre = complete_codex_input(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/work/codex","tool_input":{"command":"gws docs"}}"#,
+        );
+        let codex_permission = complete_codex_input(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","cwd":"/work/codex","tool_input":{"command":"gws docs"}}"#,
+        );
+        let cases: Vec<(Format, String, &str)> = vec![
+            (
+                Format::Claude,
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/work/claude","tool_input":{"command":"gws docs"}}"#.to_string(),
+                "/work/claude",
+            ),
+            (
+                Format::Claude,
+                r#"{"hook_event_name":"PreToolUse","tool_name":"PowerShell","cwd":"C:\\work\\claude","tool_input":{"command":"gws docs"}}"#.to_string(),
+                "C:\\work\\claude",
+            ),
+            (Format::Codex, codex_pre, "/work/codex"),
+            (Format::Codex, codex_permission, "/work/codex"),
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"beforeShellExecution","command":"gws docs","cwd":"/work/cursor"}"#.to_string(),
+                "/work/cursor",
+            ),
+            // preToolUse はツール引数の working_directory を優先する
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"gws docs","working_directory":"/work/cursor/sub"},"cwd":"/work/cursor"}"#.to_string(),
+                "/work/cursor/sub",
+            ),
+            // working_directory が無い・空白のみならトップレベルの cwd
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"gws docs"},"cwd":"/work/cursor"}"#.to_string(),
+                "/work/cursor",
+            ),
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"gws docs","working_directory":"  "},"cwd":"/work/cursor"}"#.to_string(),
+                "/work/cursor",
+            ),
+            (
+                Format::Windsurf,
+                r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"gws docs","cwd":"/work/windsurf"}}"#.to_string(),
+                "/work/windsurf",
+            ),
+            // run_command は args.Cwd を優先し、無ければワークスペースの先頭
+            (
+                Format::Agy,
+                r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"gws docs","Cwd":"/work/agy/sub"}},"stepIdx":1,"workspacePaths":["/work/agy"]}"#.to_string(),
+                "/work/agy/sub",
+            ),
+            (
+                Format::Agy,
+                r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"gws docs"}},"stepIdx":1,"workspacePaths":["/work/agy","/work/other"]}"#.to_string(),
+                "/work/agy",
+            ),
+            (
+                Format::Agy,
+                r#"{"toolCall":{"name":"manage_task","args":{"Action":"send_input","TaskId":"t1","Input":"gws docs"}},"stepIdx":1,"workspacePaths":["/work/agy","/work/other"]}"#.to_string(),
+                "/work/agy",
+            ),
+            // Grok はセッションの cwd を優先し、無ければ workspaceRoot
+            (
+                Format::Grok,
+                r#"{"hookEventName":"PreToolUse","toolName":"run_terminal_cmd","toolInput":{"command":"gws docs"},"cwd":"/work/grok/sub","workspaceRoot":"/work/grok"}"#.to_string(),
+                "/work/grok/sub",
+            ),
+            (
+                Format::Grok,
+                r#"{"hookEventName":"PreToolUse","toolName":"run_terminal_cmd","toolInput":{"command":"gws docs"},"workspaceRoot":"/work/grok"}"#.to_string(),
+                "/work/grok",
+            ),
+        ];
+
+        for (format, input, expected) in cases {
+            let adapter = FormatAdapter::new(format, 0);
+            assert_eq!(
+                parsed_bash_cwd(&adapter, &input).as_deref(),
+                Some(expected),
+                "{format:?}: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bash_cwd_absent_blank_or_non_string_is_none_without_failing_parse() {
+        // 作業ディレクトリは判定に使わない補助情報なので、欠落・空白のみ・型違いでも
+        // パースを失敗させず（= 実行前ゲートで deny に倒さず）、「報告なし」として扱う。
+        let codex_without_cwd = {
+            let mut value: serde_json::Value = serde_json::from_str(&complete_codex_input(
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gws docs"}}"#,
+            ))
+            .unwrap();
+            value.as_object_mut().unwrap().remove("cwd");
+            value.to_string()
+        };
+        let cases: Vec<(Format, String)> = vec![
+            (
+                Format::Claude,
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gws docs"}}"#.to_string(),
+            ),
+            (
+                Format::Claude,
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"   ","tool_input":{"command":"gws docs"}}"#.to_string(),
+            ),
+            (
+                Format::Claude,
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":42,"tool_input":{"command":"gws docs"}}"#.to_string(),
+            ),
+            (Format::Codex, codex_without_cwd),
+            (
+                Format::Codex,
+                complete_codex_input(
+                    r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":{"path":"/x"},"tool_input":{"command":"gws docs"}}"#,
+                ),
+            ),
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"beforeShellExecution","command":"gws docs"}"#.to_string(),
+            ),
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"beforeShellExecution","command":"gws docs","cwd":123}"#.to_string(),
+            ),
+            (
+                Format::Cursor,
+                r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"gws docs","working_directory":7},"cwd":null}"#.to_string(),
+            ),
+            (
+                Format::Windsurf,
+                r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"gws docs"}}"#.to_string(),
+            ),
+            (
+                Format::Windsurf,
+                r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"gws docs","cwd":{}}}"#.to_string(),
+            ),
+            (
+                Format::Agy,
+                r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"gws docs","Cwd":1}},"stepIdx":1,"workspacePaths":[]}"#.to_string(),
+            ),
+            (
+                Format::Agy,
+                r#"{"toolCall":{"name":"manage_task","args":{"Action":"send_input","TaskId":"t1","Input":"gws docs"}},"stepIdx":1,"workspacePaths":"/work/agy"}"#.to_string(),
+            ),
+            (
+                Format::Grok,
+                r#"{"hookEventName":"PreToolUse","toolName":"run_terminal_cmd","toolInput":{"command":"gws docs"},"cwd":" ","workspaceRoot":""}"#.to_string(),
+            ),
+        ];
+
+        for (format, input) in cases {
+            let adapter = FormatAdapter::new(format, 0);
+            assert_eq!(
+                parsed_bash_cwd(&adapter, &input),
+                None,
+                "{format:?}: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bash_cwd_value_is_not_trimmed() {
+        // 前後に空白を持つディレクトリ名も正当なパス。空白のみでなければ値はそのまま渡す。
+        let adapter = FormatAdapter::new(Format::Claude, 0);
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","cwd":"/work/dir ","tool_input":{"command":"gws docs"}}"#;
+        assert_eq!(
+            parsed_bash_cwd(&adapter, input).as_deref(),
+            Some("/work/dir ")
+        );
     }
 }

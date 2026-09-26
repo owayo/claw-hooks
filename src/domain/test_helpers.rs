@@ -12,6 +12,7 @@ pub fn make_bash_input(command: &str) -> HookInput {
         tool_input: ToolInput::Bash(BashInput {
             command: command.to_string(),
             timeout: None,
+            cwd: None,
         }),
         session_id: None,
     }

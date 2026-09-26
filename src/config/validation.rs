@@ -5,7 +5,7 @@ use regex::Regex;
 use std::collections::BTreeMap;
 
 use super::types::ProjectConfig;
-use super::{Config, CustomFilter, StopHook};
+use super::{CommandHook, Config, CustomFilter, StopHook};
 
 /// フックコマンドの最大タイムアウト秒数。
 /// フックは短時間で終わる前提のため、1日を超える値は設定ミスとして扱う。
@@ -40,6 +40,7 @@ pub(crate) fn validate_values(config: &Config) -> Result<()> {
     validate_custom_filters(&config.custom_filters)?;
     validate_extension_hooks(&config.extension_hooks)?;
     validate_stop_hooks(&config.stop_hooks)?;
+    validate_command_hooks(&config.command_hooks)?;
 
     Ok(())
 }
@@ -183,12 +184,69 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
     Ok(())
 }
 
+/// command hooks の定義を検証する。
+///
+/// `command` は呼び出しのプログラム名と完全一致で照合する名前なので、1 語でなければならない。
+/// `gws docs` のように引数まで書くと、どの呼び出しとも一致しないまま `check` が
+/// "Configuration is valid." と答え、判定器が一度も走らない状態を黙って作ってしまう。
+/// 空白は Unicode の空白全般（NBSP・全角空白を含む）を対象にする。
+pub fn validate_command_hooks(hooks: &[CommandHook]) -> Result<()> {
+    for (i, hook) in hooks.iter().enumerate() {
+        let command = hook.command.trim();
+        if command.is_empty() {
+            bail!("command_hooks[{}]: command cannot be empty", i);
+        }
+        if command.contains('\0') {
+            bail!(
+                "command_hooks[{}]: command cannot contain a null character",
+                i
+            );
+        }
+        if command.chars().any(char::is_whitespace) {
+            bail!(
+                "command_hooks[{}]: command must be a single program name without whitespace, got {:?} \
+                 (arguments cannot be matched here; the checker receives the full argv)",
+                i,
+                command
+            );
+        }
+        // `.exe` のように正規化すると何も残らない名前は、どの呼び出しとも一致しない。
+        if hook.command_key().is_empty() {
+            bail!(
+                "command_hooks[{}]: command {:?} does not name a program",
+                i,
+                command
+            );
+        }
+
+        if hook.run.trim().is_empty() {
+            bail!("command_hooks[{}]: run cannot be empty", i);
+        }
+        // 判定器は他のフックと同じく argv に分割して起動する（Windows では `cmd /c` 経由）。
+        // 先頭語が起動するプログラムになるため、クォートだけの `''` のように
+        // quote removal 後に空になる先頭語も「プログラムが無い」として弾く。
+        let run_tokens = crate::domain::parse_shell_tokens(&hook.run);
+        if run_tokens.first().is_none_or(|program| program.is_empty()) {
+            bail!(
+                "command_hooks[{}]: run must start with the program to execute",
+                i
+            );
+        }
+
+        if let Some(timeout_secs) = hook.timeout {
+            validate_hook_timeout(timeout_secs, &format!("command_hooks[{}].timeout", i))?;
+        }
+    }
+    Ok(())
+}
+
 /// プロジェクトレベルの設定を検証する。
 /// `Some` のフィールドのみ検証（プロジェクト設定で指定されたもの）。
 ///
-/// 検証するのは **実際に適用されるフィールドだけ**。`extension_hooks` / `stop_hooks` は
-/// 信頼境界により一切適用されず（`Config::merge_project` を参照。どちらも任意コマンドを
-/// 実行するため、未信頼のプロジェクト設定からは受け付けない）、無視した旨は警告で伝える。
+/// 検証するのは **実際に適用されるフィールドだけ**。`extension_hooks` / `stop_hooks` /
+/// `command_hooks` は信頼境界により一切適用されず（`Config::merge_project` を参照。
+/// いずれも任意コマンドを実行するため、未信頼のプロジェクト設定からは受け付けない）、
+/// 無視した旨は警告で伝える。
 /// 適用しない値を検証してハードエラーにすると、clone したリポジトリに壊れた 2 行を
 /// 置くだけで設定読み込み全体が失敗し、そのディレクトリでは `ls` のような無関係な
 /// コマンドまでフェイルクローズドで deny になる。正しい記述は黙って無視されるのに
@@ -820,5 +878,146 @@ mod tests {
             session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
+    }
+
+    // === command hooks のバリデーションテスト ===
+
+    fn command_hook(command: &str, run: &str, timeout: Option<u64>) -> CommandHook {
+        CommandHook {
+            command: command.to_string(),
+            run: run.to_string(),
+            timeout,
+            on_error: Default::default(),
+        }
+    }
+
+    /// 1 件だけの command hook を持つ設定を検証し、エラー文を返す。
+    fn command_hook_error(hook: CommandHook) -> String {
+        let mut config = default_config();
+        config.command_hooks.push(hook);
+        validate_values(&config)
+            .expect_err("不正な command hook は検証エラーになるべき")
+            .to_string()
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_command_hooks() {
+        let mut config = default_config();
+        config.command_hooks = vec![
+            command_hook("gws", "checker hook command", None),
+            // パス付きの名前も command_key で正規化して照合するので受理する
+            command_hook("/usr/local/bin/gws", "checker --flag 'quoted arg'", Some(1)),
+            // 前後の空白は trim してから判定する
+            command_hook("  git  ", "checker", Some(MAX_HOOK_TIMEOUT_SECS)),
+        ];
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_command_hook_command() {
+        for command in ["", "   ", "\t\n"] {
+            let message = command_hook_error(command_hook(command, "checker", None));
+            assert!(
+                message.contains("command_hooks[0]: command cannot be empty"),
+                "{command:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_command_hook_command_with_whitespace() {
+        // 引数まで書いた `gws docs` はどの呼び出しとも一致しないため設定ミスとして弾く。
+        // タブ・NBSP・全角空白のような ASCII 以外の空白も同様に扱う。
+        for command in [
+            "gws docs",
+            "gws\tdocs",
+            "gws\u{00A0}docs",
+            "gws\u{3000}docs",
+        ] {
+            let message = command_hook_error(command_hook(command, "checker", None));
+            assert!(
+                message.contains("command_hooks[0]: command must be a single program name"),
+                "{command:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_command_hook_command_with_nul() {
+        let message = command_hook_error(command_hook("gws\0", "checker", None));
+        assert!(
+            message.contains("command_hooks[0]: command cannot contain a null character"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_command_hook_command_without_program_name() {
+        // 実行拡張子だけの名前は command_key で空になり、どの呼び出しとも一致しない。
+        for command in [".exe", "/usr/bin/.CMD"] {
+            let message = command_hook_error(command_hook(command, "checker", None));
+            assert!(
+                message.contains("command_hooks[0]: command")
+                    && message.contains("does not name a program"),
+                "{command:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_command_hook_run() {
+        for run in ["", "   "] {
+            let message = command_hook_error(command_hook("gws", run, None));
+            assert!(
+                message.contains("command_hooks[0]: run cannot be empty"),
+                "{run:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_command_hook_run_without_program() {
+        // クォートだけの先頭語は quote removal 後に空になり、起動するプログラムが無い。
+        for run in ["''", "\"\" --flag"] {
+            let message = command_hook_error(command_hook("gws", run, None));
+            assert!(
+                message.contains("command_hooks[0]: run must start with the program to execute"),
+                "{run:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_command_hook_timeout_out_of_range() {
+        // 0 は「無制限」ではなく即タイムアウト。値域（1〜MAX_HOOK_TIMEOUT_SECS）は他のフックと同じ
+        // （値そのものは hook_timeout と独立で、判定器の時間はこの timeout だけで決まる）。
+        for timeout in [0, MAX_HOOK_TIMEOUT_SECS + 1] {
+            let message = command_hook_error(command_hook("gws", "checker", Some(timeout)));
+            assert!(
+                message.contains("command_hooks[0].timeout"),
+                "{timeout}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_command_hook_error_names_the_entry_index() {
+        let mut config = default_config();
+        config.command_hooks = vec![
+            command_hook("gws", "checker", None),
+            command_hook("git", "", None),
+        ];
+        let message = validate_values(&config).unwrap_err().to_string();
+        assert!(message.contains("command_hooks[1]"), "{message}");
+    }
+
+    #[test]
+    fn test_validate_project_does_not_validate_ignored_command_hooks() {
+        // `extension_hooks` / `stop_hooks` と同じ理由で、適用されない command_hooks は
+        // 検証しない。適用されるなら不正な値（空の command / run、timeout = 0）でも
+        // 設定読み込みを落とさない。
+        let pc: ProjectConfig =
+            toml::from_str("[[command_hooks]]\ncommand = \"\"\nrun = \"\"\ntimeout = 0\n").unwrap();
+        assert!(validate_project(&pc).is_ok());
     }
 }

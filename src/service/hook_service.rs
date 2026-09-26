@@ -223,9 +223,13 @@ impl HookService {
     }
 
     /// 指定フォーマットで新しい HookService を作成する。
+    ///
+    /// アダプターを先に作り、呼び出し元エージェントの性質（識別子と、実行前フックの
+    /// 補足がエージェントへ届くか）をフィルターチェーンへ渡す。command hooks の判定器は
+    /// これを入力として受け取り、補足を書くかどうかを決める。
     pub fn new(config: Config, format: Format, trace: bool) -> Self {
-        let filter_chain = FilterChain::new(&config);
         let adapter = FormatAdapter::new(format, config.output_max_length);
+        let filter_chain = FilterChain::with_agent(&config, adapter.agent_profile());
         Self {
             config,
             filter_chain,
@@ -674,6 +678,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "rm -rf /tmp/foo".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };

@@ -2,6 +2,8 @@
 
 Register `claw-hooks hook` in each agent's hooks file. This page lists, per agent, where the file lives, which events to register, and what the agent can and cannot receive back. How claw-hooks reads each agent's payload and what it answers is in the [CLI reference](cli-reference.md).
 
+Command hooks (`[[command_hooks]]`) need no entry of their own: their checkers run inside the command-blocking entry shown for each agent below. A checker can block a command on every agent, but its context reaches the agent only on Claude Code and Codex CLI (`PreToolUse`). See [Command Hook Protocol](cli-reference.md#command-hook-protocol).
+
 ## Claude Code
 
 Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):

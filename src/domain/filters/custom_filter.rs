@@ -698,6 +698,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "npm install".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };
@@ -713,6 +714,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "npm install".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };

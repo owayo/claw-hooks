@@ -42,6 +42,7 @@ claw-hooks is a single binary that plugs into the hook systems of Claude Code, C
 - **DD Command Blocking**: Optionally blocks `dd` to prevent disk overwrite accidents
 - **AST-based Parsing**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
 - **Custom Command Filters**: Define custom filters with regex support
+- **Command Hooks**: Pass each call of a chosen program in a shell command (every `gws` call, say) to an external checker before the command runs. The parser that detects dangerous commands finds the calls, so `sudo gws …` and `bash -c 'gws …'` count too, and the checker receives that call's arguments as JSON after quote removal, never the whole command. The checker can block the command, add context for the agent (Claude Code and Codex CLI), or stay silent
 - **Extension Hooks**: Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`; lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
 - **Stop Hooks**: Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - **Project-wide Lint on Stop**: Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
@@ -53,7 +54,7 @@ claw-hooks is a single binary that plugs into the hook systems of Claude Code, C
 - **Debug Log Safety**: Logs persist only event/tool/session metadata, executable basenames, argument counts, and byte-size summaries. Stop/extension hook arguments and executable directories are stripped, so raw commands, file contents, agent messages, and rendered formatter/linter output never reach disk — full output bodies are available only via `--trace` (stderr, non-persistent)
 - **Bounded I/O**: stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
 - **Fail-Closed Gates**: Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` does not switch protection off: a config error returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) rather than exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
-- **Project Config Merge**: Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension hooks are ignored with a warning
+- **Project Config Merge**: Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension/command hooks are ignored with a warning
 - **Multi-Agent Support**: Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
 
 ## Why claw-hooks?
@@ -207,7 +208,7 @@ claw-hooks hook --format agy --event PostToolUse
 claw-hooks hook --config /path/to/config.toml
 ```
 
-Every subcommand and option, how each `--format` reads its agent's payload, the output and exit code for every event, and the fail-closed rules: [docs/cli-reference.md](docs/cli-reference.md)
+Every subcommand and option, how each `--format` reads its agent's payload, the output and exit code for every event, the fail-closed rules, and the command hook protocol: [docs/cli-reference.md](docs/cli-reference.md)
 
 ## Agent Integration
 
@@ -240,6 +241,11 @@ command = "npm"
 args = ["install", "i", "add"]
 message = "Use `pnpm` instead of `npm`"
 
+# Pass every gws call to an external checker before the command runs
+[[command_hooks]]
+command = "gws"
+run = "noslop hook command"
+
 # Run formatters and linters after a file is written or edited
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
@@ -251,9 +257,9 @@ commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo f
 condition = { file_exists = "Cargo.toml" }
 ```
 
-A `.claw-hooks.toml` in the working directory is merged into the global config, but only toward more protection: enabling a guard and adding filters take effect, while disabling a guard and declaring stop or extension hooks are ignored with a warning. `--config <path>` uses that file instead of the global config.
+A `.claw-hooks.toml` in the working directory is merged into the global config, but only toward more protection: enabling a guard and adding filters take effect, while disabling a guard and declaring stop, extension, or command hooks are ignored with a warning. `--config <path>` uses that file instead of the global config.
 
-Every setting and its default, the project merge rules, staged and session-scoped stop hooks, the environment passed to stop hooks, and the custom filter modes: [docs/configuration.md](docs/configuration.md)
+Every setting and its default, the project merge rules, staged and session-scoped stop hooks, the environment passed to stop hooks, the custom filter modes, and command hooks: [docs/configuration.md](docs/configuration.md)
 
 ## Performance
 

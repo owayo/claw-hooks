@@ -140,6 +140,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "testcmd --flag".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };
@@ -155,6 +156,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "testcmd".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };
@@ -223,6 +225,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "testcmd --flag".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };
@@ -239,6 +242,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "safe_command".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };

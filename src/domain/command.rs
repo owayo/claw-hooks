@@ -1,7 +1,8 @@
 //! タイムアウト対応のコマンド実行ユーティリティ。
 
-use std::io::Read;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use std::os::unix::process::CommandExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 #[cfg(windows)]
 use std::os::windows::process::ExitStatusExt as _;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// タイムアウトによりコマンドが終了された場合の終了コード。
 pub(crate) const TIMEOUT_EXIT_CODE: i32 = 124;
@@ -474,6 +475,21 @@ pub fn run_with_timeout(
     run_with_timeout_tracked(child, timeout_secs, command_desc).map(|result| result.output)
 }
 
+/// プログラムと引数から `Command` を組み立てる。
+///
+/// Windows では `cmd /c` を経由して `.cmd` / `.bat` のラッパー（例: `npx.cmd`）を解決する。
+fn build_command(program: &str, args: &[String]) -> Command {
+    if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.arg("/c").arg(program).args(args);
+        c
+    } else {
+        let mut c = Command::new(program);
+        c.args(args);
+        c
+    }
+}
+
 /// パイプ接続されたstdout/stderrと追加の環境変数でコマンドを起動する。
 /// ストップフックがループ防止用の環境変数を子プロセスに伝播するために使用。
 ///
@@ -484,15 +500,7 @@ pub fn spawn_piped_with_env(
     args: &[String],
     envs: &[(&str, &str)],
 ) -> Result<std::process::Child, String> {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.arg("/c").arg(program).args(args);
-        c
-    } else {
-        let mut c = Command::new(program);
-        c.args(args);
-        c
-    };
+    let mut cmd = build_command(program, args);
     // stdin は明示的に閉じる。継承したままだと、入力を読むコマンド
     // （`-m` なしの `git commit`、`cat` を含むパイプライン等）が端末からの入力を
     // 待ち続け、タイムアウトまでフック全体がハングする。閉じておけば即座に EOF を
@@ -507,6 +515,54 @@ pub fn spawn_piped_with_env(
     configure_unix_process_group(&mut cmd);
     spawn_serialized(&mut cmd)
         .map_err(|e| format!("Failed to execute '{}': {}", program_label(program), e))
+}
+
+/// 標準入力へ `input` を流し込みつつ、stdout/stderr をパイプにしてコマンドを起動する。
+///
+/// command hooks の判定器の起動に使う（判定材料の JSON を stdin で渡す）。
+/// 返した `Child` は `run_with_timeout_tracked` で待つ。
+///
+/// - `input` は別スレッドで書き込んでから stdin を閉じる。起動元のスレッドで書くと、
+///   子が stdin を読まないまま stdout へパイプの容量以上を書いたときに互いの空きを
+///   待って止まり、しかもその書き込みにはタイムアウトが効かない。書き込みスレッドは
+///   join しない（子が終了・強制終了されれば書き込みは失敗して戻る）。
+/// - 子が stdin を読まずに終了した場合の書き込みエラー（EPIPE）は無視する。
+///   入力を読まずに判定を返す判定器もあり、起動の失敗ではない。
+/// - `cwd` が `Some` ならそのディレクトリで起動する（`None` なら claw-hooks の cwd を継承）。
+/// - Unix では新しいプロセスグループに置き、タイムアウト時に孫プロセスまで停止できるようにする。
+pub fn spawn_piped_with_input(
+    program: &str,
+    args: &[String],
+    envs: &[(&str, &str)],
+    cwd: Option<&Path>,
+    input: Vec<u8>,
+) -> Result<Child, String> {
+    let mut cmd = build_command(program, args);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for &(key, value) in envs {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    configure_process_group(&mut cmd);
+    let mut child = spawn_serialized(&mut cmd)
+        .map_err(|e| format!("Failed to execute '{}': {}", program_label(program), e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || {
+            if let Err(e) = stdin.write_all(&input)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                // 入力の本文は残さず、失敗の種類だけを記録する。
+                debug!("Failed to write stdin of a child process: {:?}", e.kind());
+            }
+            // ここで stdin が drop され、子は EOF を受け取る。
+        });
+    }
+    Ok(child)
 }
 
 /// stdout/stderr/stdin を切り離してコマンドを起動する。
@@ -524,15 +580,7 @@ pub fn spawn_detached_with_env(
     args: &[String],
     envs: &[(&str, &str)],
 ) -> Result<u32, String> {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.arg("/c").arg(program).args(args);
-        c
-    } else {
-        let mut c = Command::new(program);
-        c.args(args);
-        c
-    };
+    let mut cmd = build_command(program, args);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1232,6 +1280,85 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "stdin を閉じていれば入力待ちでハングしない: {:?}",
             elapsed
+        );
+    }
+
+    // === spawn_piped_with_input テスト ===
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_piped_with_input_delivers_input_then_eof() {
+        // cat は EOF まで読むので、stdin を閉じていなければタイムアウトまで終わらない
+        let child = spawn_piped_with_input("cat", &[], &[], None, b"{\"a\":1}\n".to_vec()).unwrap();
+        let result = run_with_timeout_tracked(child, 10, "cat").unwrap();
+
+        assert!(!result.timed_out, "入力を書き終えたら stdin を閉じるべき");
+        assert!(result.output.status.success());
+        assert_eq!(result.output.stdout, b"{\"a\":1}\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_piped_with_input_ignores_unread_input() {
+        // パイプの容量を大きく超える入力を読まずに終了しても、失敗にもハングにもしない
+        let input = vec![b'x'; 1024 * 1024];
+        let child = spawn_piped_with_input(
+            "sh",
+            &["-c".to_string(), "echo done".to_string()],
+            &[],
+            None,
+            input,
+        )
+        .unwrap();
+        let start = Instant::now();
+        let result = run_with_timeout_tracked(child, 10, "sh").unwrap();
+
+        assert!(!result.timed_out);
+        assert!(result.output.status.success());
+        assert_eq!(result.output.stdout, b"done\n");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_piped_with_input_applies_cwd_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = spawn_piped_with_input(
+            "sh",
+            &[
+                "-c".to_string(),
+                "pwd -P; printf %s \"$INPUT_TEST_VAR\"".to_string(),
+            ],
+            &[("INPUT_TEST_VAR", "from-env")],
+            Some(dir.path()),
+            Vec::new(),
+        )
+        .unwrap();
+        let result = run_with_timeout_tracked(child, 10, "sh").unwrap();
+
+        let stdout = String::from_utf8_lossy(&result.output.stdout);
+        let mut lines = stdout.lines();
+        let expected_dir = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(lines.next(), Some(expected_dir.to_str().unwrap()));
+        assert_eq!(lines.next(), Some("from-env"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_piped_with_input_error_hides_program_directory() {
+        let error = spawn_piped_with_input(
+            "/private/claw-hooks-secret/nonexistent-judge",
+            &[],
+            &[],
+            None,
+            Vec::new(),
+        )
+        .expect_err("存在しない判定器は起動に失敗すべき");
+
+        assert!(error.contains("nonexistent-judge"));
+        assert!(
+            !error.contains("/private/claw-hooks-secret"),
+            "実行ファイルのディレクトリをエラーへ含めるべきではない: {error}"
         );
     }
 

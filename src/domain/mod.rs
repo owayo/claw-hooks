@@ -8,6 +8,7 @@
 
 pub mod command;
 pub mod filters;
+pub mod invocation;
 pub mod logger;
 pub mod normalize;
 pub mod parser;
@@ -16,7 +17,7 @@ pub mod test_helpers;
 mod types;
 
 pub use filters::FilterChain;
-pub use types::{Decision, HookEvent, HookInput, ToolInput};
+pub use types::{AgentProfile, Decision, HookEvent, HookInput, ToolInput};
 
 #[allow(unused)]
 pub use types::{

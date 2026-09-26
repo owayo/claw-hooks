@@ -44,6 +44,7 @@ debug = false
 # Timeout in seconds for reported stop hooks and extension hook commands (default: 60)
 # Commands exceeding this timeout will be killed (SIGKILL) and reported as failures.
 # report=false stop hooks are started detached and are not waited on.
+# Command hook checkers are not affected; they use their own `timeout` (see below).
 # hook_timeout = 60
 
 # Maximum length of output messages in characters (default: 1000)
@@ -61,6 +62,27 @@ debug = false
 # ".rs" = ["rustfmt {file}"]
 # ".ts" = ["biome check {file}"]
 # ".tsx" = ["biome check {file}"]
+
+# Command hooks
+# Before a Bash/PowerShell command runs, pass each invocation of `command` found in it
+# (also behind wrappers such as sudo/env and inside bash -c) to an external checker.
+# The checker receives a JSON description of the invocation (argv, stdin, agent, cwd)
+# on stdin, once per invocation, and decides by its exit code:
+#   0 = allow (non-empty stdout is passed to the agent as context: Claude Code and Codex only)
+#   2 = block (the reason is read from stderr, or from stdout if stderr is empty)
+#   anything else, a timeout, or a start failure = checker failure, handled by on_error
+# command:  program name to match (directory, .exe-style extension and case are ignored)
+# run:      checker command line, split into arguments and started directly
+#           (through `cmd /c` on Windows, like the other hooks)
+# timeout:  seconds per checker run (default: 5). This alone bounds each run;
+#           hook_timeout is not used, so a project config cannot shorten it.
+# on_error: "allow" (default) / "block"
+# Command hooks are read only from this global config; .claw-hooks.toml cannot add them.
+# [[command_hooks]]
+# command = "gws"
+# run = "noslop hook command"
+# timeout = 5
+# on_error = "allow"
 
 # Stop hooks
 # Execute commands when the agent loop ends (notifications, sounds, cleanup)

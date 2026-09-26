@@ -8,6 +8,11 @@ use tree_sitter::{Node, Parser};
 
 use std::cell::Cell;
 
+use crate::domain::invocation::{
+    Analysis, Cardinality, CommandLineAnalysis, Invocation, ShellWord, StdinSource,
+    runtime_arguments_word, shell_word,
+};
+
 /// 再パースを伴う再帰解析（xargs / eval / find -exec / shell -c / env -S の内側
 /// コマンド再評価）の深さ上限。深いネスト入力は再帰下降解析でスタックを溢れさせ
 /// SIGABRT で異常終了（フェイルオープン）し得るため、上限超過時は解析を諦め安全側
@@ -129,6 +134,37 @@ const SHELL_COMMANDS: &[&str] = &[
 
 /// find で後続引数をコマンドとして実行する述語
 const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
+
+/// tree-sitter-bash が `command` の引数に取り得るノード種別の**網羅**。
+///
+/// 列挙から漏れた種別は引数配列から丸ごと脱落し、2 つの形で検出漏れになる。
+///
+/// 1. 中身そのものが消える: `bash -c $'rm -rf /'` の `ansi_c_string` が落ちると `-c` の
+///    次の要素が存在しなくなり、シェル -c の再解析が走らずに素通しする。
+/// 2. 位置がズレる: `sudo -u $(id -un) rm -rf /` の `command_substitution` が落ちると
+///    配列が 1 つ詰まり、値を取るフラグ (`-u`) が本来の値ではなく後続の `rm` を消費して、
+///    危険コマンドが消える。
+///
+/// `number`（裸の整数）を含めているのも同じ理由で、`xargs -n 1 rm` / `sudo -u 1000 rm` /
+/// `nice -n 10 rm` の数値が脱落するとフラグが `rm` を値として食う。
+/// 名前抽出（`get_command_arguments_impl`）と呼び出しの IR（`ir_command`）が共有する。
+#[cfg(feature = "ast-parser")]
+const ARGUMENT_NODE_KINDS: &[&str] = &[
+    "word",
+    "string",
+    "raw_string",
+    "translated_string",
+    "ansi_c_string",
+    "simple_expansion",
+    "expansion",
+    "command_substitution",
+    "process_substitution",
+    "arithmetic_expansion",
+    "brace_expression",
+    "test_operator",
+    "concatenation",
+    "number",
+];
 
 /// ラッパーごとの「値を次トークンから取る」フラグ仕様（`WRAPPER_FLAG_SPECS` の要素）。
 struct WrapperFlagSpec {
@@ -970,7 +1006,6 @@ impl ShellParser {
     /// 再解析する必要がある。ところが `env bash <<< "rm -rf /"` の `command` ノードの
     /// コマンド語は `env` で、シェル判定に落ちずに本文が素通ししていた。
     /// ラッパーを順に剥がして、最終的に起動されるコマンドで判定する。
-    #[cfg(feature = "ast-parser")]
     fn resolves_to_shell(cmd_name: &str, args: &[String]) -> bool {
         let mut name = cmd_name.to_string();
         let mut rest: &[String] = args;
@@ -1283,48 +1318,18 @@ impl ShellParser {
         let mut found_command_name = false;
 
         for child in node.children(&mut node.walk()) {
-            match child.kind() {
-                "command_name" => {
-                    found_command_name = true;
-                }
-                // tree-sitter-bash が `command` の引数に取り得るノード種別を**網羅**する。
-                // 列挙から漏れた種別は引数配列から丸ごと脱落し、2 つの形で検出漏れになる。
-                //
-                // 1. 中身そのものが消える: `bash -c $'rm -rf /'` の `ansi_c_string` が
-                //    落ちると `-c` の次の要素が存在しなくなり、シェル -c の再解析が
-                //    走らずに素通しする。
-                // 2. 位置がズレる: `sudo -u $(id -un) rm -rf /` の `command_substitution`
-                //    が落ちると配列が 1 つ詰まり、値を取るフラグ (`-u`) が本来の値では
-                //    なく後続の `rm` を消費して、危険コマンドが消える。
-                //
-                // `number`（裸の整数）を含めているのも同じ理由で、
-                // `xargs -n 1 rm` / `sudo -u 1000 rm` / `nice -n 10 rm` の数値が
-                // 脱落するとフラグが `rm` を値として食う。
-                "word"
-                | "string"
-                | "raw_string"
-                | "translated_string"
-                | "ansi_c_string"
-                | "simple_expansion"
-                | "expansion"
-                | "command_substitution"
-                | "process_substitution"
-                | "arithmetic_expansion"
-                | "brace_expression"
-                | "test_operator"
-                | "concatenation"
-                | "number"
-                    if found_command_name =>
-                {
-                    let raw = &source[child.byte_range()];
-                    let text = if strip_quotes {
-                        Self::normalize_shell_word(raw)
-                    } else {
-                        raw.to_string()
-                    };
-                    args.push(text);
-                }
-                _ => {}
+            let kind = child.kind();
+            if kind == "command_name" {
+                found_command_name = true;
+            } else if found_command_name && ARGUMENT_NODE_KINDS.contains(&kind) {
+                // 引数になり得る種別を網羅する理由は `ARGUMENT_NODE_KINDS` を参照。
+                let raw = &source[child.byte_range()];
+                let text = if strip_quotes {
+                    Self::normalize_shell_word(raw)
+                } else {
+                    raw.to_string()
+                };
+                args.push(text);
             }
         }
 
@@ -1467,7 +1472,17 @@ impl ShellParser {
 
     /// find の -exec/-execdir 述語から実行コマンド文字列を取り出す。
     fn extract_find_exec_commands(args: &[String]) -> Vec<String> {
-        let mut commands = Vec::new();
+        Self::find_exec_ranges(args)
+            .into_iter()
+            .map(|(start, end, _)| args[start..end].join(" "))
+            .collect()
+    }
+
+    /// find の -exec/-execdir 述語が実行するコマンドの範囲 `(開始, 終端の位置, + 終端か)` を返す。
+    ///
+    /// 名前抽出（文字列へ戻して再解析する）と呼び出しの IR（語の列を切り出す）が共有する。
+    fn find_exec_ranges(args: &[String]) -> Vec<(usize, usize, bool)> {
+        let mut ranges = Vec::new();
         let mut i = 0;
 
         while i < args.len() {
@@ -1478,14 +1493,14 @@ impl ShellParser {
                     end += 1;
                 }
                 if start < end {
-                    commands.push(args[start..end].join(" "));
+                    ranges.push((start, end, args.get(end).is_some_and(|t| t == "+")));
                 }
                 i = end;
             }
             i += 1;
         }
 
-        commands
+        ranges
     }
 
     /// `<<< "script"` の本文（シェルが標準入力から読んで実行するスクリプト）を返す。
@@ -1565,7 +1580,7 @@ impl ShellParser {
     ///
     /// tree-sitter-bash は `r\m` や `r''m` の raw 表記を保持するため、
     /// 危険コマンド判定ではシェルが実際に実行するコマンド名へ寄せる必要がある。
-    fn normalize_shell_word(word: &str) -> String {
+    pub(crate) fn normalize_shell_word(word: &str) -> String {
         let mut result = String::with_capacity(word.len());
         let mut chars = word.chars().peekable();
         let mut in_single_quote = false;
@@ -2676,6 +2691,797 @@ impl ShellParser {
     }
 }
 
+// === プログラム呼び出しの IR（command hooks 用） ===
+
+/// 呼び出しの IR を集めるときの文脈。
+#[derive(Debug, Clone)]
+struct IrContext {
+    /// 元の語が非静的だった文字列を再評価している内側か（汚染伝播）。
+    tainted: bool,
+    /// この文脈で見つけた呼び出しに付ける確度の下限。
+    analysis: Analysis,
+    /// この文脈の既定の標準入力。
+    stdin: StdinSource,
+    /// 文字列ベースのフォールバックで解析中か。再評価した内側の文字列も同じ経路で読む
+    /// （`extract_commands` のフォールバックが内側を `extract_commands_fallback` で
+    /// 読むのと同じ）。
+    fallback: bool,
+}
+
+impl IrContext {
+    fn top() -> Self {
+        Self {
+            tainted: false,
+            analysis: Analysis::Complete,
+            stdin: StdinSource::Inherited,
+            fallback: false,
+        }
+    }
+
+    fn with_stdin(&self, stdin: StdinSource) -> Self {
+        Self {
+            stdin,
+            ..self.clone()
+        }
+    }
+
+    fn at_least(&self, analysis: Analysis) -> Self {
+        Self {
+            analysis: self.analysis.max(analysis),
+            ..self.clone()
+        }
+    }
+
+    fn tainted_if(&self, tainted: bool) -> Self {
+        Self {
+            tainted: self.tainted || tainted,
+            ..self.clone()
+        }
+    }
+
+    /// フォールバックで見つけた呼び出しは、語の境界を文字列の分割で決めているため
+    /// 確定とは言えない（ヒアドキュメントの本文を行ごとのコマンドとして読む等）。
+    fn for_fallback(&self) -> Self {
+        Self {
+            fallback: true,
+            ..self.at_least(Analysis::Uncertain)
+        }
+    }
+
+    fn invocation_analysis(&self) -> Analysis {
+        if self.tainted {
+            self.analysis.max(Analysis::Uncertain)
+        } else {
+            self.analysis
+        }
+    }
+}
+
+/// 集めた呼び出し。
+#[derive(Default)]
+struct IrCollector {
+    invocations: Vec<Invocation>,
+    pathological: bool,
+}
+
+impl IrCollector {
+    /// 完全に同じ呼び出し（AST とフォールバックの併走で重なったもの等）は 1 つにする。
+    fn push(&mut self, invocation: Invocation) {
+        if !self.invocations.contains(&invocation) {
+            self.invocations.push(invocation);
+        }
+    }
+}
+
+/// リダイレクトから分かった、本体のコマンドに効く情報。
+#[cfg(feature = "ast-parser")]
+#[derive(Default)]
+struct IrRedirects {
+    /// リダイレクトに飲み込まれた・構文木から落ちたコマンド行の続きの語と、その位置。
+    extra_words: Vec<(usize, ShellWord)>,
+    /// リダイレクトで決まる標準入力。
+    stdin: Option<StdinSource>,
+    /// シェルへ流し込まれたときにスクリプトとして実行される本文（ヒアドキュメント・
+    /// here-string）と、その本文が非静的か。
+    scripts: Vec<(String, bool)>,
+    /// 最初のリダイレクトの開始位置と、それが入力リダイレクトか。
+    first_redirect: Option<(usize, bool)>,
+}
+
+impl ShellParser {
+    /// シェルコマンド文字列から、実行されるプログラム呼び出しを IR として抽出する。
+    ///
+    /// 危険コマンドの名前抽出（`extract_commands`）と同じ規則で呼び出しを探す:
+    /// ラッパー（sudo / env / timeout ...）の内側、shell -c / eval / env -S / trap /
+    /// シェルへのヒアドキュメント・here-string の再評価、xargs / find -exec、
+    /// コマンド置換・プロセス置換、制御構文の中。各呼び出しの語には、実行時の値が
+    /// 静的に決まるかと、実行時に何個の引数になるかを持たせる
+    /// （[`crate::domain::invocation::analyze_word`]）。
+    pub fn extract_invocations(&mut self, command: &str) -> CommandLineAnalysis {
+        let mut out = IrCollector::default();
+        self.ir_collect(command, &IrContext::top(), &mut out);
+        CommandLineAnalysis {
+            invocations: out.invocations,
+            pathological: out.pathological,
+        }
+    }
+
+    /// 文字列 1 つを解析して呼び出しを集める。再評価した内側の文字列にも使う。
+    fn ir_collect(&mut self, command: &str, ctx: &IrContext, out: &mut IrCollector) {
+        if ctx.fallback {
+            self.ir_collect_fallback(command, ctx, out);
+            return;
+        }
+        let Some(_guard) = RecursionGuard::enter() else {
+            out.pathological = true;
+            return;
+        };
+        if Self::is_pathological_command(command) {
+            out.pathological = true;
+            return;
+        }
+        #[cfg(feature = "ast-parser")]
+        self.ir_collect_ast(command, ctx, out);
+        #[cfg(not(feature = "ast-parser"))]
+        self.ir_collect_fallback(command, ctx, out);
+    }
+
+    #[cfg(feature = "ast-parser")]
+    fn ir_collect_ast(&mut self, command: &str, ctx: &IrContext, out: &mut IrCollector) {
+        let Some(tree) = self.parser.parse(command, None) else {
+            self.ir_collect_fallback(command, &ctx.for_fallback(), out);
+            return;
+        };
+        let root = tree.root_node();
+        let has_error = root.has_error();
+        // 構文エラーを含む木は一部のノードが落ちている（`extract_commands` 参照）。
+        // 見つけた呼び出しは候補として扱い、フォールバックの結果も併せる。
+        let tree_ctx = if has_error {
+            ctx.at_least(Analysis::Uncertain)
+        } else {
+            ctx.clone()
+        };
+        self.ir_node(root, command, &tree_ctx, out, 0);
+
+        // コマンド名位置のブレース展開（`{rm,-rf,/p}`）を最初の選択肢で畳んだ再解析。
+        // 畳むのは近似なので、見つけた呼び出しは実在しない可能性がある。
+        if let Some(expanded) = brace_expanded_command(command) {
+            self.ir_collect(&expanded, &ctx.at_least(Analysis::Speculative), out);
+        }
+        if has_error {
+            self.ir_collect_fallback(command, &ctx.for_fallback(), out);
+        }
+    }
+
+    #[cfg(feature = "ast-parser")]
+    fn ir_node(
+        &mut self,
+        node: Node,
+        source: &str,
+        ctx: &IrContext,
+        out: &mut IrCollector,
+        depth: usize,
+    ) {
+        if depth > MAX_NODE_DEPTH {
+            out.pathological = true;
+            return;
+        }
+        match node.kind() {
+            "command" | "simple_command" => {
+                self.ir_command(node, source, ctx, IrRedirects::default(), out, depth)
+            }
+            "redirected_statement" => self.ir_redirected_statement(node, source, ctx, out, depth),
+            "pipeline" => self.ir_pipeline(node, source, ctx, out, depth),
+            // コマンド置換の中のコマンドは、外側のコマンドではなくシェルの標準入力を読む。
+            "command_substitution" => self.ir_children(
+                node,
+                source,
+                &ctx.with_stdin(StdinSource::Inherited),
+                out,
+                depth,
+            ),
+            // `>(cmd)` の cmd は、外側のコマンドが書いた出力を標準入力から読む。
+            "process_substitution" => {
+                let stdin = if source[node.byte_range()].starts_with('>') {
+                    StdinSource::Other
+                } else {
+                    StdinSource::Inherited
+                };
+                self.ir_children(node, source, &ctx.with_stdin(stdin), out, depth)
+            }
+            _ => self.ir_children(node, source, ctx, out, depth),
+        }
+    }
+
+    #[cfg(feature = "ast-parser")]
+    fn ir_children(
+        &mut self,
+        node: Node,
+        source: &str,
+        ctx: &IrContext,
+        out: &mut IrCollector,
+        depth: usize,
+    ) {
+        for child in node.children(&mut node.walk()) {
+            self.ir_node(child, source, ctx, out, depth + 1);
+        }
+    }
+
+    /// パイプラインの 2 つ目以降のコマンドは、前のコマンドの出力を標準入力から読む。
+    #[cfg(feature = "ast-parser")]
+    fn ir_pipeline(
+        &mut self,
+        node: Node,
+        source: &str,
+        ctx: &IrContext,
+        out: &mut IrCollector,
+        depth: usize,
+    ) {
+        let mut first = true;
+        // `cat <<EOF | gws x` では `| gws x` が heredoc_redirect の子の pipeline になり、
+        // 先頭が `|` で始まる。この形では全コマンドがパイプから読む。
+        let mut leading_pipe = false;
+        for child in node.children(&mut node.walk()) {
+            if !child.is_named() {
+                if first && matches!(child.kind(), "|" | "|&") {
+                    leading_pipe = true;
+                }
+                continue;
+            }
+            if child.kind() == "comment" {
+                continue;
+            }
+            let stdin = if first && !leading_pipe {
+                ctx.stdin.clone()
+            } else {
+                StdinSource::Other
+            };
+            first = false;
+            self.ir_node(child, source, &ctx.with_stdin(stdin), out, depth + 1);
+        }
+    }
+
+    #[cfg(feature = "ast-parser")]
+    fn ir_redirected_statement(
+        &mut self,
+        node: Node,
+        source: &str,
+        ctx: &IrContext,
+        out: &mut IrCollector,
+        depth: usize,
+    ) {
+        let body = node.child_by_field_name("body");
+        let redirects: Vec<Node> = node
+            .children_by_field_name("redirect", &mut node.walk())
+            .collect();
+
+        let mut info = IrRedirects {
+            first_redirect: redirects.first().map(|first| {
+                (
+                    first.start_byte(),
+                    Self::is_input_file_redirect(*first, source),
+                )
+            }),
+            ..IrRedirects::default()
+        };
+        for redirect in &redirects {
+            Self::ir_apply_redirect(*redirect, source, ctx, &mut info);
+        }
+        // tree-sitter-bash は、ヒアドキュメントの前にある最後の単独の `-` を構文木から
+        // 落とす（`cat - <<EOF` の command は `cat` だけになる。`cat - 2>/dev/null <<EOF`
+        // も同じ）。子ノードの隙間に残った語を拾ってコマンド行へ戻す。
+        let children: Vec<Node> = node
+            .named_children(&mut node.walk())
+            .filter(|child| child.kind() != "comment")
+            .collect();
+        for pair in children.windows(2) {
+            let gap = &source[pair[0].end_byte()..pair[1].start_byte()];
+            for raw in Self::gap_words(gap) {
+                info.extra_words
+                    .push((pair[0].end_byte(), Self::ir_word(&raw, ctx)));
+            }
+        }
+
+        match body {
+            Some(body) if matches!(body.kind(), "command" | "simple_command") => {
+                self.ir_command(body, source, ctx, info, out, depth + 1);
+            }
+            Some(body) => {
+                // 複合文（サブシェル・ブレースグループ・ループ等）へのリダイレクトは、
+                // 中の全コマンドの標準入力になる。
+                let stdin = info.stdin.clone().unwrap_or_else(|| ctx.stdin.clone());
+                if !info.extra_words.is_empty() {
+                    // 複合文の後ろに続く語は bash では構文エラーだが、危険コマンドの
+                    // 検出は過大に見る方針なので候補として残す。
+                    info.extra_words.sort_by_key(|(position, _)| *position);
+                    let words = info.extra_words.into_iter().map(|(_, word)| word).collect();
+                    self.ir_emit(
+                        words,
+                        stdin.clone(),
+                        &ctx.at_least(Analysis::Speculative),
+                        out,
+                    );
+                }
+                self.ir_node(body, source, &ctx.with_stdin(stdin), out, depth + 1);
+            }
+            None => {}
+        }
+
+        // リダイレクト先・ヒアドキュメント本文の中のコマンド置換と、ヒアドキュメントの
+        // 行に続くパイプ（`cat <<EOF | gws x`）の中のコマンド。
+        let nested = ctx.with_stdin(StdinSource::Inherited);
+        for redirect in redirects {
+            self.ir_node(redirect, source, &nested, out, depth + 1);
+        }
+    }
+
+    /// リダイレクト 1 つから、本体のコマンドに効く情報を集める。
+    #[cfg(feature = "ast-parser")]
+    fn ir_apply_redirect(redirect: Node, source: &str, ctx: &IrContext, info: &mut IrRedirects) {
+        match redirect.kind() {
+            "file_redirect" => {
+                // `gws 2>/dev/null docs create` の `docs create` は destination の 2 つ目以降に
+                // 入る（`redirect_stripped_command` 参照）。bash にとってはコマンド行の
+                // 続きなので argv へ戻す。
+                let destinations: Vec<Node> = redirect
+                    .children_by_field_name("destination", &mut redirect.walk())
+                    .collect();
+                for destination in destinations.iter().skip(1) {
+                    info.extra_words.push((
+                        destination.start_byte(),
+                        Self::ir_word(&source[destination.byte_range()], ctx),
+                    ));
+                }
+                if Self::is_input_file_redirect(redirect, source) {
+                    info.stdin = Some(StdinSource::Other);
+                }
+            }
+            "heredoc_redirect" => {
+                let (value, script) = Self::heredoc_redirect_body(redirect, source);
+                let tainted = value.is_none();
+                info.stdin = Some(StdinSource::Literal { value });
+                info.scripts.push((script, tainted));
+            }
+            "herestring_redirect" => {
+                let body = redirect
+                    .children(&mut redirect.walk())
+                    .filter(|child| child.is_named() && child.kind() != "file_descriptor")
+                    .last();
+                if let Some(body) = body {
+                    let word = Self::ir_word(&source[body.byte_range()], ctx);
+                    // here-string は本文の末尾に改行を 1 つ足して標準入力へ渡す。
+                    let value = word.value.as_ref().map(|value| format!("{value}\n"));
+                    let tainted = value.is_none();
+                    info.stdin = Some(StdinSource::Literal { value });
+                    info.scripts.push((word.text, tainted));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `file_redirect` が標準入力（fd 0）を差し替えるか。
+    #[cfg(feature = "ast-parser")]
+    fn is_input_file_redirect(redirect: Node, source: &str) -> bool {
+        if redirect.kind() != "file_redirect" {
+            return false;
+        }
+        let mut descriptor = None;
+        let mut operator = None;
+        for child in redirect.children(&mut redirect.walk()) {
+            if child.kind() == "file_descriptor" {
+                descriptor = Some(&source[child.byte_range()]);
+            } else if !child.is_named() && operator.is_none() {
+                operator = Some(child.kind());
+            }
+        }
+        operator.is_some_and(|operator| operator.starts_with('<'))
+            && descriptor.is_none_or(|descriptor| descriptor == "0")
+    }
+
+    /// ヒアドキュメントの本文を返す（標準入力として静的に決まる値と、シェルへ流し込まれた
+    /// ときに再解析するスクリプト本文）。
+    #[cfg(feature = "ast-parser")]
+    fn heredoc_redirect_body(redirect: Node, source: &str) -> (Option<String>, String) {
+        let mut strip_tabs = false;
+        let mut quoted = false;
+        let mut body = String::new();
+        for child in redirect.children(&mut redirect.walk()) {
+            match child.kind() {
+                "<<-" => strip_tabs = true,
+                "heredoc_start" => {
+                    quoted = source[child.byte_range()].contains(['\'', '"', '\\']);
+                }
+                "heredoc_body" => body = source[child.byte_range()].to_string(),
+                _ => {}
+            }
+        }
+        // tree-sitter-bash は `<<-` の本文レンジから 1 行目の先頭タブだけを除く。
+        // 2 行目以降と区切り行の手前のタブは残るので、全行から除く。
+        if strip_tabs {
+            body = crate::domain::invocation::strip_heredoc_tabs(&body);
+        }
+        let value = if quoted {
+            Some(body.clone())
+        } else {
+            crate::domain::invocation::expand_unquoted_heredoc_body(&body)
+        };
+        (value, body)
+    }
+
+    /// 子ノードの隙間に残った語（構文木から落ちた語）を取り出す。
+    #[cfg(feature = "ast-parser")]
+    fn gap_words(gap: &str) -> Vec<String> {
+        if gap.trim().is_empty() {
+            return Vec::new();
+        }
+        // 行継続（`\` + 改行）は語の区切りの空白と同じ。
+        let cleaned = gap.replace("\\\r\n", " ").replace("\\\n", " ");
+        split_shell_words_raw(&cleaned)
+            .into_iter()
+            .filter(|word| !word.starts_with('#'))
+            .collect()
+    }
+
+    #[cfg(feature = "ast-parser")]
+    fn ir_command(
+        &mut self,
+        node: Node,
+        source: &str,
+        ctx: &IrContext,
+        mut info: IrRedirects,
+        out: &mut IrCollector,
+        depth: usize,
+    ) {
+        let mut words: Vec<(usize, ShellWord)> = Vec::new();
+        let mut found_name = false;
+        for child in node.children(&mut node.walk()) {
+            let kind = child.kind();
+            if kind == "command_name" {
+                found_name = true;
+                words.push((
+                    child.end_byte(),
+                    Self::ir_word(&source[child.byte_range()], ctx),
+                ));
+            } else if found_name && ARGUMENT_NODE_KINDS.contains(&kind) {
+                words.push((
+                    child.end_byte(),
+                    Self::ir_word(&source[child.byte_range()], ctx),
+                ));
+            } else if matches!(
+                kind,
+                "file_redirect" | "heredoc_redirect" | "herestring_redirect"
+            ) {
+                Self::ir_apply_redirect(child, source, ctx, &mut info);
+            }
+        }
+        // `gws a 0< in` の `0` を tree-sitter-bash は引数として返すが、bash では直後の
+        // リダイレクトの fd 指定。リダイレクトに隣接した最後の引数 `0` を取り除く。
+        if let (Some((redirect_start, is_input)), Some((end, last))) =
+            (info.first_redirect, words.last())
+            && words.len() > 1
+            && *end == redirect_start
+            && last.raw == "0"
+        {
+            words.pop();
+            if is_input {
+                info.stdin = Some(StdinSource::Other);
+            }
+        }
+
+        let mut all: Vec<ShellWord> = words.into_iter().map(|(_, word)| word).collect();
+        info.extra_words.sort_by_key(|(position, _)| *position);
+        all.extend(info.extra_words.into_iter().map(|(_, word)| word));
+
+        // コマンド語が制御構文キーワードのときは実コマンドへ寄せる
+        // （`shift_to_effective_command` と同じ判断）。
+        let texts: Vec<String> = all.iter().map(|word| word.text.clone()).collect();
+        let index = Self::effective_command_index(&texts)
+            .unwrap_or(0)
+            .min(all.len());
+        let words = all.split_off(index);
+
+        let stdin = info.stdin.unwrap_or_else(|| ctx.stdin.clone());
+        if let Some((name, args)) = words.split_first() {
+            let arg_texts: Vec<String> = args.iter().map(|word| word.text.clone()).collect();
+            let to_shell = Self::resolves_to_shell(&name.text, &arg_texts);
+            self.ir_emit(words, stdin, ctx, out);
+            // シェルへ here-string / ヒアドキュメントで流し込んだ本文はスクリプトとして
+            // 実行される（`bash <<< "gws x"`、`sh <<EOF ... EOF`）。
+            if to_shell {
+                self.ir_scripts(info.scripts, ctx, out);
+            }
+        }
+
+        // 引数やリダイレクトの中のコマンド置換（`echo "$(gws x)"`）。
+        self.ir_children(
+            node,
+            source,
+            &ctx.with_stdin(StdinSource::Inherited),
+            out,
+            depth,
+        );
+    }
+
+    /// シェルへ流し込まれた本文をスクリプトとして再解析する。
+    fn ir_scripts(&mut self, scripts: Vec<(String, bool)>, ctx: &IrContext, out: &mut IrCollector) {
+        for (script, tainted) in scripts {
+            if !script.trim().is_empty() {
+                self.ir_collect(
+                    &script,
+                    &ctx.tainted_if(tainted).with_stdin(StdinSource::Inherited),
+                    out,
+                );
+            }
+        }
+    }
+
+    /// 書かれたままの語を IR の語にする。
+    fn ir_word(raw: &str, ctx: &IrContext) -> ShellWord {
+        let mut word = shell_word(raw);
+        // 非静的な文字列を再評価している内側では、展開やグロブを含む語の値は外側の
+        // 展開結果で変わり得る（`bash -c "gws '$X'"` の `'$X'` は実行時には X の値になる）。
+        if ctx.tainted && raw.contains(['$', '`', '*', '?', '[', '{', '~']) {
+            word.value = None;
+        }
+        word
+    }
+
+    /// 呼び出しを 1 つ記録し、その呼び出しが実行する内側の呼び出し（ラッパーの配下・
+    /// 再評価）も辿る。
+    fn ir_emit(
+        &mut self,
+        words: Vec<ShellWord>,
+        stdin: StdinSource,
+        ctx: &IrContext,
+        out: &mut IrCollector,
+    ) {
+        if words.is_empty() {
+            return;
+        }
+        let analysis = ctx.invocation_analysis();
+        out.push(Invocation {
+            words: words.clone(),
+            stdin: stdin.clone(),
+            analysis,
+        });
+        self.ir_reevaluate(&words, ctx, out);
+
+        // ラッパーの連鎖（`sudo sudo … gws`）は `process_wrapper_args` と同じく反復で辿る。
+        let mut current = words;
+        for _ in 0..MAX_RECURSION_DEPTH {
+            if !is_command_wrapper(&current[0].text) {
+                return;
+            }
+            let arg_texts: Vec<String> =
+                current[1..].iter().map(|word| word.text.clone()).collect();
+            let Some(index) = Self::find_wrapped_command_index(&current[0].text, &arg_texts) else {
+                return;
+            };
+            let inner = current[1 + index..].to_vec();
+            out.push(Invocation {
+                words: inner.clone(),
+                stdin: stdin.clone(),
+                analysis,
+            });
+            self.ir_reevaluate(&inner, ctx, out);
+            current = inner;
+        }
+        out.pathological = true;
+    }
+
+    /// 呼び出しが後続の語をコマンドとして実行する形なら、その内側の呼び出しを集める。
+    fn ir_reevaluate(&mut self, words: &[ShellWord], ctx: &IrContext, out: &mut IrCollector) {
+        let Some((name, args)) = words.split_first() else {
+            return;
+        };
+        let arg_texts: Vec<String> = args.iter().map(|word| word.text.clone()).collect();
+        match command_key(&name.text).as_str() {
+            // xargs と find -exec は後続の語をシェルを介さず argv として実行する。文字列へ
+            // 戻して再解析すると語の境界が崩れる（`xargs gws "a b"` が 4 語に割れる）ため、
+            // 語の列をそのまま切り出す。
+            "xargs" => {
+                let Some(index) = Self::find_xargs_command_index(&arg_texts) else {
+                    return;
+                };
+                let Some(_guard) = RecursionGuard::enter() else {
+                    out.pathological = true;
+                    return;
+                };
+                let mut inner = args[index..].to_vec();
+                match Self::xargs_replace_string(&arg_texts[..index]) {
+                    // `-I R`: 置換文字列を含む語は実行時に標準入力の要素で置き換わる。
+                    Some(replace) => {
+                        for word in inner.iter_mut().filter(|word| word.text.contains(&replace)) {
+                            word.value = None;
+                        }
+                    }
+                    // 既定では標準入力の要素が末尾に足される。
+                    None => inner.push(runtime_arguments_word()),
+                }
+                // xargs は実行するコマンドの標準入力を /dev/null にする。
+                self.ir_emit(inner, StdinSource::Inherited, ctx, out);
+            }
+            "find" => {
+                let Some(_guard) = RecursionGuard::enter() else {
+                    out.pathological = true;
+                    return;
+                };
+                for (start, end, batched) in Self::find_exec_ranges(&arg_texts) {
+                    let mut inner = args[start..end].to_vec();
+                    // `{}` は見つかったパスに置き換わる。`+` 終端なら複数のパスになる。
+                    for word in inner.iter_mut().filter(|word| word.text.contains("{}")) {
+                        word.value = None;
+                        if batched {
+                            word.cardinality = Cardinality::ZeroOrMore;
+                        }
+                    }
+                    self.ir_emit(inner, StdinSource::Inherited, ctx, out);
+                }
+            }
+            _ => {
+                let tainted = args.iter().any(|word| !word.is_static());
+                let inner_ctx = ctx.tainted_if(tainted).with_stdin(StdinSource::Inherited);
+                for inner in Self::reevaluated_inner_command_strings(&name.text, &arg_texts) {
+                    self.ir_collect(&inner.text, &inner_ctx, out);
+                }
+            }
+        }
+    }
+
+    /// xargs の置換文字列（`-I R` / `-IR` / `-i[R]` / `--replace[=R]`）を返す。
+    fn xargs_replace_string(options: &[String]) -> Option<String> {
+        let mut iter = options.iter();
+        while let Some(option) = iter.next() {
+            let replace = match option.as_str() {
+                "-I" => iter.next().cloned(),
+                "-i" | "--replace" => Some("{}".to_string()),
+                _ => option
+                    .strip_prefix("--replace=")
+                    .or_else(|| {
+                        (!option.starts_with("--"))
+                            .then(|| {
+                                option
+                                    .strip_prefix("-I")
+                                    .or_else(|| option.strip_prefix("-i"))
+                            })
+                            .flatten()
+                    })
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            };
+            if let Some(replace) = replace.filter(|value| !value.is_empty()) {
+                return Some(replace);
+            }
+        }
+        None
+    }
+
+    /// 文字列ベースのフォールバックで呼び出しを集める（`extract_commands_fallback` と
+    /// 同じ分割規則）。
+    fn ir_collect_fallback(&mut self, command: &str, ctx: &IrContext, out: &mut IrCollector) {
+        let Some(_guard) = RecursionGuard::enter() else {
+            out.pathological = true;
+            return;
+        };
+        let ctx = ctx.for_fallback();
+        for segment in Self::split_top_level_terminators(command) {
+            for part in Self::split_by_logical_ops(segment) {
+                for (position, pipe_part) in Self::split_respecting_quotes(part, '|')
+                    .into_iter()
+                    .enumerate()
+                {
+                    let stdin = if position == 0 {
+                        ctx.stdin.clone()
+                    } else {
+                        StdinSource::Other
+                    };
+                    self.ir_segment_fallback(pipe_part, &ctx.with_stdin(stdin), out);
+                }
+            }
+        }
+    }
+
+    fn ir_segment_fallback(&mut self, segment: &str, ctx: &IrContext, out: &mut IrCollector) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(inner) = Self::unwrap_subshell(trimmed) {
+            self.ir_collect_fallback(inner, ctx, out);
+            return;
+        }
+
+        let raws = split_shell_words_raw(trimmed);
+        let texts: Vec<String> = raws
+            .iter()
+            .map(|raw| Self::normalize_shell_word(raw))
+            .collect();
+        if let Some(start) = Self::effective_command_index(&texts) {
+            let mut words = Vec::new();
+            let mut scripts = Vec::new();
+            // コマンド語より前のリダイレクト（`< in cmd`）も標準入力を差し替える。
+            let mut stdin = texts[..start]
+                .iter()
+                .any(|text| Self::is_input_redirection_token(text))
+                .then_some(StdinSource::Other);
+            let mut index = start;
+            while index < raws.len() {
+                let (raw, text) = (&raws[index], &texts[index]);
+                if let Some(rest) = raw.strip_prefix("<<<") {
+                    // here-string（演算子と本文が別の語の形と、連結した形）
+                    let (body, step) = if rest.is_empty() {
+                        (raws.get(index + 1).map(String::as_str), 2)
+                    } else {
+                        (Some(rest), 1)
+                    };
+                    if let Some(body) = body {
+                        let word = Self::ir_word(body, ctx);
+                        let value = word.value.as_ref().map(|value| format!("{value}\n"));
+                        let tainted = value.is_none();
+                        stdin = Some(StdinSource::Literal { value });
+                        scripts.push((word.text, tainted));
+                    }
+                    index += step;
+                    continue;
+                }
+                if raw.starts_with("<<") {
+                    // ヒアドキュメント。本文は行で分割された別のセグメントになるため、
+                    // フォールバックでは中身を取れない。
+                    stdin = Some(StdinSource::Literal { value: None });
+                    index += if matches!(raw.as_str(), "<<" | "<<-") {
+                        2
+                    } else {
+                        1
+                    };
+                    continue;
+                }
+                // プロセス置換 `<(...)` / `>(...)` はリダイレクトではなく引数になる。
+                let process_substitution = text.starts_with("<(") || text.starts_with(">(");
+                if !process_substitution
+                    && let Some(consumes_target) = Self::redirection_token_target(text)
+                {
+                    if Self::is_input_redirection_token(text) {
+                        stdin = Some(StdinSource::Other);
+                    }
+                    index += if consumes_target { 2 } else { 1 };
+                    continue;
+                }
+                words.push(Self::ir_word(raw, ctx));
+                index += 1;
+            }
+
+            let stdin = stdin.unwrap_or_else(|| ctx.stdin.clone());
+            if let Some((name, args)) = words.split_first() {
+                let arg_texts: Vec<String> = args.iter().map(|word| word.text.clone()).collect();
+                let to_shell = Self::resolves_to_shell(&name.text, &arg_texts);
+                self.ir_emit(words, stdin, ctx, out);
+                if to_shell {
+                    self.ir_scripts(scripts, ctx, out);
+                }
+            }
+        }
+
+        // 引数やヘッダの中のコマンド置換・プロセス置換（`echo $(gws x)`、
+        // `for f in $(gws x)`）。
+        let nested = ctx.with_stdin(StdinSource::Inherited);
+        for fragment in Self::extract_nested_command_fragments(trimmed) {
+            self.ir_collect_fallback(&fragment, &nested, out);
+        }
+    }
+
+    /// トークンが標準入力（fd 0）を差し替える入力リダイレクトか（`<` / `0<` / `<&3`）。
+    /// ヒアドキュメント・here-string（`<<` / `<<<`）は含まない。
+    fn is_input_redirection_token(token: &str) -> bool {
+        let rest = token.trim_start_matches(|c: char| c.is_ascii_digit());
+        let descriptor = &token[..token.len() - rest.len()];
+        rest.starts_with('<')
+            && !rest.starts_with("<<")
+            && !rest.starts_with("<(")
+            && (descriptor.is_empty() || descriptor == "0")
+    }
+}
+
 impl Default for ShellParser {
     fn default() -> Self {
         Self::new()
@@ -2691,19 +3497,41 @@ impl Default for ShellParser {
 /// assert_eq!(tokens, vec!["echo", "hello world"]);
 /// ```
 pub fn parse_shell_tokens(command: &str) -> Vec<String> {
+    split_shell_words_raw(command)
+        .iter()
+        .map(|word| ShellParser::normalize_shell_word(word))
+        .collect()
+}
+
+/// [`parse_shell_tokens`] と同じ規則で語に分割し、クォート除去をせず書かれたままの
+/// 語を返す。
+///
+/// 呼び出しの IR（`ShellParser::extract_invocations`）のフォールバック経路が使う。
+/// 語の値が静的に決まるかは引用の有無で変わるため、クォート除去前の形が要る。
+pub(crate) fn split_shell_words_raw(command: &str) -> Vec<String> {
+    /// 語の中で今いる引用・展開の文脈。
+    #[derive(Clone, Copy)]
+    enum Context {
+        /// 単一引用 `'...'`
+        Single,
+        /// 二重引用 `"..."`
+        Double,
+        /// コマンド置換 `$(...)` / 算術展開 `$((...))`（括弧のネスト深さ）
+        Substitution(usize),
+        /// バッククォート `` `...` ``
+        Backtick,
+    }
+
     let mut parts = Vec::new();
     let mut current = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escape_next = false;
-    // コマンド置換 `$(...)` と算術展開 `$((...))` のネスト深さ。
-    // 内側の空白で語が割れると、値を取るフラグが展開の途中を値として食い、
+    // 引用と展開は入れ子になる。`"$(cat <<'EOF' ... "x" ... EOF)"` の内側の `"` は
+    // 外側の二重引用を閉じないため、文脈をスタックで追う。
+    // 展開の内側の空白で語が割れると、値を取るフラグが展開の途中を値として食い、
     // その後ろの実コマンドがコマンド名の位置からずれて検出漏れになる
     // （例: `env -u $(echo FOO) rm -rf /` が `-u` → `$(echo` で 1 語ずれ、
     // `FOO)` をコマンドと誤認して `rm` が消える）。
-    let mut substitution_depth = 0usize;
-    // バッククォート `` `...` `` は入れ子にできないので真偽値で追う。
-    let mut in_backtick = false;
+    let mut stack: Vec<Context> = Vec::new();
+    let mut escape_next = false;
     let mut prev_was_dollar = false;
 
     for c in command.trim().chars() {
@@ -2714,68 +3542,71 @@ pub fn parse_shell_tokens(command: &str) -> Vec<String> {
             prev_was_dollar = false;
             continue;
         }
+        let was_dollar = std::mem::take(&mut prev_was_dollar);
 
-        // 展開の内側では、クォートと空白の扱いを外側と分けて「1 トークンとして丸ごと
-        // 取り込む」。閉じ括弧に到達するまで分割しない。
-        if substitution_depth > 0 && !in_single_quote && !in_double_quote {
-            current.push(c);
-            match c {
-                '(' => substitution_depth += 1,
-                ')' => substitution_depth -= 1,
-                '\'' => in_single_quote = true,
-                '"' => in_double_quote = true,
+        match stack.last().copied() {
+            None => match c {
+                ' ' | '\t' | '\n' | '\r' => {
+                    if !current.is_empty() {
+                        parts.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
+                '\\' => escape_next = true,
+                '\'' => stack.push(Context::Single),
+                '"' => stack.push(Context::Double),
+                '`' => stack.push(Context::Backtick),
+                '(' if was_dollar => stack.push(Context::Substitution(1)),
+                '$' => prev_was_dollar = true,
                 _ => {}
-            }
-            prev_was_dollar = false;
-            continue;
-        }
-        if in_backtick {
-            current.push(c);
-            if c == '`' {
-                in_backtick = false;
-            }
-            prev_was_dollar = false;
-            continue;
-        }
-
-        let was_dollar = prev_was_dollar;
-        prev_was_dollar = c == '$' && !in_single_quote;
-
-        match c {
-            '(' if was_dollar && !in_single_quote && !in_double_quote => {
-                current.push(c);
-                substitution_depth = 1;
-            }
-            '`' if !in_single_quote && !in_double_quote => {
-                current.push(c);
-                in_backtick = true;
-            }
-            '\\' if !in_single_quote => {
-                current.push(c);
-                escape_next = true;
-            }
-            '\'' if !in_double_quote => {
-                current.push(c);
-                in_single_quote = !in_single_quote;
-            }
-            '"' if !in_single_quote => {
-                current.push(c);
-                in_double_quote = !in_double_quote;
-            }
-            ' ' | '\t' | '\n' | '\r' if !in_single_quote && !in_double_quote => {
-                if !current.is_empty() {
-                    parts.push(ShellParser::normalize_shell_word(&current));
-                    current.clear();
+            },
+            // 単一引用の中ではバックスラッシュも文字どおり。
+            Some(Context::Single) => {
+                if c == '\'' {
+                    stack.pop();
                 }
             }
-            _ => {
-                current.push(c);
-            }
+            Some(Context::Double) => match c {
+                '\\' => escape_next = true,
+                '"' => {
+                    stack.pop();
+                }
+                '`' => stack.push(Context::Backtick),
+                '(' if was_dollar => stack.push(Context::Substitution(1)),
+                '$' => prev_was_dollar = true,
+                _ => {}
+            },
+            // 展開の内側では、閉じ括弧に到達するまで空白でも分割しない。
+            Some(Context::Substitution(depth)) => match c {
+                '\\' => escape_next = true,
+                '\'' => stack.push(Context::Single),
+                '"' => stack.push(Context::Double),
+                '`' => stack.push(Context::Backtick),
+                '(' => {
+                    stack.pop();
+                    stack.push(Context::Substitution(depth + 1));
+                }
+                ')' => {
+                    stack.pop();
+                    if depth > 1 {
+                        stack.push(Context::Substitution(depth - 1));
+                    }
+                }
+                _ => {}
+            },
+            Some(Context::Backtick) => match c {
+                '\\' => escape_next = true,
+                '`' => {
+                    stack.pop();
+                }
+                _ => {}
+            },
         }
+        current.push(c);
     }
 
     if !current.is_empty() {
-        parts.push(ShellParser::normalize_shell_word(&current));
+        parts.push(current);
     }
 
     parts

@@ -591,6 +591,7 @@ mod tests {
             tool_input: ToolInput::Bash(crate::domain::BashInput {
                 command: "ls".to_string(),
                 timeout: None,
+                cwd: None,
             }),
             session_id: None,
         };

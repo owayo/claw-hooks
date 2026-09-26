@@ -1,6 +1,6 @@
 # CLI リファレンス
 
-claw-hooks は stdin からフックイベントを 1 件読み、呼び出し元のエージェント固有の形式で応答します。このページでは、サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力、終了コード、フェイルクローズドの規則を説明します。各エージェントへの登録方法は [エージェント統合](integrations.ja.md) にあります。
+claw-hooks は stdin からフックイベントを 1 件読み、呼び出し元のエージェント固有の形式で応答します。このページでは、サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力、終了コード、フェイルクローズドの規則、コマンドフックの判定器とのやり取りを説明します。各エージェントへの登録方法は [エージェント統合](integrations.ja.md) にあります。
 
 ## コマンド
 
@@ -250,7 +250,7 @@ Stdin はエージェント固有のフック JSON（イベント別のペイロ
 
 | エージェント | イベント | 許可 | ブロック / フェイルクローズド |
 |---|---|---|---|
-| Claude Code | PreToolUse | `{}`（判定を返さず、通常の権限フローに委ねる） | `…permissionDecision:"deny", permissionDecisionReason:"…"`（exit 0）。パースエラー時は **stderr** にプレーンテキスト、exit 2 |
+| Claude Code | PreToolUse | `{}`（判定を返さず、通常の権限フローに委ねる）。コマンドフックが補足を返したときは、判定を付けずに `…additionalContext:"…"` | `…permissionDecision:"deny", permissionDecisionReason:"…"`（exit 0）。パースエラー時は **stderr** にプレーンテキスト、exit 2 |
 | Claude Code | PostToolUse | `{}` または `…additionalContext:"…"`（lint フィードバック） | `{"decision":"block","reason":"…"}` |
 | Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
 | Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}`（exit 0 — Cursor は exit 0 のときだけ stdout の JSON を読む） |
@@ -265,7 +265,7 @@ Stdin はエージェント固有のフック JSON（イベント別のペイロ
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **と** exit 2 |
 | Grok CLI | PostToolUse / Stop / その他のイベント | `{}` | `{}`（事後フックの stdout は無視されるためブロック不可） |
 
-`additionalContext` は Claude の `PostToolUse` と Codex の `PostToolUse` に lint フィードバックを送るチャネルです。Antigravity には `additionalContext` チャネルが無いため、Stop の `"decision":"continue"` で lint フィードバックを送ります。Grok CLI の事後フックには送る手段自体が無く、ツールは実行されても出力はトランスクリプトに残りません。
+`additionalContext` は、Claude と Codex の `PostToolUse` には lint フィードバックを、Claude と Codex の `PreToolUse` にはコマンドフックの補足を送るチャネルです。Antigravity には `additionalContext` チャネルが無いため、Stop の `"decision":"continue"` で lint フィードバックを送ります。Grok CLI の事後フックには送る手段自体が無く、ツールは実行されても出力はトランスクリプトに残りません。
 
 claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返しません。`{}` + exit `0` は「claw-hooks としては異議なし」を意味し、実際の可否はエージェント本来の権限プロンプト・権限ルールが決めます。Antigravity のイベントスキーマは明示的な判定が必須で、安全な `PreToolUse` は `"allow"`、停止を許可する Stop は再投入しない値 `"stop"` を返します。
 
@@ -293,3 +293,109 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 **claw-hooks が中身を見ないイベントも許可します。** 検査していないイベントを拒否しても安全性は 1 ミリも上がらず、害だけが残ります。`UserPromptSubmit` の拒否は**ユーザーのプロンプト自体を消去**し、Codex の `PostToolUse` の拒否は**実際のツール出力をフックのメッセージで置き換え**ます。Cursor の `beforeReadFile` はファイル全文を入力に含むため、大きなファイルでは容易に stdin の 4 MiB 上限を超え、ファイル読み取りに何の意見も持たない claw-hooks がその読み取りを止めてしまいます。Windsurf の事後フックと Grok の `PreToolUse` 以外のイベントはそもそもブロック不可なので、拒否は無用なエラーを注入するだけです。これらはすべて `{}` + exit `0` を返します。
 
 **イベントを特定できないペイロードはブロックを維持します。** 上記の判断はイベント名を基準にしています。ペイロードの破損が激しくイベント名すら復元できない場合は拒否応答に倒すため、切り詰められた / 上限を超えた `PreToolUse` はブロックされます。
+
+**コマンドフックの判定器は `on_error` に従います。** 判定器のクラッシュ・時間切れ・起動失敗には上記の規則を当てはめず、そのフックの `on_error` で扱いを決めます。既定ではコマンドを通します。詳しくは [コマンドフックのプロトコル](#コマンドフックのプロトコル) を参照してください。
+
+## コマンドフックのプロトコル
+
+コマンドフック（`[[command_hooks]]`、[設定](configuration.ja.md#コマンドフック) を参照）は、シェルコマンドの中で一致した呼び出し 1 つにつき 1 回、判定器を起動します。この節では claw-hooks と判定器のあいだの取り決めを説明します。
+
+### 判定器が走る場面
+
+判定器が走るのは、シェルツール（`Bash` / `PowerShell`）の呼び出しのうち、[イベントマッピング](#イベントマッピング) の「コマンド実行前」グループのイベントと、Codex CLI の `PermissionRequest` だけです。組み込みの `rm` / `kill` / `dd` フィルターとカスタムフィルターの後に走るので、それらが拒否したコマンドは判定器に届きません。
+
+呼び出しはコマンド内の出現順に調べ、同じ呼び出しに複数のフックが一致したときは設定の順に走らせます。同じフックに同じ入力を渡す判定は 1 回しか走らせません。最初に拒否が出た時点で打ち切り、残りの判定器は走らせず、それまでに集めた補足も捨てます。
+
+ラッパー（`sudo`、`env`、`timeout` など）の後ろにある呼び出しは、独立した呼び出しとして扱います。シェルに渡す文字列（`bash -c`、`eval`、`env -S`、`trap`）と、シェルに流し込むヒアドキュメントや here-string は中身を解析し直し、`xargs` / `find -exec` が起動する呼び出しも取り出します。たとえば `sudo gws docs …` からは、`sudo` と `gws` の 2 つの呼び出しが得られます。
+
+### 入力
+
+claw-hooks は判定器の stdin に 1 行の JSON を書き込んでから閉じます。
+
+```json
+{
+  "version": 1,
+  "agent": "claude-code",
+  "event": "PreToolUse",
+  "tool_name": "Bash",
+  "session_id": "abc",
+  "cwd": "/path/to/project",
+  "analysis": "complete",
+  "context_delivery": true,
+  "argv": [
+    {"value": "gws", "static": true, "cardinality": "one"},
+    {"value": "docs", "static": true, "cardinality": "one"},
+    {"value": null, "static": false, "cardinality": "zero_or_more"}
+  ],
+  "stdin": null
+}
+```
+
+| フィールド | 意味 |
+|---|---|
+| `version` | 常に `1` |
+| `agent` | イベントを送ったエージェント。`claude-code`、`codex`、`cursor`、`windsurf`、`antigravity`、`grok` のいずれか |
+| `event` | claw-hooks 側でそろえたイベント名。各エージェントのコマンド実行前のイベント（Cursor の `beforeShellExecution` や Windsurf の `pre_run_command` も含む）は `PreToolUse`、Codex CLI の `PermissionRequest` は `PermissionRequest` |
+| `tool_name` | `Bash` または `PowerShell` |
+| `session_id` | エージェントのセッション ID。無ければ `null` |
+| `cwd` | エージェントが報告した、コマンドを実行するディレクトリ。報告が無ければ claw-hooks 自身の作業ディレクトリ、それも取得できなければ `null` |
+| `analysis` | `complete` または `uncertain`（後述） |
+| `context_delivery` | exit `0` の stdout がエージェントへ届くかどうか。Claude Code と Codex CLI の `PreToolUse` では `true`、それ以外では `false`。判定器は、捨てられるだけの補足を作らずに済ませるのに使える |
+| `argv` | 呼び出しを構成する語。先頭がプログラム名で、各要素は `value`・`static`・`cardinality` を持つ |
+| `stdin` | 呼び出しが標準入力から読むもの（後述） |
+
+コマンド文字列そのものは渡しません。一致した呼び出し以外の部分には、秘密の値や、調べるプログラムと関係の無い文章が含まれ得るからです。判定器に見せるのは一致した呼び出しだけです。
+
+Codex CLI で `PreToolUse` と `PermissionRequest` の両方を登録していると、承認を求めるコマンドは 2 つのイベントのそれぞれで判定器に届きます。どちらのイベントかは `event` で見分けられます。
+
+**`argv` の要素。** `value` は、クォート除去後の実行時の値を claw-hooks が静的に決められればその文字列で、`$VAR` や `$(date)` のように決められなければ `null` です。`static` は `value` が `null` でないときだけ `true` になります。`cardinality` は、実行時にちょうど 1 個の引数になる要素なら `"one"`、0 個を含む任意の個数の引数に展開され得る要素なら `"zero_or_more"` です。クォートしていない展開、グロブ、ブレース展開、`xargs` が付け足す引数が後者に当たります。`zero_or_more` の要素より後ろにある引数は、実行時の位置が定まりません。
+
+判定器を書くときは、次の 2 つを知っておくと役に立ちます。
+
+- ダブルクォートの中の `$(cat <<'EOF' … EOF)`（引数を持たない `cat` がヒアドキュメントを 1 つ読むもの）は静的です。値はヒアドキュメントの本文で、コマンド置換と同じく末尾の改行を取り除きます。`gws … --json "$(cat <<'EOF' … EOF)"` という書き方がこれに当たります。
+- `xargs` の内側の呼び出しでは、`xargs` が付け足す引数を末尾の `zero_or_more` の要素 1 つで表します。`-I` を指定したときは何も付け足さず、代わりに置換文字列を含む語が静的でなくなります。`find -exec` の `{}` も静的ではありません。
+
+**`analysis`。** `"complete"` は、呼び出しがコマンドの構文から確定していることを表します。`"uncertain"` の呼び出しは候補で、語が実際に実行されるものと完全には一致しないかもしれません。静的でない文字列を解析し直して見つけた場合（`bash -c "gws docs $ARGS"`）、構文エラーを含むコマンドから見つけた場合、`PowerShell` ツールのコマンドをシェルの文法で読んだ場合がこれに当たります。危険コマンドの検出のためだけに作る候補（プログラム名のブレース展開を最初の選択肢に畳んだものなど）は、判定器に渡しません。
+
+**`stdin`。** 入力のリダイレクトが無く、パイプからも受け取らない呼び出しは `null` で、エージェントの標準入力をそのまま引き継ぎます。本文が静的に決まるヒアドキュメントや here-string（`gws … <<'EOF'` など）は `{"value": "…", "static": true}` になります。何かが流れ込むものの中身が分からない場合、つまりパイプ、`< file`、静的でないヒアドキュメントや here-string（`<<< "$TEXT"`）では `{"value": null, "static": false}` になります。
+
+### 出力と終了コード
+
+| 判定器の結果 | claw-hooks の動作 |
+|---|---|
+| exit `0`、stdout が空か空白のみ | 何もしない |
+| exit `0`、stdout に出力あり | 異議なし。`context_delivery` が `true` なら出力を `[<label>] <出力>` の形でエージェントへの補足にし、そうでなければ捨てる |
+| exit `2` | `[<label>] <理由>` でコマンドを拒否する。理由は stderr で、stderr が空なら stdout、どちらも空なら `blocked by command hook` |
+| それ以外の終了コード、シグナルによる終了、起動失敗、時間切れ、作業ディレクトリとして報告されたパスがディレクトリでない | 判定器の失敗として `on_error` に従う。`allow` ならコマンドを通してデバッグログに警告を残し、`block` なら `[<label>] command hook failed: <原因>` で拒否する。`<原因>` は `timed out after 5s`、`exit code 1`、`terminated by a signal`、`could not be started` など |
+
+`<label>` は `run` のプログラムの basename で、`run = "noslop hook command"` なら `noslop` です。判定器の出力からは ANSI エスケープシーケンスを取り除き、前後の空白を削ります。エージェントへ送る文字列は、ほかのフックの出力と同じく `output_max_length` で切り詰めます。stdout と stderr はそれぞれ 4 MiB までしか保持しません。判定器が stdin を読まずに終了しても、失敗とはみなしません。
+
+### 補足が届くエージェント
+
+| エージェント | exit `0` の補足 |
+|---|---|
+| Claude Code | `PreToolUse`: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"…"}}`。`permissionDecision` を付けないので、通常の権限フローはそのまま働く |
+| Codex CLI | `PreToolUse`: 同じ形。`PermissionRequest`: 捨てて `{}` を返す |
+| Cursor、Windsurf、Antigravity CLI、Grok CLI | 捨てて、通常の許可応答を返す |
+
+拒否はどのエージェントでも効き、組み込みフィルターと同じ拒否応答を使います（[入出力リファレンス](#入出力リファレンス) を参照）。補足を返すのは、どの判定器もコマンドを拒否しなかったときだけです。
+
+### 上限
+
+- **判定器の実行は 1 回のフックイベントにつき 32 回まで。** 超えた分は走らせず、走らなかったフックそれぞれの `on_error` に従います。`block` のフックは `[<label>] command hook skipped: too many invocations to check` で拒否します。
+- **各回の時間はフックの `timeout` だけで決まる。** コマンドフックは、プロジェクト設定から上書きできる `hook_timeout` を使いません（[設定](configuration.ja.md#コマンドフック) を参照）。32 回の上限と合わせ、1 回のフックイベントにかかる時間は最大でも `timeout` の 32 回分（既定なら 160 秒）です。
+- **解析しきれないコマンド。** コマンドが長すぎるか入れ子が深すぎてパーサーが解析できないときは、判定器を走らせません。`on_error = "block"` のコマンドフックが 1 つでもあれば `[<label>] command hook could not analyze the command` で拒否し、無ければ通します。
+
+### 作業ディレクトリと環境変数
+
+エージェントが報告したコマンドの作業ディレクトリが実在するディレクトリなら、判定器はそこで走ります。報告されたパスがディレクトリでなければ判定器は起動せず、`on_error` に従います。報告が無ければ、claw-hooks の作業ディレクトリを引き継ぎます。
+
+判定器の環境変数は、claw-hooks の環境変数に `CLAW_HOOKS_COMMAND_HOOK_ACTIVE=1` を加えたものです。この変数が設定された状態で起動した claw-hooks はコマンドフックをまるごと飛ばします。判定器がエージェントを動かし、そのエージェントのフックから claw-hooks が呼ばれても、判定器が再帰的に呼ばれることはありません。そのプロセスでも、ほかのフィルターは通常どおり働きます。
+
+### 調べない呼び出し
+
+フックは呼び出しをプログラム名で照合するため、名前がコマンドにそのまま書かれている必要があります。`$CMD args` や `"$(which gws)" docs …` のように名前が実行時まで決まらない呼び出しでは、どのプログラムが起動するのかを claw-hooks は判断できず、その呼び出しは調べません。そのため、エージェントが意図してプログラム名を隠した場合の防御にはなりません。
+
+### ログ
+
+デバッグログに残すのは、判定器のプログラム名、一致した呼び出しの数、終了コード、バイト数、所要時間、`on_error` の方針だけです。引数、判定器への入力 JSON、判定器の出力はログに書きません。

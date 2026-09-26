@@ -72,10 +72,9 @@ fmt: ## Format the code (rewrites files)
 fmt-check: ## Check the formatting (no changes)
 	$(RUN) cargo fmt --all -- --check
 
-# lint covers all features and no default features. cargo check also builds the default feature
-# set, so code behind a feature combination in between is not left unchecked
+# lint covers all features and no default features. The only feature (ast-parser) is the default,
+# so the default feature set is the all-features build and needs no separate check
 check: fmt-check lint ## Run fmt-check and lint (no changes)
-	$(RUN) cargo check $(CARGO_FLAGS)
 
 ci: check test ## Run the same checks as CI (no changes)
 

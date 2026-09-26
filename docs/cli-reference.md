@@ -218,7 +218,7 @@ graph LR
         CX2[Codex: PostToolUse + apply_patch]
         GR2[Grok: PostToolUse + file path]
     end
-    CH2[🔧 Run commands by extension]
+    CH2["🔧 Run commands by extension<br>then the * key (all files)"]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2

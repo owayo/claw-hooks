@@ -2429,6 +2429,101 @@ fn test_notebook_edit_triggers_extension_hooks() {
     );
 }
 
+/// Claude の PostToolUse (Write) で `file_path` を編集したときの追加コンテキストを返す。
+fn claude_write_context(file_path: &std::path::Path, config: &std::path::Path) -> String {
+    let input = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": file_path.to_str().unwrap(), "content": "x"},
+    })
+    .to_string();
+    let (stdout, stderr, exit_code) = run_hook_with_config_and_format(&input, "claude", config);
+    assert_eq!(exit_code, 0, "stdout={stdout} stderr={stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn test_catch_all_extension_hook_runs_on_every_file_after_extension_commands() {
+    // "*" は拡張子のないファイルにも当たり、拡張子のキーのコマンドの後に動く。
+    // "*" を TOML で先に書いても順序は変わらない
+    let dir = tempfile::TempDir::new().unwrap();
+    let makefile = dir.path().join("Makefile");
+    let source = dir.path().join("sample.zzz");
+    std::fs::write(&makefile, "all:\n").unwrap();
+    std::fs::write(&source, "x").unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\"*\" = [\"echo CATCH-ALL-HOOK {file}\"]\n\".zzz\" = [\"echo ZZZ-KEY-HOOK {file}\"]\n",
+    );
+
+    let context = claude_write_context(&makefile, &config);
+    assert!(
+        context.contains("CATCH-ALL-HOOK") && !context.contains("ZZZ-KEY-HOOK"),
+        "拡張子のないファイルには \"*\" だけが当たること: {context}"
+    );
+
+    let context = claude_write_context(&source, &config);
+    let ext = context.find("ZZZ-KEY-HOOK").expect(&context);
+    let catch_all = context.find("CATCH-ALL-HOOK").expect(&context);
+    assert!(
+        ext < catch_all,
+        "拡張子のキーのコマンドを先に動かすこと: {context}"
+    );
+}
+
+#[test]
+fn test_check_warns_on_command_shared_with_catch_all() {
+    // 拡張子のキーと "*" に同じコマンドがあっても設定エラーにはせず、check が警告する
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\".md\" = [\"echo LINT {file}\"]\n\"*\" = [\"echo LINT {file}\"]\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run claw-hooks check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stderr={stderr}");
+    assert!(
+        stderr.contains("warning: extension_hooks: \"*\" command[0] is also listed under \".md\""),
+        "重複を警告すること: {stderr}"
+    );
+}
+
+#[test]
+fn test_check_rejects_glob_extension_hook_key() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = write_temp_config(
+        &dir,
+        "[extension_hooks]\n\"*.md\" = [\"echo LINT {file}\"]\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run claw-hooks check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "glob のキーは設定エラー");
+    assert!(
+        stderr.contains("\"*\" for every file"),
+        "書き方を案内すること: {stderr}"
+    );
+}
+
 #[test]
 fn test_pre_tool_use_still_fails_closed_on_malformed_payload() {
     // 実行前ゲートは従来どおりフェイルクローズドを維持する。

@@ -40,16 +40,31 @@ struct CommandResult {
 /// 拡張子ベースのフックフィルター。
 pub struct ExtensionHookFilter {
     /// 拡張子 → コマンドのマップ（例: ".go" → ["gofmt -w {file}", "golangci-lint run {file}"]）
-    hooks: BTreeMap<String, Vec<String>>,
+    by_extension: BTreeMap<String, Vec<String>>,
+    /// すべてのファイルに当てるコマンド（キー `"*"`）。拡張子のキーのコマンドの後に動かす
+    catch_all: Vec<String>,
     nano_buddy: bool,
     timeout_secs: u64,
 }
 
 impl ExtensionHookFilter {
+    /// 拡張子を問わず、編集したすべてのファイルに当てるコマンドを書くキー。
+    /// 拡張子のないファイル（`Makefile`）やドットファイル（`.gitignore`）にも当たる。
+    pub const CATCH_ALL_KEY: &'static str = "*";
+
     /// 新しい ExtensionHookFilter を作成する。
-    pub fn new(hooks: BTreeMap<String, Vec<String>>, nano_buddy: bool, timeout_secs: u64) -> Self {
+    ///
+    /// `hooks` は設定の `[extension_hooks]` そのもので、`"*"` のキーがあれば catch-all として
+    /// 取り出す。
+    pub fn new(
+        mut hooks: BTreeMap<String, Vec<String>>,
+        nano_buddy: bool,
+        timeout_secs: u64,
+    ) -> Self {
+        let catch_all = hooks.remove(Self::CATCH_ALL_KEY).unwrap_or_default();
         Self {
-            hooks,
+            by_extension: hooks,
+            catch_all,
             nano_buddy,
             timeout_secs,
         }
@@ -63,13 +78,20 @@ impl ExtensionHookFilter {
             .map(|e| e.to_string())
     }
 
-    /// ファイルパスにマッチするコマンドを取得する。
-    fn get_matching_commands(&self, file_path: &str) -> Option<&Vec<String>> {
-        let path = Path::new(file_path);
-        let extension = path.extension()?.to_str()?;
-        let ext_with_dot = format!(".{}", extension);
-
-        self.hooks.get(&ext_with_dot)
+    /// ファイルパスに当てるコマンドを、実行する順に返す。
+    ///
+    /// 拡張子のキーのコマンドを先に、`"*"` のコマンドを後に並べる。formatter が書き換えた後の
+    /// 内容を catch-all の linter に渡すためである。TOML のキーの書き順は `BTreeMap` に読んだ
+    /// 時点で失われるので、順序は書き順ではなくここで固定する。
+    fn matching_commands(&self, file_path: &str) -> Vec<&str> {
+        let by_extension = Self::extract_ext(file_path)
+            .and_then(|extension| self.by_extension.get(&format!(".{}", extension)));
+        by_extension
+            .into_iter()
+            .flatten()
+            .chain(&self.catch_all)
+            .map(String::as_str)
+            .collect()
     }
 
     /// ファイルパスのセキュリティ検証。
@@ -166,7 +188,8 @@ impl ExtensionHookFilter {
         command_template: &str,
         file_path: &str,
     ) -> Result<CommandResult, String> {
-        // ファイルパスの検証
+        // ファイルパスの検証。呼び出し元（execute_commands）がファイル単位で検証済みだが、
+        // パスをコマンドラインへ渡す直前のここでも確かめる
         Self::validate_file_path(file_path)?;
 
         // コマンドテンプレートのパース
@@ -292,9 +315,17 @@ impl ExtensionHookFilter {
         })
     }
 
-    /// 拡張子に対応するすべてのコマンドを実行し、出力を収集する。
+    /// 1 つのファイルに当てるすべてのコマンドを実行し、出力を収集する。
     /// 警告/エラーを出力したすべてのコマンドの結合出力を返す。
-    fn execute_commands(&self, commands: &[String], file_path: &str) -> (bool, Option<String>) {
+    fn execute_commands(&self, commands: &[&str], file_path: &str) -> (bool, Option<String>) {
+        // パスの検証はファイル単位で先に 1 回行い、落ちたらどのコマンドも起動しない。
+        // コマンドごとの検証に任せると、同じ理由の `[ERROR]` がコマンドの数だけ並ぶ
+        // （`"*"` はすべてのファイルに当たるので、1 ファイルあたりのコマンドが増える）。
+        if let Err(e) = Self::validate_file_path(file_path) {
+            warn!("❌ Extension hooks skipped for this file: {}", e);
+            return (false, Some(format!("[ERROR] {}", e)));
+        }
+
         let mut all_success = true;
         let mut outputs: Vec<String> = Vec::new();
 
@@ -372,14 +403,14 @@ impl Filter for ExtensionHookFilter {
             return false;
         }
 
-        // マッチする拡張子フックがあるか確認
+        // 当てるコマンドがあるファイルを含むか確認
         match &input.tool_input {
             ToolInput::File(file_input) => {
-                self.get_matching_commands(&file_input.file_path).is_some()
+                !self.matching_commands(&file_input.file_path).is_empty()
             }
             ToolInput::Files(file_inputs) => file_inputs
                 .iter()
-                .any(|file_input| self.get_matching_commands(&file_input.file_path).is_some()),
+                .any(|file_input| !self.matching_commands(&file_input.file_path).is_empty()),
             _ => false,
         }
     }
@@ -394,24 +425,28 @@ impl Filter for ExtensionHookFilter {
 
         let mut outputs = Vec::new();
         for file_input in file_inputs {
-            if let Some(commands) = self.get_matching_commands(&file_input.file_path) {
-                // NanoBuddy 通知（フックコマンドより先に到達するよう先に送信）
-                if self.nano_buddy
-                    && let Some(ext) = Self::extract_ext(&file_input.file_path)
-                {
-                    debug!("🐱 NanoBuddy ext notification: .{}", ext);
-                    crate::notify::nano_buddy::notify_extension_hook(&ext);
-                }
+            let commands = self.matching_commands(&file_input.file_path);
+            if commands.is_empty() {
+                continue;
+            }
 
-                // コマンドを実行して出力を収集
-                let (_all_success, output) = self.execute_commands(commands, &file_input.file_path);
+            // NanoBuddy 通知（フックコマンドより先に到達するよう先に送信）。
+            // 通知するのは拡張子なので、拡張子のないファイル（`"*"` だけが当たる）では送らない
+            if self.nano_buddy
+                && let Some(ext) = Self::extract_ext(&file_input.file_path)
+            {
+                debug!("🐱 NanoBuddy ext notification: .{}", ext);
+                crate::notify::nano_buddy::notify_extension_hook(&ext);
+            }
 
-                // 出力がある場合は追加コンテキスト付きの Allow を返す
-                // lint 警告/エラーをエージェントに渡す（Claude Code のみ）
-                // トークン効率のため出力を正規化（ANSI 除去、空行圧縮）
-                if let Some(ctx) = output {
-                    outputs.push(ctx);
-                }
+            // コマンドを実行して出力を収集
+            let (_all_success, output) = self.execute_commands(&commands, &file_input.file_path);
+
+            // 出力がある場合は追加コンテキスト付きの Allow を返す
+            // lint 警告/エラーをエージェントに渡す（Claude Code のみ）
+            // トークン効率のため出力を正規化（ANSI 除去、空行圧縮）
+            if let Some(ctx) = output {
+                outputs.push(ctx);
             }
         }
 
@@ -1206,27 +1241,272 @@ mod tests {
         );
     }
 
-    // === get_matching_commands のテスト ===
+    // === matching_commands のテスト ===
 
     #[test]
-    fn test_get_matching_commands_match() {
+    fn test_matching_commands_match() {
         let filter = create_filter_with_go_hooks();
-        let cmds = filter.get_matching_commands("/tmp/file.go");
-        assert!(cmds.is_some());
+        assert_eq!(
+            filter.matching_commands("/tmp/file.go"),
+            vec!["gofmt -w {file}"]
+        );
     }
 
     #[test]
-    fn test_get_matching_commands_no_match() {
+    fn test_matching_commands_no_match() {
         let filter = create_filter_with_go_hooks();
-        let cmds = filter.get_matching_commands("/tmp/file.rs");
-        assert!(cmds.is_none());
+        assert!(filter.matching_commands("/tmp/file.rs").is_empty());
     }
 
     #[test]
-    fn test_get_matching_commands_hidden_file() {
+    fn test_matching_commands_hidden_file() {
         let filter = create_filter_with_go_hooks();
-        let cmds = filter.get_matching_commands(".gitignore");
-        assert!(cmds.is_none());
+        assert!(filter.matching_commands(".gitignore").is_empty());
+    }
+
+    // === catch-all（キー "*"）のテスト ===
+
+    /// `"*"` と拡張子のキーを持つフィルターを作る。
+    fn create_filter_with_catch_all(
+        extension_hooks: &[(&str, &[&str])],
+        catch_all: &[&str],
+    ) -> ExtensionHookFilter {
+        let mut hooks: BTreeMap<String, Vec<String>> = extension_hooks
+            .iter()
+            .map(|(key, commands)| {
+                (
+                    key.to_string(),
+                    commands.iter().map(|c| c.to_string()).collect(),
+                )
+            })
+            .collect();
+        hooks.insert(
+            ExtensionHookFilter::CATCH_ALL_KEY.to_string(),
+            catch_all.iter().map(|c| c.to_string()).collect(),
+        );
+        ExtensionHookFilter::new(hooks, false, 60)
+    }
+
+    fn after_file_edit(file_path: &str) -> HookInput {
+        HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "Write".to_string(),
+            tool_input: ToolInput::File(crate::domain::FileOperationInput {
+                file_path: file_path.to_string(),
+                content: None,
+            }),
+            session_id: None,
+        }
+    }
+
+    fn context_of(decision: Decision) -> String {
+        match decision {
+            Decision::Allow {
+                additional_context: Some(context),
+            } => context,
+            other => panic!("出力を additional_context に載せた Allow を返すべき: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_catch_all_applies_to_extensionless_files_and_dotfiles() {
+        // 拡張子で引けないファイルにも "*" は当たる
+        let filter = create_filter_with_catch_all(&[], &["lint {file}"]);
+        for path in [
+            "Makefile",
+            "/repo/Dockerfile",
+            ".gitignore",
+            "/repo/.env",
+            "/repo/src/main.rs",
+        ] {
+            assert!(
+                filter.applies_to(&after_file_edit(path)),
+                "{path} にも catch-all が当たるべき"
+            );
+            assert_eq!(filter.matching_commands(path), vec!["lint {file}"]);
+        }
+    }
+
+    #[test]
+    fn test_extensionless_file_does_not_apply_without_catch_all() {
+        let filter = create_filter_with_go_hooks();
+        assert!(!filter.applies_to(&after_file_edit("/repo/Makefile")));
+    }
+
+    #[test]
+    fn test_extension_commands_come_before_catch_all() {
+        let filter = create_filter_with_catch_all(
+            &[(".rs", &["rustfmt {file}", "clippy-driver {file}"])],
+            &["noslop hook file {file}", "typos {file}"],
+        );
+        assert_eq!(
+            filter.matching_commands("/repo/src/lib.rs"),
+            vec![
+                "rustfmt {file}",
+                "clippy-driver {file}",
+                "noslop hook file {file}",
+                "typos {file}",
+            ]
+        );
+        // 拡張子のキーに当たらないファイルは catch-all だけ
+        assert_eq!(
+            filter.matching_commands("/repo/README.md"),
+            vec!["noslop hook file {file}", "typos {file}"]
+        );
+    }
+
+    #[test]
+    fn test_trailing_dot_matches_dot_key_then_catch_all() {
+        // "file." の拡張子は空文字列なので、キー "." に当たり、その後に "*" が続く
+        let filter = create_filter_with_catch_all(&[(".", &["dot {file}"])], &["all {file}"]);
+        assert_eq!(
+            filter.matching_commands("/tmp/file."),
+            vec!["dot {file}", "all {file}"]
+        );
+    }
+
+    #[test]
+    fn test_extension_matching_remains_case_sensitive() {
+        // 拡張子の照合は大文字小文字を区別する。"*" は大文字の拡張子にも当たる
+        let filter = create_filter_with_catch_all(&[(".rs", &["rustfmt {file}"])], &["all {file}"]);
+        assert_eq!(
+            filter.matching_commands("/repo/MAIN.RS"),
+            vec!["all {file}"]
+        );
+    }
+
+    // formatter の書き換え (`>` によるファイルへの書き込み) を sh に任せる。Windows は cmd /c を
+    // 経由するので、cmd が `>` をリダイレクトとして読み、sh まで届かない
+    #[cfg(unix)]
+    #[test]
+    fn test_catch_all_sees_the_file_after_the_extension_commands_rewrote_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("sample.txt");
+        std::fs::write(&target, "original").unwrap();
+        let filter = create_filter_with_catch_all(
+            &[(".txt", &["sh -c 'printf formatted > \"$0\"' {file}"])],
+            &["sh -c 'printf \"seen: \"; cat \"$0\"' {file}"],
+        );
+
+        let context = context_of(filter.execute(&after_file_edit(target.to_str().unwrap())));
+
+        assert!(
+            context.contains("seen: formatted"),
+            "catch-all は拡張子のキーのコマンドが書き換えた後の内容を受け取るべき: {context}"
+        );
+    }
+
+    #[test]
+    fn test_execute_runs_catch_all_after_extension_commands() {
+        let filter =
+            create_filter_with_catch_all(&[(".txt", &["echo EXT {file}"])], &["echo ALL {file}"]);
+
+        let context = context_of(filter.execute(&after_file_edit("/tmp/a.txt")));
+
+        let ext = context.find("EXT /tmp/a.txt").expect(&context);
+        let all = context.find("ALL /tmp/a.txt").expect(&context);
+        assert!(
+            ext < all,
+            "拡張子のキーのコマンドを先に動かすべき: {context}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_command_runs_once_for_each_key() {
+        // 同じコマンドを拡張子のキーと "*" の両方に書いた場合は、書いたとおり 2 回動かす
+        // （重複は除かない。`claw-hooks check` が警告で知らせる）
+        let filter =
+            create_filter_with_catch_all(&[(".txt", &["echo DUP {file}"])], &["echo DUP {file}"]);
+
+        let context = context_of(filter.execute(&after_file_edit("/tmp/a.txt")));
+
+        assert_eq!(
+            context.matches("DUP /tmp/a.txt").count(),
+            2,
+            "拡張子のキーと \"*\" の両方で 1 回ずつ動くべき: {context}"
+        );
+    }
+
+    #[test]
+    fn test_execute_multi_file_edit_runs_matching_commands_per_file() {
+        let filter =
+            create_filter_with_catch_all(&[(".txt", &["echo EXT {file}"])], &["echo ALL {file}"]);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::Files(
+                ["/tmp/a.txt", "/tmp/Makefile", "/tmp/b.rs"]
+                    .into_iter()
+                    .map(|path| crate::domain::FileOperationInput {
+                        file_path: path.to_string(),
+                        content: None,
+                    })
+                    .collect(),
+            ),
+            session_id: None,
+        };
+
+        let context = context_of(filter.execute(&input));
+
+        let positions: Vec<usize> = [
+            "EXT /tmp/a.txt",
+            "ALL /tmp/a.txt",
+            "ALL /tmp/Makefile",
+            "ALL /tmp/b.rs",
+        ]
+        .iter()
+        .map(|needle| context.find(needle).expect(&context))
+        .collect();
+        assert!(
+            positions.is_sorted(),
+            "ファイルごとに「拡張子のキー → \"*\"」の順で動かすべき: {context}"
+        );
+        assert!(
+            !context.contains("EXT /tmp/Makefile") && !context.contains("EXT /tmp/b.rs"),
+            "拡張子のキーは一致したファイルにだけ当てるべき: {context}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_path_reports_one_error_and_runs_no_commands() {
+        // パスの検証に落ちたファイルでは、どのコマンドも起動せず、エラーを 1 件だけ返す。
+        // コマンドごとに返すと、"*" でコマンドが増えるぶん同じ行が並ぶ
+        let filter = create_filter_with_catch_all(
+            &[(".txt", &["echo RAN {file}", "echo RAN {file}"])],
+            &["echo RAN {file}"],
+        );
+
+        let context = context_of(filter.execute(&after_file_edit("/tmp/100%.txt")));
+
+        assert_eq!(
+            context, "[ERROR] Path contains dangerous character: '%'",
+            "エラーはファイルにつき 1 件だけ返すべき"
+        );
+    }
+
+    #[test]
+    fn test_invalid_path_does_not_stop_other_files() {
+        // 検証に落ちたファイルがあっても、同じ編集のほかのファイルのコマンドは動かす
+        let filter = create_filter_with_catch_all(&[], &["echo ALL {file}"]);
+        let input = HookInput {
+            event: HookEvent::AfterFileEdit,
+            tool_name: "MultiEdit".to_string(),
+            tool_input: ToolInput::Files(
+                ["/tmp/bad;name.txt", "/tmp/good.txt"]
+                    .into_iter()
+                    .map(|path| crate::domain::FileOperationInput {
+                        file_path: path.to_string(),
+                        content: None,
+                    })
+                    .collect(),
+            ),
+            session_id: None,
+        };
+
+        let context = context_of(filter.execute(&input));
+
+        assert_eq!(context.matches("[ERROR]").count(), 1, "{context}");
+        assert!(context.contains("ALL /tmp/good.txt"), "{context}");
     }
 
     // === パストラバーサル検証の追加テスト ===

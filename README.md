@@ -43,7 +43,7 @@ claw-hooks is a single binary that plugs into the hook systems of Claude Code, C
 - **AST-based Parsing**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) handles wrappers (`sudo`, `timeout`, `command`, `exec`, `pkexec`, `gosu`, `su`, `arch`, `systemd-run`, `script`), subshells, pipes, `eval`, `find -exec`, `bash -c`/`-lc`, command substitution, brace groups, control flow (`if`/`for`/`while`/`case`), basename/extension/case normalization, and shell quote-removal forms. A string fallback parser keeps the same coverage for non-`ast-parser` builds
 - **Custom Command Filters**: Define custom filters with regex support
 - **Command Hooks**: Pass each call of a chosen program in a shell command (every `gws` call, say) to an external checker before the command runs. The parser that detects dangerous commands finds the calls, so `sudo gws …` and `bash -c 'gws …'` count too, and the checker receives that call's arguments as JSON after quote removal, never the whole command. The checker can block the command, add context for the agent (Claude Code and Codex CLI), or stay silent
-- **Extension Hooks**: Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`; lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
+- **Extension Hooks**: Execute external tools (formatters, linters) only after file save/edit completes for `Write` / `Edit` / `MultiEdit` / `NotebookEdit`. Commands are keyed by extension (`".rs"`), and the `"*"` key runs its commands on every edited file, including files without an extension (`Makefile`) and dotfiles (`.gitignore`), after the commands for the file's extension. Lint output flows back to Claude Code / Codex CLI via `additionalContext`, and to Windsurf as exit 2 + stderr. Antigravity CLI needs `--event PostToolUse` on its `PostToolUse` entry; the tools then run against `toolCall.args.TargetFile`, but its output is fixed at `{}` so only the formatter's own rewrite reaches the agent. Grok CLI does deliver the edited file path, so the tools run normally, but its post-hook stdout is ignored, so the formatter's own rewrite is the only feedback the agent sees
 - **Stop Hooks**: Run commands when agent loop ends (notifications, git commit with [git-sc](https://github.com/owayo/git-smart-commit), cleanup)
 - **Project-wide Lint on Stop**: Auto-detect project type (`Cargo.toml`, `tsconfig.json`, etc.) and run lint/typecheck; failures are surfaced back to the agent (Windsurf and Grok CLI are best-effort)
 - **Hook Timeout**: Configurable per-hook timeout (default 60s). On Unix the whole process group is SIGKILL'd, so grandchildren of `sh -c '...'` cannot leak past the deadline
@@ -72,6 +72,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 ".py"  = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
 ".ts"  = ["biome check {file}"]
 ".tsx" = ["biome check {file}"]
+"*"    = ["noslop hook file {file}"]   # every edited file, after its extension's commands
 ```
 
 …wired in once via the agent's standard hooks config:
@@ -247,9 +248,11 @@ command = "gws"
 run = "noslop hook command"
 
 # Run formatters and linters after a file is written or edited
+# ("*" covers every edited file and runs after the commands for the file's extension)
 [extension_hooks]
 ".rs" = ["rustfmt {file}"]
 ".ts" = ["biome check {file}"]
+"*" = ["noslop hook file {file}"]
 
 # Lint the whole project when the agent stops (only where Cargo.toml exists)
 [[stop_hooks]]

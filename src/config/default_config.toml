@@ -54,6 +54,12 @@ debug = false
 
 # Extension-based hooks (map format)
 # Execute external tools when specific file types are modified
+# Keys: a file extension starting with "." (".rs", case-sensitive), or "*".
+# "*" matches every edited file, including files without an extension (Makefile)
+# and dotfiles (.gitignore). For each file, the commands of its extension run
+# first and the "*" commands after them, wherever "*" is written in the table.
+# "*" runs on every edit, binary and large files included, so use it for tools
+# that decide for themselves which files to check and exit quickly on the rest.
 # Each command template must contain exactly one {file}
 # File paths containing ../, <, or > are blocked for safety
 # [extension_hooks]
@@ -62,6 +68,7 @@ debug = false
 # ".rs" = ["rustfmt {file}"]
 # ".ts" = ["biome check {file}"]
 # ".tsx" = ["biome check {file}"]
+# "*" = ["noslop hook file {file}"]
 
 # Command hooks
 # Before a Bash/PowerShell command runs, pass each invocation of `command` found in it

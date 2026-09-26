@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use super::types::ProjectConfig;
 use super::{CommandHook, Config, CustomFilter, StopHook};
+use crate::domain::filters::ExtensionHookFilter;
 
 /// フックコマンドの最大タイムアウト秒数。
 /// フックは短時間で終わる前提のため、1日を超える値は設定ミスとして扱う。
@@ -96,10 +97,18 @@ pub fn validate_custom_filters(filters: &[CustomFilter]) -> Result<()> {
 }
 
 /// 拡張子フック定義を検証する。
+///
+/// キーは `.` で始まる拡張子か、すべてのファイルに当てる `"*"` のどちらか。glob やファイル名の
+/// キーは無いので弾く。受け付けてしまうと、`"*.rs"` を glob のつもりで書いた設定が
+/// どのファイルにも当たらないまま `check` が "Configuration is valid." と答えてしまう。
 pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result<()> {
     for (ext, commands) in hooks {
-        if !ext.starts_with('.') {
-            bail!("extension_hooks: key '{}' must start with '.'", ext);
+        if ext != ExtensionHookFilter::CATCH_ALL_KEY && !ext.starts_with('.') {
+            bail!(
+                "extension_hooks: key '{}' must be an extension starting with '.' (e.g. \".rs\") \
+                 or \"*\" for every file (globs and file names are not supported)",
+                ext
+            );
         }
 
         if commands.is_empty() {
@@ -111,8 +120,7 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
             if cmd.is_empty() {
                 bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
             }
-            if let Err(e) = crate::domain::filters::ExtensionHookFilter::parse_command_template(cmd)
-            {
+            if let Err(e) = ExtensionHookFilter::parse_command_template(cmd) {
                 bail!(
                     "extension_hooks['{}']: command[{}] {}",
                     ext,
@@ -123,6 +131,42 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
         }
     }
     Ok(())
+}
+
+/// 拡張子フックの設定のうち、エラーにはしないが知らせておくべき点を警告文にする。
+///
+/// 同じコマンドを拡張子のキーと `"*"` の両方に書くと、そのファイルでは 2 回動く。
+/// 重複を黙って除くと書いた順序と回数が読めなくなるので、書いたとおりに動かしたうえで
+/// 知らせる。`"*"` を足したときに拡張子のキーへ残した同じ行を消し忘れると起きる。
+///
+/// 警告はフック実行時にデバッグログ（ディスク）にも残るため、コマンド本文は入れず、
+/// キーと番号で場所を示す（実行ファイルのディレクトリをログに残さない方針）。
+pub(crate) fn extension_hook_warnings(hooks: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let Some(catch_all) = hooks.get(ExtensionHookFilter::CATCH_ALL_KEY) else {
+        return Vec::new();
+    };
+    catch_all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, command)| {
+            let keys: Vec<String> = hooks
+                .iter()
+                .filter(|(key, commands)| {
+                    key.as_str() != ExtensionHookFilter::CATCH_ALL_KEY && commands.contains(command)
+                })
+                .map(|(key, _)| format!("\"{}\"", key))
+                .collect();
+            if keys.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "extension_hooks: \"*\" command[{}] is also listed under {}, \
+                 so it runs twice on those files (once for each key)",
+                i,
+                keys.join(", ")
+            ))
+        })
+        .collect()
 }
 
 /// Stop フック定義を検証する。
@@ -666,6 +710,120 @@ mod tests {
         let mut hooks = BTreeMap::new();
         hooks.insert(".rs".to_string(), vec!["{file} --flag".to_string()]);
         assert!(validate_extension_hooks(&hooks).is_err());
+    }
+
+    /// `[extension_hooks]` を (キー, コマンド) の組から作る。
+    fn extension_hooks(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(key, commands)| {
+                (
+                    key.to_string(),
+                    commands.iter().map(|c| c.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_accepts_catch_all_key() {
+        let hooks = extension_hooks(&[
+            (".rs", &["rustfmt {file}"]),
+            ("*", &["noslop hook file {file}"]),
+        ]);
+        assert!(validate_extension_hooks(&hooks).is_ok());
+
+        // "*" だけの設定も有効
+        let hooks = extension_hooks(&[("*", &["noslop hook file {file}"])]);
+        assert!(validate_extension_hooks(&hooks).is_ok());
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_rejects_glob_and_non_extension_keys() {
+        // glob・ファイル名のキーは無い。受け付けると、どのファイルにも当たらないまま
+        // check が通ってしまう
+        for key in ["*.rs", "**", "*.{yml,yaml}", " * ", "rs", "Makefile", ""] {
+            let hooks = extension_hooks(&[(key, &["lint {file}"])]);
+            let Err(err) = validate_extension_hooks(&hooks) else {
+                panic!("キー {key:?} は拒否すべき");
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("\"*\" for every file") && err.contains("\".rs\""),
+                "正しい書き方を案内すべき: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_extension_hooks_checks_catch_all_commands() {
+        // "*" のコマンドにも拡張子のキーと同じ検証を掛ける
+        for commands in [
+            &[][..],
+            &[""][..],
+            &["noslop hook file"][..],
+            &["tool {file} {file}"][..],
+            &["{file} --flag"][..],
+        ] {
+            let hooks = extension_hooks(&[("*", commands)]);
+            assert!(
+                validate_extension_hooks(&hooks).is_err(),
+                "\"*\" = {commands:?} は拒否すべき"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extension_hook_warnings_reports_commands_shared_with_catch_all() {
+        let hooks = extension_hooks(&[
+            (".go", &["gofmt -w {file}"]),
+            (".md", &["noslop hook file {file}"]),
+            (".rs", &["rustfmt {file}", "noslop hook file {file}"]),
+            ("*", &["noslop hook file {file}", "typos {file}"]),
+        ]);
+
+        let warnings = extension_hook_warnings(&hooks);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("\"*\" command[0]") && warning.contains("\".md\", \".rs\""),
+            "重複しているキーと番号を示すべき: {warning}"
+        );
+        assert!(!warning.contains("\".go\""), "{warning}");
+        assert!(
+            !warning.contains("noslop"),
+            "警告はログにも残るので、コマンド本文を入れない: {warning}"
+        );
+    }
+
+    #[test]
+    fn test_extension_hook_warnings_ignores_non_identical_commands() {
+        // 完全に一致するものだけを知らせる（空白や引数が違えば別のコマンドとして扱う）
+        let hooks = extension_hooks(&[
+            (".md", &["noslop hook file  {file}"]),
+            (".rs", &["noslop hook file --max-chars 900 {file}"]),
+            ("*", &["noslop hook file {file}"]),
+        ]);
+        assert!(extension_hook_warnings(&hooks).is_empty());
+
+        // "*" が無ければ重複は起きない
+        let hooks = extension_hooks(&[
+            (".md", &["noslop hook file {file}"]),
+            (".rs", &["noslop hook file {file}"]),
+        ]);
+        assert!(extension_hook_warnings(&hooks).is_empty());
+    }
+
+    #[test]
+    fn test_validate_accepts_commands_shared_with_catch_all() {
+        // 重複は警告に留め、設定エラーにはしない
+        let mut config = default_config();
+        config.extension_hooks = extension_hooks(&[
+            (".md", &["noslop hook file {file}"]),
+            ("*", &["noslop hook file {file}"]),
+        ]);
+        assert!(validate_values(&config).is_ok());
     }
 
     #[test]

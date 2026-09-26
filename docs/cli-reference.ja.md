@@ -218,7 +218,7 @@ graph LR
         CX2[Codex: PostToolUse + apply_patch]
         GR2[Grok: PostToolUse + file path]
     end
-    CH2[🔧 拡張子ごとのコマンド実行]
+    CH2["🔧 拡張子ごとのコマンド実行<br>その後に * のコマンド（全ファイル）"]
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2

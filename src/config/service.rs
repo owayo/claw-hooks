@@ -139,6 +139,12 @@ impl ConfigService {
             .validate()
             .with_context(|| format!("Invalid configuration in {}", path.display()))?;
 
+        // エラーにはしないが知らせる点（拡張子のキーと "*" に同じコマンドがある等）。
+        // 拡張子フックはグローバル設定からしか読まないので、プロジェクト設定のマージ前に見る
+        config
+            .warnings
+            .extend(validation::extension_hook_warnings(&config.extension_hooks));
+
         // プロジェクトレベルの設定を検索してマージ
         let project_path = project_search_dir.and_then(Self::find_project_config_from);
         if let Some(project_path) = project_path {
@@ -832,6 +838,50 @@ commands = ["echo project"]
         assert!(config.rm_block);
         assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
         assert!(config.warnings[0].contains("rm_blok"));
+    }
+
+    #[test]
+    fn test_load_records_warning_for_command_shared_with_catch_all() {
+        // 拡張子のキーと "*" に同じコマンドがあると、そのファイルでは 2 回動く。
+        // 読み込みは通し（設定エラーにはしない）、`check` とログに出す警告を残す
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[extension_hooks]\n\
+             \".md\" = [\"noslop hook file {file}\"]\n\
+             \"*\" = [\"noslop hook file {file}\"]\n",
+        )
+        .unwrap();
+
+        let config = ConfigService::load_inner(Some(&config_path), None).unwrap();
+
+        assert_eq!(config.extension_hooks.len(), 2);
+        assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
+        assert!(
+            config.warnings[0].contains("\"*\" command[0]")
+                && config.warnings[0].contains("\".md\""),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    #[test]
+    fn test_load_rejects_glob_extension_hook_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[extension_hooks]\n\"*.rs\" = [\"rustfmt {file}\"]\n",
+        )
+        .unwrap();
+
+        let err = ConfigService::load_inner(Some(&config_path), None).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("\"*\" for every file"),
+            "glob のキーは設定エラーにし、書き方を案内すべき: {err:#}"
+        );
     }
 
     #[test]

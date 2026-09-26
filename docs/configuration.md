@@ -70,18 +70,24 @@ message = "Ask the user to run this command manually"
 
 # Extension hooks (triggered on file write/edit)
 # Map format: ".ext" = ["cmd1 {file}", "cmd2 {file}"]
+# The "*" key matches every edited file, including files without an extension
+# (Makefile) and dotfiles (.gitignore). For each file, the commands of its extension
+# run first in the order written, then the "*" commands in the order written, so a
+# linter under "*" sees the formatter's rewrite. Where "*" sits in the table does
+# not matter. See "Extension Hook Rules" below for what to run under "*".
 # Output (stdout/stderr) is passed as additionalContext where the hook runtime supports it
 # Each command template must contain exactly one {file}
 # Parent-directory traversal paths (../) are rejected for safety
 # Shell redirection metacharacters (<, >) in file paths are rejected for safety
 # Tabs/newlines/NUL are rejected to prevent argument splitting and malformed paths
-# On Windows, cmd metacharacters (%, !, ^, ") are also rejected to prevent variable-expansion injection
+# cmd metacharacters (%, !, ^, ") are rejected on every platform; under Windows' cmd /c they would expand variables
 [extension_hooks]
 ".css" = ["biome format --write {file}", "biome lint --write {file}"]
 ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
 ".rs" = ["rustfmt {file}"]
 ".ts" = ["biome check {file}"]
 ".tsx" = ["biome check {file}"]
+"*" = ["noslop hook file {file}"]
 
 # Stop hooks (triggered when agent loop ends)
 # All commands in the array are executed in parallel.
@@ -393,9 +399,18 @@ What the checker receives, how its exit code is read, which agents receive its c
 
 ## Extension Hook Rules
 
-- Each `{file}` template must contain exactly one `{file}` placeholder.
-- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`, Grok `PostToolUse` with a file path in `toolInput`, and Antigravity `PostToolUse` when the hook entry passes `--event PostToolUse` (the edited path comes from `toolCall.args.TargetFile`). Antigravity's post-hook output is fixed at `{}`, so diagnostics can't be returned there — use Stop hooks when you need the lint text itself.
+- A key is either a file extension starting with `.` (`".rs"`) or `"*"`. There are no glob or file-name keys: any other key, such as `"*.rs"`, `"**"`, `"*.{yml,yaml}"`, `"rs"` (no dot), or `"Makefile"`, is a configuration error, and `claw-hooks check` fails on it.
+- Extensions are matched case-sensitively, so `.RS` does not match `".rs"`. A dotfile such as `.gitignore` counts as having no extension, so only `"*"` applies to it.
+- `"*"` applies to every edited file, including files without an extension (`Makefile`, `Dockerfile`) and dotfiles (`.gitignore`, `.env`).
+- For each file, the commands of the matching extension key run first in the order written, then the `"*"` commands in the order written, so a linter under `"*"` sees the file after the formatter has rewritten it. Where `"*"` appears in the TOML table does not change this order. When one edit changes several files (Codex `apply_patch`), each file goes through this sequence on its own.
+- A command listed under both an extension key and `"*"` runs twice, as written; duplicates are not removed. When the two strings are exactly equal, `claw-hooks check` prints a warning (the config is still valid), and the same warning goes to the debug log when the hook runs. This catches a command left under an extension key after it was moved to `"*"`.
+- Each command template must contain exactly one `{file}` placeholder, and `{file}` cannot be the program itself.
+- Runs on post-save/post-edit only: Claude `PostToolUse` (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`), Cursor `afterFileEdit`, Windsurf `post_write_code`, Codex `PostToolUse` with `apply_patch`, Grok `PostToolUse` with a file path in `toolInput`, and Antigravity `PostToolUse` when the hook entry passes `--event PostToolUse` (the edited path comes from `toolCall.args.TargetFile`). Antigravity's post-hook output is fixed at `{}`, so diagnostics can't be returned there — use Stop hooks when you need the lint text itself.
 - Codex `PostToolUse` + `Bash` passes through; `apply_patch` is parsed for changed file paths (delete-only patches are skipped).
 - Grok `PostToolUse` runs the hooks whenever `toolInput` carries `file_path` / `filePath`, so formatters still rewrite the file. Grok ignores post-hook stdout, though, so the lint text itself is not returned to the agent.
-- Paths with `../`, shell redirection (`<`, `>`), tabs, newlines, or NUL bytes are rejected. Agent payloads missing required fields fail closed.
+- A file path is rejected when it contains `../`, starts with `-`, or contains any of `` ` ``, `$`, `|`, `&`, `;`, `<`, `>`, `%`, `!`, `^`, `"`, a tab, a newline, or NUL. None of that file's commands start, and the agent receives a single `[ERROR] <reason>` for the file rather than one per command. Agent payloads missing required fields fail closed.
+- `hook_timeout` applies to each command separately, and the output returned to the agent is truncated at `output_max_length`.
 - Successful no-op formatter/linter notices are not returned to the agent. Output that reports a rewritten file, a warning, or a failure remains visible; command labels expose only the configured program name, not the expanded file path or argument summary.
+- Extension hooks, `"*"` included, are read from the global config only. `extension_hooks` in a project `.claw-hooks.toml` is ignored with a warning (see [Per-Project Configuration](#per-project-configuration)).
+
+> **What to run under `"*"`.** `"*"` is meant for a tool that decides for itself which files to check and prints nothing for files it skips or finds clean, such as `noslop hook file {file}`. With such a tool, the list of target extensions lives only in the tool's own configuration instead of in both places. Because `"*"` commands start on every edit and receive binary and very large files too, pick tools that finish quickly on files they do not handle.

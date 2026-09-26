@@ -67,7 +67,8 @@ pub struct Config {
     #[serde(default)]
     pub custom_filters: Vec<CustomFilter>,
 
-    /// 拡張子ベースのフック（マップ形式: ".ext" = ["cmd1", "cmd2"]）
+    /// 拡張子ベースのフック（マップ形式: ".ext" = ["cmd1", "cmd2"]）。
+    /// キー `"*"` のコマンドはすべてのファイルに、拡張子のキーのコマンドの後で当てる
     #[serde(default)]
     pub extension_hooks: BTreeMap<String, Vec<String>>,
 

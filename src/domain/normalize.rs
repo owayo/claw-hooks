@@ -138,8 +138,8 @@ pub fn strip_ansi_codes(input: &str) -> String {
 ///   見える「最後の状態」だけに圧縮（Godot のヘッドレス import やダウンロード系
 ///   ツールが進捗バーを `\r` で繰り返し上書きするケースを集約）
 /// - 共通の絶対パスプレフィックスを除去（例: `/home/user/GitHub/project/`）
-/// - 各行の先頭・末尾の空白を除去
-/// - 連続する空白（スペースとタブ）を1つのスペースに圧縮
+/// - 通常の診断行は先頭・末尾の空白を除去し、連続する空白を1つに圧縮
+///   （行番号付きソース抜粋のコード本体と unified diff の全コード行は保持）
 /// - biome の重複行番号 `X X │ text` (X 同一) を `X │ text` に圧縮
 ///   - unchanged context line では old/new が同一整数になるため redundant
 ///   - old != new のときは情報として保持する
@@ -178,11 +178,31 @@ pub fn normalize_lint_output(output: &str) -> String {
 
     let mut lines = Vec::new();
     let mut prev_blank = false;
+    let mut in_unified_diff = false;
 
     for line in stripped.lines() {
         // キャリッジリターンで上書きされた進捗表示は、端末で最後に見える状態
         // （最後の `\r` 以降の非空セグメント）だけを残す。途中経過と制御文字を捨てる。
         let line = collapse_carriage_return(line);
+        // rustfmt は `Diff in ...`、一般的な unified diff は `@@ ...` の後に
+        // 先頭 1 文字をマーカーとする文脈行を出す。文脈行の空白もコードそのもの。
+        if line.starts_with("Diff in ") || line.starts_with("@@ ") {
+            in_unified_diff = true;
+        } else if in_unified_diff {
+            if line.starts_with([' ', '+', '-']) {
+                if line.trim().is_empty() {
+                    if !prev_blank && !lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    prev_blank = true;
+                } else {
+                    lines.push(line.to_string());
+                    prev_blank = false;
+                }
+                continue;
+            }
+            in_unified_diff = false;
+        }
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
@@ -193,7 +213,19 @@ pub fn normalize_lint_output(output: &str) -> String {
             continue;
         }
         prev_blank = false;
-        let collapsed = collapse_whitespace(trimmed);
+        // 診断のソース抜粋と unified diff では空白もコードの一部。
+        // 全体を trim/圧縮するとインデントや文字列リテラルを別のコードに変えてしまう。
+        let line = line.trim_start();
+        if is_unified_diff_content_line(line) {
+            lines.push(line.to_string());
+            continue;
+        }
+        let line = if source_line_body_offset(line).is_some() {
+            line
+        } else {
+            line.trim_end()
+        };
+        let collapsed = collapse_whitespace_outside_source_body(line);
         let collapsed = collapse_duplicate_diff_context_line_number(&collapsed);
         let collapsed = collapse_repeated_chars_outside_source_body(&collapsed);
         let collapsed = collapse_space_separated_decorative(&collapsed);
@@ -223,6 +255,23 @@ pub fn normalize_lint_output(output: &str) -> String {
     let lines = collapse_repeated_prefix_lines(lines);
 
     lines.join("\n")
+}
+
+/// formatter の追加・削除行を判定する。位置マーカー（`-->`）は対象外。
+fn is_unified_diff_content_line(line: &str) -> bool {
+    line.starts_with('+')
+        || (line.starts_with('-') && !line.trim_start_matches('-').starts_with('>'))
+}
+
+/// 行番号付きのソース抜粋では、区切りより後の空白をそのまま残す。
+fn collapse_whitespace_outside_source_body(line: &str) -> String {
+    match source_line_body_offset(line) {
+        Some(offset) => {
+            let (head, body) = line.split_at(offset);
+            format!("{}{}", collapse_whitespace(head), body)
+        }
+        None => collapse_whitespace(line),
+    }
 }
 
 /// 診断が併記されているときにだけ冗長になるツールの集計行・締めの行を除去する。
@@ -1658,6 +1707,35 @@ mod tests {
             result.contains("<!-- note -->"),
             "コメント終端を壊してはいけない: {result}"
         );
+    }
+
+    #[test]
+    fn test_normalize_preserves_source_excerpt_whitespace() {
+        // インデントと文字列内の空白は診断対象のコードそのものなので維持する。
+        let input = "3 │     if enabled:\n4 │         print(\"a  b\")  ";
+        assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_preserves_unified_diff_whitespace() {
+        // formatter の差分行では、空白の違い自体が修正内容になる。
+        let input = "Diff in /tmp/a.rs:1:\n-    let text = \"a  b\";\n+    let text = \"a b\";";
+        assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_preserves_unified_diff_context_whitespace() {
+        // rustfmt の文脈行は先頭 1 文字が差分マーカーで、残りは実際のコード。
+        let input = "Diff in /tmp/a.rs:1:\n fn main() {\n     let label = \"a  b\";\n-    println!(\"{}\",label);\n+    println!(\"{}\", label);\n }";
+        assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_resumes_prose_compression_after_unified_diff() {
+        // hunk 終了後の通常の診断行には、従来の空白圧縮を再適用する。
+        let input = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n  let text = \"a  b\";\n-    old();\n+    new();\nwarning:   inspect result";
+        let expected = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n  let text = \"a  b\";\n-    old();\n+    new();\nwarning: inspect result";
+        assert_eq!(normalize_lint_output(input), expected);
     }
 
     #[test]
@@ -3300,7 +3378,7 @@ undocumented-public-module: Missing docstring in public module\n\
             "context line should appear once: {result}"
         );
         assert_eq!(
-            result.matches("7 | y = 2").count(),
+            result.matches("7 |     y = 2").count(),
             1,
             "context line should appear once: {result}"
         );

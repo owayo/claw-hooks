@@ -86,25 +86,13 @@ pub(crate) fn program_label(program: &str) -> &str {
 }
 
 /// Unix で子プロセスを新しいプロセスグループに配置する。
-/// `Command::process_group(0)` 相当の挙動を `pre_exec` 経由で安定 API のみで実現する。
-/// （`process_group` は Rust 1.64 以降で安定化済みだが、明示的な意図を残すため pre_exec を使う）
 ///
 /// 効果: プロセスグループID == 子プロセスPID となるため、子の孫プロセス
 /// （例: `sh -c 'sleep 600'` の `sleep`）も同じプロセスグループに属し、
 /// `killpg(pid, SIGKILL)` でグループ全体を停止できる。
 #[cfg(unix)]
 fn configure_unix_process_group(cmd: &mut Command) {
-    // Safety: pre_exec で呼ぶ関数は async-signal-safe である必要がある。
-    // setpgid(0, 0) は POSIX の async-signal-safe 関数として規定されている。
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
+    cmd.process_group(0);
 }
 
 /// Unix で子プロセスのプロセスグループ全体を SIGKILL で停止する。

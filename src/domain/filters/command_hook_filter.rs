@@ -128,6 +128,108 @@ enum Verdict {
     Skipped,
 }
 
+/// 1 回のイベントに閉じた実行管理と結果。上限は hook ごとではなくイベント全体に適用する。
+#[derive(Default)]
+struct JudgeState {
+    seen: HashSet<(usize, String)>,
+    matched: usize,
+    runs: usize,
+    skipped: usize,
+    advice: Vec<String>,
+}
+
+impl JudgeState {
+    /// 同じ (hook, 入力) は 1 回だけ実行する。重複は実行枠を消費しない。
+    fn run_once(
+        &mut self,
+        index: usize,
+        hook: &PreparedHook,
+        event: &EventContext<'_>,
+        invocation: &Invocation,
+    ) -> Option<Verdict> {
+        self.matched += 1;
+        let request = match event.request_json(invocation) {
+            Ok(request) => request,
+            // 文字列・真偽値・数値だけの構造体なので実際には失敗しない
+            Err(_) => return Some(Verdict::Failed("its input could not be built".to_string())),
+        };
+        if !self.seen.insert((index, request.clone())) {
+            return None;
+        }
+        if self.runs >= MAX_JUDGE_RUNS {
+            return Some(Verdict::Skipped);
+        }
+        self.runs += 1;
+        Some(CommandHookFilter::run_judge(hook, &event.dir, request))
+    }
+
+    /// 結果を蓄積する。拒否だけを即座に返し、それ以降の判定器を起動させない。
+    fn record(&mut self, hook: &PreparedHook, verdict: Verdict) -> Option<Decision> {
+        match verdict {
+            Verdict::Pass => {}
+            Verdict::Advice(text) => {
+                debug!(
+                    "💬 Command hook [{}] returned advice ({} bytes)",
+                    hook.label,
+                    text.len()
+                );
+                self.advice.push(format!("[{}] {}", hook.label, text));
+            }
+            Verdict::Deny(reason) => {
+                info!(
+                    "🚫 Command hook [{}] denied the command (reason {} bytes)",
+                    hook.label,
+                    reason.len()
+                );
+                return Some(Decision::Block {
+                    message: format!("[{}] {}", hook.label, reason),
+                });
+            }
+            Verdict::Failed(desc) => {
+                let message = format!("command hook failed: {desc}");
+                match hook.on_error {
+                    CommandHookErrorPolicy::Block => {
+                        return Some(CommandHookFilter::block_on_error(hook, &message));
+                    }
+                    CommandHookErrorPolicy::Allow => warn!(
+                        "⚠️ Command hook [{}] {} (on_error=allow, the command is allowed)",
+                        hook.label, message
+                    ),
+                }
+            }
+            Verdict::Skipped => match hook.on_error {
+                CommandHookErrorPolicy::Block => {
+                    return Some(CommandHookFilter::block_on_error(hook, SKIPPED_TOO_MANY));
+                }
+                // 起動しない分は件数が多くなり得るので、警告は最後にまとめて 1 回出す
+                CommandHookErrorPolicy::Allow => self.skipped += 1,
+            },
+        }
+        None
+    }
+
+    /// 拒否が無かったイベントを完了し、集約した補足だけを返す。
+    fn finish(self) -> Decision {
+        if self.skipped > 0 {
+            warn!(
+                "⚠️ {} command hook check(s) not run: {} (on_error=allow, the command is allowed)",
+                self.skipped, SKIPPED_TOO_MANY
+            );
+        }
+        debug!(
+            "🪝 Command hooks: matched={} runs={} advice={}",
+            self.matched,
+            self.runs,
+            self.advice.len()
+        );
+        if self.advice.is_empty() {
+            Decision::allow()
+        } else {
+            Decision::allow_with_context(self.advice.join("\n"))
+        }
+    }
+}
+
 /// 判定器の作業ディレクトリ。
 enum JudgeDir {
     /// エージェントが cwd を報告しなかった。claw-hooks の cwd を継承する。
@@ -340,11 +442,7 @@ impl CommandHookFilter {
         }
 
         let event = EventContext::new(input, self.agent);
-        let mut seen: HashSet<(usize, String)> = HashSet::new();
-        let mut advice: Vec<String> = Vec::new();
-        let mut matched = 0usize;
-        let mut runs = 0usize;
-        let mut skipped = 0usize;
+        let mut state = JudgeState::default();
 
         for invocation in &analysis.invocations {
             // 実在しない可能性がある過大近似は渡さない（存在しない呼び出しへの拒否・補足になる）
@@ -360,86 +458,15 @@ impl CommandHookFilter {
                 if hook.key != key {
                     continue;
                 }
-                matched += 1;
-
-                let verdict = match event.request_json(invocation) {
-                    Ok(request) => {
-                        // 同じ (hook, 入力) は結果も同じなので 1 回だけ実行する
-                        if !seen.insert((index, request.clone())) {
-                            continue;
-                        }
-                        if runs >= MAX_JUDGE_RUNS {
-                            Verdict::Skipped
-                        } else {
-                            runs += 1;
-                            Self::run_judge(hook, &event.dir, request)
-                        }
-                    }
-                    // 文字列・真偽値・数値だけの構造体なので実際には失敗しない
-                    Err(_) => Verdict::Failed("its input could not be built".to_string()),
-                };
-
-                match verdict {
-                    Verdict::Pass => {}
-                    Verdict::Advice(text) => {
-                        debug!(
-                            "💬 Command hook [{}] returned advice ({} bytes)",
-                            hook.label,
-                            text.len()
-                        );
-                        advice.push(format!("[{}] {}", hook.label, text));
-                    }
-                    Verdict::Deny(reason) => {
-                        info!(
-                            "🚫 Command hook [{}] denied the command (reason {} bytes)",
-                            hook.label,
-                            reason.len()
-                        );
-                        return Decision::Block {
-                            message: format!("[{}] {}", hook.label, reason),
-                        };
-                    }
-                    Verdict::Failed(desc) => {
-                        let message = format!("command hook failed: {desc}");
-                        match hook.on_error {
-                            CommandHookErrorPolicy::Block => {
-                                return Self::block_on_error(hook, &message);
-                            }
-                            CommandHookErrorPolicy::Allow => warn!(
-                                "⚠️ Command hook [{}] {} (on_error=allow, the command is allowed)",
-                                hook.label, message
-                            ),
-                        }
-                    }
-                    Verdict::Skipped => match hook.on_error {
-                        CommandHookErrorPolicy::Block => {
-                            return Self::block_on_error(hook, SKIPPED_TOO_MANY);
-                        }
-                        // 起動しない分は件数が多くなり得るので、警告は最後にまとめて 1 回出す
-                        CommandHookErrorPolicy::Allow => skipped += 1,
-                    },
+                if let Some(verdict) = state.run_once(index, hook, &event, invocation)
+                    && let Some(decision) = state.record(hook, verdict)
+                {
+                    return decision;
                 }
             }
         }
 
-        if skipped > 0 {
-            warn!(
-                "⚠️ {} command hook check(s) not run: {} (on_error=allow, the command is allowed)",
-                skipped, SKIPPED_TOO_MANY
-            );
-        }
-        debug!(
-            "🪝 Command hooks: matched={} runs={} advice={}",
-            matched,
-            runs,
-            advice.len()
-        );
-
-        if advice.is_empty() {
-            Decision::allow()
-        } else {
-            Decision::allow_with_context(advice.join("\n"))
-        }
+        state.finish()
     }
 
     /// 解析を諦めたコマンド（長すぎる・深すぎる）の判定。
@@ -1298,6 +1325,70 @@ mod tests {
         let decision = filter(&[blocking(hook("gws", &run))]).judge(&bash_input(), &analysis);
         assert_eq!(
             expect_block(decision),
+            "[sh] command hook skipped: too many invocations to check"
+        );
+        assert_eq!(runs_recorded(&count), MAX_JUDGE_RUNS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_deduplication_preserves_each_hook_and_invocation_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let order = dir.path().join("order");
+        let first = script(
+            dir.path(),
+            "first.sh",
+            &format!("echo first >> '{}'\necho first\n", order.display()),
+        );
+        let second = script(
+            dir.path(),
+            "second.sh",
+            &format!("echo second >> '{}'\necho second\n", order.display()),
+        );
+        let filter = filter(&[hook("gws", &first), hook("gws", &second)]);
+        let analysis = analysis_of(vec![
+            invocation(&["gws", "a"]),
+            invocation(&["gws", "a"]),
+            invocation(&["gws", "b"]),
+        ]);
+
+        let decision = filter.judge(&bash_input(), &analysis);
+
+        assert_eq!(
+            std::fs::read_to_string(&order).unwrap(),
+            "first\nsecond\nfirst\nsecond\n"
+        );
+        assert_eq!(
+            expect_allow(decision).as_deref(),
+            Some("[sh] first\n[sh] second\n[sh] first\n[sh] second")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_limit_is_shared_across_hooks_and_ignores_duplicates_at_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("count");
+        let run = script(
+            dir.path(),
+            "judge.sh",
+            &format!("echo run >> '{}'\n", count.display()),
+        );
+        let filter = filter(&[hook("gws", &run), blocking(hook("gws", &run))]);
+        let mut invocations: Vec<_> = (0..MAX_JUDGE_RUNS / 2)
+            .map(|i| invocation(&["gws", &format!("item-{i}")]))
+            .collect();
+        // 2 hook × 16 入力で上限。既に検査した入力はここでも拒否の理由にしない。
+        invocations.push(invocations[0].clone());
+        let mut analysis = analysis_of(invocations);
+        assert_eq!(expect_allow(filter.judge(&bash_input(), &analysis)), None);
+        assert_eq!(runs_recorded(&count), MAX_JUDGE_RUNS);
+
+        // 新しいイベントでは枠がリセットされ、未検査の超過入力だけが on_error に従う。
+        std::fs::remove_file(&count).unwrap();
+        analysis.invocations.push(invocation(&["gws", "extra"]));
+        assert_eq!(
+            expect_block(filter.judge(&bash_input(), &analysis)),
             "[sh] command hook skipped: too many invocations to check"
         );
         assert_eq!(runs_recorded(&count), MAX_JUDGE_RUNS);

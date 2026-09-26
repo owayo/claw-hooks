@@ -1,6 +1,6 @@
 [package]
 name = "claw-hooks"
-version = "26.9.103"
+version = "26.9.104"
 edition = "2024"
 # mise.toml で固定した toolchain と同じ値にする (tests/toolchain_sync.rs で検証)。
 # CI はこの版だけでビルド・テストするので、それより古い版への対応は宣言しない。

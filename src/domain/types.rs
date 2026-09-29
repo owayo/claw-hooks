@@ -161,6 +161,13 @@ pub struct AgentProfile {
     /// BeforeCommand（PreToolUse）の Allow に付けた `additional_context` が
     /// エージェントへ届くか。届かない形式ではアダプターが捨てる。
     pub pre_command_context: bool,
+    /// Stop フックの失敗を 1 回だけ再試行できるか。
+    ///
+    /// Stop の Block をエージェントへ返して作業を続けさせ、その後の停止を「継続中の停止」として
+    /// 知らせてくるエージェント（Claude Code / Codex CLI の `stop_hook_active`、Cursor の
+    /// `loop_count`）だけが true。継続中の停止を見分けられないエージェントで再試行を予定すると、
+    /// 予定を消費する機会が無く、次のターンの停止を誤って再試行として扱ってしまう。
+    pub stop_retry: bool,
 }
 
 impl Default for AgentProfile {
@@ -168,6 +175,7 @@ impl Default for AgentProfile {
         Self {
             id: "unknown",
             pre_command_context: false,
+            stop_retry: false,
         }
     }
 }
@@ -306,6 +314,13 @@ pub enum Decision {
     Allow {
         /// エージェントに渡す追加コンテキスト（例: lint 警告）
         additional_context: Option<String>,
+        /// ユーザーに見せる通知（エージェントには渡さない）。
+        ///
+        /// 判定とは独立した情報で、許可を表明するフィールドではない。対応するエージェント
+        /// （Claude Code / Codex CLI の Stop）ではアダプターが `systemMessage` に載せ、
+        /// それ以外の形式では捨てる。`additional_context` と違い会話を継続させないので、
+        /// Stop で「停止は許すが、知らせておくこと」に使う。
+        user_notice: Option<String>,
     },
     /// メッセージ付きで操作をブロック
     Block { message: String },
@@ -313,9 +328,7 @@ pub enum Decision {
 
 impl Default for Decision {
     fn default() -> Self {
-        Decision::Allow {
-            additional_context: None,
-        }
+        Decision::allow()
     }
 }
 
@@ -324,6 +337,7 @@ impl Decision {
     pub fn allow() -> Self {
         Decision::Allow {
             additional_context: None,
+            user_notice: None,
         }
     }
 
@@ -331,6 +345,15 @@ impl Decision {
     pub fn allow_with_context(context: String) -> Self {
         Decision::Allow {
             additional_context: Some(context),
+            user_notice: None,
+        }
+    }
+
+    /// ユーザー向けの通知付き Allow 判定を作成する。
+    pub fn allow_with_notice(notice: String) -> Self {
+        Decision::Allow {
+            additional_context: None,
+            user_notice: Some(notice),
         }
     }
 
@@ -341,9 +364,14 @@ impl Decision {
     /// - PermissionRequest: Codex 専用のため各フォーマットアダプター側で処理する
     /// - AfterFileEdit (PostToolUse): Allow は hookSpecificOutput.additionalContext、Block はトップレベル decision/reason
     /// - Stop: format_claude_output 側で ClaudeStopOutput を使用するため、ここには来ない
+    ///
+    /// `user_notice` はここでは出力しない。ユーザー向け通知を出すのは Stop だけで、
+    /// Stop はこの関数を通らないため（format_claude_output が `systemMessage` に載せる）。
     pub fn into_output(self, event: HookEvent) -> HookOutput {
         match self {
-            Decision::Allow { additional_context } => {
+            Decision::Allow {
+                additional_context, ..
+            } => {
                 let hook_specific_output = match event {
                     // PreToolUse: 判定（permissionDecision）は返さず、Claude 本来の
                     // 権限フローに委ねる。公式仕様では permissionDecision "allow" は
@@ -419,19 +447,40 @@ impl Decision {
     /// 両方にコンテキストがある場合は改行で結合される。
     pub fn merge_context(self, other_context: Option<String>) -> Self {
         match self {
-            Decision::Allow { additional_context } => {
-                let merged = match (additional_context, other_context) {
-                    (Some(a), Some(b)) => Some(format!("{}\n{}", a, b)),
-                    (Some(a), None) => Some(a),
-                    (None, Some(b)) => Some(b),
-                    (None, None) => None,
-                };
-                Decision::Allow {
-                    additional_context: merged,
-                }
-            }
+            Decision::Allow {
+                additional_context,
+                user_notice,
+            } => Decision::Allow {
+                additional_context: join_lines(additional_context, other_context),
+                user_notice,
+            },
             Decision::Block { message } => Decision::Block { message },
         }
+    }
+
+    /// 別の判定からユーザー向け通知をマージする。
+    /// 両方に通知がある場合は改行で結合される。
+    pub fn merge_notice(self, other_notice: Option<String>) -> Self {
+        match self {
+            Decision::Allow {
+                additional_context,
+                user_notice,
+            } => Decision::Allow {
+                additional_context,
+                user_notice: join_lines(user_notice, other_notice),
+            },
+            Decision::Block { message } => Decision::Block { message },
+        }
+    }
+}
+
+/// 2 つの任意の文字列を改行で結合する（片方だけならそのまま）。
+fn join_lines(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(a), Some(b)) => Some(format!("{}\n{}", a, b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
 }
 
@@ -673,7 +722,8 @@ mod tests {
         assert!(matches!(
             decision,
             Decision::Allow {
-                additional_context: None
+                additional_context: None,
+                ..
             }
         ));
     }
@@ -682,7 +732,10 @@ mod tests {
     fn test_decision_merge_context_both_some() {
         let decision = Decision::allow_with_context("first".to_string());
         let merged = decision.merge_context(Some("second".to_string()));
-        if let Decision::Allow { additional_context } = merged {
+        if let Decision::Allow {
+            additional_context, ..
+        } = merged
+        {
             assert_eq!(additional_context, Some("first\nsecond".to_string()));
         } else {
             panic!("Expected Allow");
@@ -693,7 +746,10 @@ mod tests {
     fn test_decision_merge_context_first_some() {
         let decision = Decision::allow_with_context("only".to_string());
         let merged = decision.merge_context(None);
-        if let Decision::Allow { additional_context } = merged {
+        if let Decision::Allow {
+            additional_context, ..
+        } = merged
+        {
             assert_eq!(additional_context, Some("only".to_string()));
         } else {
             panic!("Expected Allow");
@@ -704,7 +760,10 @@ mod tests {
     fn test_decision_merge_context_second_some() {
         let decision = Decision::allow();
         let merged = decision.merge_context(Some("new".to_string()));
-        if let Decision::Allow { additional_context } = merged {
+        if let Decision::Allow {
+            additional_context, ..
+        } = merged
+        {
             assert_eq!(additional_context, Some("new".to_string()));
         } else {
             panic!("Expected Allow");
@@ -715,7 +774,10 @@ mod tests {
     fn test_decision_merge_context_both_none() {
         let decision = Decision::allow();
         let merged = decision.merge_context(None);
-        if let Decision::Allow { additional_context } = merged {
+        if let Decision::Allow {
+            additional_context, ..
+        } = merged
+        {
             assert!(additional_context.is_none());
         } else {
             panic!("Expected Allow");
@@ -733,6 +795,60 @@ mod tests {
         } else {
             panic!("Expected Block");
         }
+    }
+
+    #[test]
+    fn test_decision_merge_notice_keeps_context_and_joins_notices() {
+        // 追加コンテキスト（エージェント向け）と通知（ユーザー向け）は別々にマージする
+        let decision = Decision::allow_with_context("lint".to_string())
+            .merge_notice(Some("first".to_string()))
+            .merge_notice(None)
+            .merge_notice(Some("second".to_string()));
+        match decision {
+            Decision::Allow {
+                additional_context,
+                user_notice,
+            } => {
+                assert_eq!(additional_context.as_deref(), Some("lint"));
+                assert_eq!(user_notice.as_deref(), Some("first\nsecond"));
+            }
+            other => panic!("Expected Allow: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_context_keeps_notice() {
+        let decision = Decision::allow_with_notice("notice".to_string())
+            .merge_context(Some("context".to_string()));
+        match decision {
+            Decision::Allow {
+                additional_context,
+                user_notice,
+            } => {
+                assert_eq!(additional_context.as_deref(), Some("context"));
+                assert_eq!(user_notice.as_deref(), Some("notice"));
+            }
+            other => panic!("Expected Allow: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decision_merge_notice_block_ignores() {
+        let merged = Decision::Block {
+            message: "blocked".to_string(),
+        }
+        .merge_notice(Some("notice".to_string()));
+        assert!(matches!(merged, Decision::Block { message } if message == "blocked"));
+    }
+
+    #[test]
+    fn test_decision_into_output_does_not_emit_user_notice() {
+        // ユーザー向け通知は Stop だけが出し、Stop はこの経路を通らない（アダプターが
+        // systemMessage に載せる）。PostToolUse 等で判定の出力に混ざらないことを固定する
+        let output =
+            Decision::allow_with_notice("notice".to_string()).into_output(HookEvent::AfterFileEdit);
+        let json = serde_json::to_string(&output).unwrap();
+        assert_eq!(json, "{}");
     }
 
     #[test]

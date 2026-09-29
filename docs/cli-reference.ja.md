@@ -1,6 +1,6 @@
 # CLI リファレンス
 
-claw-hooks は stdin からフックイベントを 1 件読み、呼び出し元のエージェント固有の形式で応答します。このページでは、サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力、終了コード、フェイルクローズドの規則、コマンドフックの判定器とのやり取りを説明します。各エージェントへの登録方法は [エージェント統合](integrations.ja.md) にあります。
+claw-hooks は stdin からフックイベントを 1 件読み、呼び出し元のエージェント固有の形式で応答します。このページでは、サブコマンドとオプション、`--format` ごとのペイロードの読み方、イベントごとの出力、終了コード、フェイルクローズドの規則、コマンドフックの判定器とのやり取りを説明します。フックの呼び出しをまたいで残す状態ファイルも扱います。各エージェントへの登録方法は [エージェント統合](integrations.ja.md) にあります。
 
 ## コマンド
 
@@ -8,7 +8,7 @@ claw-hooks は stdin からフックイベントを 1 件読み、呼び出し�
 |---------|------|
 | `hook` (別名: `run`) | stdinからフックイベントを処理 |
 | `init` | デフォルト設定を生成 |
-| `check` | 設定を検証 |
+| `check` | 設定を検証し、設定を不正にはしない問題（`PATH` に無いフックのプログラムなど）を警告する（[設定の検証](configuration.ja.md#設定の検証) を参照） |
 | `version` | バージョンを表示 |
 
 ## オプション
@@ -81,6 +81,8 @@ Claude Code公式フック仕様を使用:
 
 Claude の `Stop` では `stop_hook_active` が必須です。欠落または型不正なら壊れたペイロードとして扱い、stop hook を実行せずセッションの停止を許可します（`{}` + exit `0`）。読み取れないガードを `false` とみなすと stop hook が実行され、報告対象フックの失敗によって `Stop` が無限に再発火し得るためです。
 
+`stop_hook_active: true` は *継続中の停止* を表します。Stop フックに作業を続けさせられた Claude が、もう一度停止したということです。claw-hooks はこの停止では Stop フックを実行しません。例外は、前の停止で予定した 1 回だけの再試行です（[継続中の停止](#継続中の停止) を参照）。
+
 ### Cursor (`--format cursor`)
 
 `hook_event_name` フィールドでイベントを判定します:
@@ -96,7 +98,9 @@ Shell 以外の `preToolUse` を含む未対応の Cursor イベントは、`{"p
 
 ブロックは stdout の `{"permission":"deny", …}` + exit code `0` で返します。Cursor は exit `0` のときだけ stdout の JSON を解釈するため、exit `2` で終了すると「safe-rm を使ってください」という代替案を運ぶ `user_message` が破棄されてしまいます。Claude Code は異なり、現行仕様では全終了コードで有効な stdout JSON を読みますが、exit `2` のブロック効果は上書きできません。
 
-`stop` では Cursor の `loop_count` フィールド（stop hook が自動フォローアップを発火した回数、0 始まり）をループ防止に使用します。1 以上の場合は全 stop hook をスキップします — Claude Code の `stop_hook_active` と同じ役割で、lint 失敗のフィードバックは Cursor の `loop_limit` までループせず 1 回だけエージェントに返ります。
+`afterFileEdit`・`afterTabFileEdit`・`stop` では、空白でない `conversation_id` をセッション ID として使います。見つからない拡張子フックのプログラムの通知をセッションにつき 1 回にするのと、Stop フックの再試行に使います。ほかのイベントではセッション ID を持たないため、Cursor でコマンドフックの判定器が受け取る `session_id` は `null` のままです。
+
+`stop` では Cursor の `loop_count` フィールド（stop hook が自動フォローアップを発火した回数、0 始まり）が、Claude Code の `stop_hook_active` と同じ役割を担います。`0` なら Stop フックを設定どおりに実行します。`1` なら実行しません。ただし、claw-hooks が前の停止で再試行を予定していた場合（ゲートのフックが失敗し、後続のステージを実行しなかった場合）は、その再試行を 1 回だけ実行します。結果にかかわらず返すのは `{}` で、`followup_message` は返しません。`2` 以上なら Stop フックをすべてスキップします。そのため lint 失敗のフィードバックは、Cursor の `loop_limit` までループせず 1 回だけエージェントに返ります（[継続中の停止](#継続中の停止) を参照）。
 
 不正な `stop` ペイロードは、フェイルクローズドにせず停止を許可します（`{}` + exit `0`）。`followup_message` は次のユーザーメッセージとして自動送信されるため、パースできなかったペイロードに対してこれを返すと同じ失敗が延々と再発火します。詳細は [フェイルクローズド動作](#フェイルクローズド動作) を参照してください。
 
@@ -111,6 +115,8 @@ Shell 以外の `preToolUse` を含む未対応の Cursor イベントは、`{"p
 | `post_cascade_response` | Stop |
 
 未対応の Windsurf アクションは `allow` として透過されます。
+
+`post_write_code` では、空白でない `trajectory_id` をセッション ID として使います。これにより、見つからない拡張子フックのプログラムの通知はセッションにつき 1 回になります。
 
 ### Antigravity CLI (`--format agy`)
 
@@ -162,6 +168,8 @@ Antigravity の公式ペイロードにはイベント名フィールドが無�
 | `Stop` | Stop |
 
 Codex は許可・ブロック・フェイルクローズドすべてを exit code `0` で返します（非ゼロはフックインフラ失敗扱い）。イベントごとの出力 JSON は [入出力リファレンス](#入出力リファレンス) を参照。
+
+`Stop` の `stop_hook_active: true` は継続中の停止を表し、Claude Code と同じように扱います（[継続中の停止](#継続中の停止) を参照）。
 
 ### Grok CLI (`--format grok`)
 
@@ -252,22 +260,39 @@ Stdin はエージェント固有のフック JSON（イベント別のペイロ
 |---|---|---|---|
 | Claude Code | PreToolUse | `{}`（判定を返さず、通常の権限フローに委ねる）。コマンドフックが補足を返したときは、判定を付けずに `…additionalContext:"…"` | `…permissionDecision:"deny", permissionDecisionReason:"…"`（exit 0）。パースエラー時は **stderr** にプレーンテキスト、exit 2 |
 | Claude Code | PostToolUse | `{}` または `…additionalContext:"…"`（lint フィードバック） | `{"decision":"block","reason":"…"}` |
-| Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
+| Claude Code | Stop | `{}`。予定した Stop フックの再試行が失敗したときや見送ったときは `{"systemMessage":"…"}`（判定を持たないユーザー向けの警告なので、Claude はそのまま停止する） | `{"decision":"block","reason":"…"}` |
 | Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}`（exit 0 — Cursor は exit 0 のときだけ stdout の JSON を読む） |
-| Cursor | stop | `{}` | `{"followup_message":"…"}` |
+| Cursor | stop | `{}`（再試行の失敗や見送りはここでは知らせない。`followup_message` に載せるとエージェントが作業を続けてしまう） | `{"followup_message":"…"}` |
 | Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** プレーンテキスト（JSON ではない） |
 | Windsurf | post_write_code | `{}`（指摘なし） | exit code 2 + **stderr** プレーンテキスト（lint の指摘。事後フックはブロックできないため、編集はそのまま残る） |
 | Windsurf | post_cascade_response | `{}` | `{}`（非同期事後フックのためブロック不可） |
 | Antigravity | PreToolUse | `{"decision":"allow"}` | `{"decision":"deny","reason":"…"}` |
 | Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}`（仕様上ブロックパス無し） |
 | Antigravity | Stop | `{"decision":"stop"}` | `{"decision":"continue","reason":"…"}`（エージェントループへ再投入、`reason` が system message として注入される） |
-| Codex CLI | 任意 | `{}` または `…additionalContext:"…"` | PreToolUse: `…permissionDecision:"deny",…`。PermissionRequest: `…decision:{behavior:"deny",message:"…"}`。PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
+| Codex CLI | 任意 | `{}` または `…additionalContext:"…"`。Stop では Claude Code と同じく `{"systemMessage":"…"}` もある | PreToolUse: `…permissionDecision:"deny",…`。PermissionRequest: `…decision:{behavior:"deny",message:"…"}`。PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **と** exit 2 |
 | Grok CLI | PostToolUse / Stop / その他のイベント | `{}` | `{}`（事後フックの stdout は無視されるためブロック不可） |
 
 `additionalContext` は、Claude と Codex の `PostToolUse` には lint フィードバックを、Claude と Codex の `PreToolUse` にはコマンドフックの補足を送るチャネルです。Antigravity には `additionalContext` チャネルが無いため、Stop の `"decision":"continue"` で lint フィードバックを送ります。Grok CLI の事後フックには送る手段自体が無く、ツールは実行されても出力はトランスクリプトに残りません。
 
-claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返しません。`{}` + exit `0` は「claw-hooks としては異議なし」を意味し、実際の可否はエージェント本来の権限プロンプト・権限ルールが決めます。Antigravity のイベントスキーマは明示的な判定が必須で、安全な `PreToolUse` は `"allow"`、停止を許可する Stop は再投入しない値 `"stop"` を返します。
+`systemMessage` を返すのは、Claude Code と Codex CLI の許可した `Stop` だけで、`decision` と一緒に返すことはありません。これはユーザーに見せる警告で、判定ではありません。何も承認せず、エージェントに作業を続けさせることもないため、claw-hooks は予定した Stop フックの再試行が失敗したこと、または見送ったことをユーザーに知らせるのに使います（[継続中の停止](#継続中の停止) を参照）。宛先をユーザーにしているのは、停止しようとしているエージェントにメッセージを送っても、作業の続行を求めることにしかならないためです。
+
+claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返しません。`{}` + exit `0`（Claude Code と Codex CLI の `Stop` では `{"systemMessage":"…"}` の場合もあります）は「claw-hooks としては異議なし」を意味し、実際の可否はエージェント本来の権限プロンプト・権限ルールが決めます。Antigravity のイベントスキーマは明示的な判定が必須で、安全な `PreToolUse` は `"allow"`、停止を許可する Stop は再投入しない値 `"stop"` を返します。
+
+### 継続中の停止
+
+*継続中の停止* とは、Stop フックのブロックに続く停止のことです。エージェントは作業を続けさせられ、いま再び停止しようとしています。claw-hooks は継続中の停止では Stop フックを実行しないので、失敗し続ける検査があっても、エージェントがいつまでも止まれなくなることはありません。例外は 1 回だけの再試行で、ゲートのフックが失敗して後続のステージを実行しなかったときに、前の停止で予定します。再試行では失敗した検査をもう一度実行し、通れば実行しなかったステージを始めます。ブロックは返しません（[Stopフックの失敗と再試行](configuration.ja.md#stopフックの失敗と再試行) を参照）。
+
+| エージェント | 継続中の停止 | 再試行の予定 | 再試行の失敗・見送りの表示 |
+|---|---|---|---|
+| Claude Code | `stop_hook_active: true` | する（`session_id` があるとき） | ユーザーに `systemMessage` で表示 |
+| Codex CLI | `stop_hook_active: true` | する（`session_id` があるとき） | ユーザーに `systemMessage` で表示 |
+| Cursor | `loop_count` が `1`（`2` 以上は常にスキップ） | する（`conversation_id` があるとき） | デバッグログのみ |
+| Windsurf | 知らせてこない | しない | — |
+| Antigravity CLI | 知らせてこない | しない | — |
+| Grok CLI | 知らせてこない | しない | — |
+
+再試行を予定するのはメインセッションだけです。また、これらより先に、claw-hooks が自分の Stop フックのプロセスに設定する環境変数 `CLAW_HOOKS_STOP_ACTIVE` を見て、設定されていれば Stop フックをすべてスキップします。エージェントを動かす Stop フックがあっても、再試行かどうかにかかわらず、Stop フックがもう一巡することはありません。
 
 ### 終了コード
 
@@ -399,3 +424,23 @@ Codex CLI で `PreToolUse` と `PermissionRequest` の両方を登録してい�
 ### ログ
 
 デバッグログに残すのは、判定器のプログラム名、一致した呼び出しの数、終了コード、バイト数、所要時間、`on_error` の方針だけです。引数、判定器への入力 JSON、判定器の出力はログに書きません。
+
+## 状態ファイル
+
+claw-hooks はフックイベント 1 件につき 1 プロセスで動きます。呼び出しをまたいで残す必要のある 2 種類の情報は、ユーザーのキャッシュディレクトリの小さなファイルに置きます。リポジトリの中には何も書きません。
+
+| プラットフォーム | ディレクトリ |
+|---|---|
+| macOS | `~/Library/Caches/claw-hooks` |
+| Linux | `$XDG_CACHE_HOME/claw-hooks`（既定は `~/.cache/claw-hooks`） |
+| Windows | `%LOCALAPPDATA%\claw-hooks` |
+
+| サブディレクトリ | 書き込む場面 | 内容 |
+|---|---|---|
+| `notices/` | 拡張子フックのプログラムが見つからないことを、セッションで初めて知らせたとき（[詳細](configuration.ja.md#コマンドを起動できないとき)） | 空のファイル |
+| `stop-retry/` | ゲートの Stop フックが失敗し、再試行を予定したとき（[詳細](configuration.ja.md#次の停止での-1-回だけの再試行)） | `{"version":1,"failed_stage":<ステージ>,"fingerprint":"<16 桁の 16 進数>"}` |
+
+- ファイル名は、キーを FNV-1a 64 でハッシュした 16 桁の 16 進数です。キーはバージョンの印、エージェント、セッション ID で、通知ではさらにプログラム（相対パスのプログラムなら作業ディレクトリも）を加えます。セッション ID・パス・コマンドをそのまま書き出すことはありません。`fingerprint` は `[[stop_hooks]]` の設定のハッシュで、2 回の停止のあいだに設定が変わったら再試行を見送るのに使います。
+- 再試行の記録は、次の継続中の停止が読んだ時点と、同じセッションの次の初回の停止で消します。7 日より古い記録は、新しい記録を書くときに消します。
+- Unix ではディレクトリをモード `0700` で作ります。ディレクトリがシンボリックリンクかディレクトリでない場合と、Unix でほかのユーザーが所有している場合やグループ・ほかのユーザーが書き込める場合は、状態を使いません。そのときは、見つからないプログラムの通知を編集のたびに返し、再試行は予定しません。
+- ディレクトリはいつ消しても構いません。影響は、通知がもう一度出ることと、予定した再試行が無くなり、実行しなかったステージが次のターンの停止まで持ち越されることだけです。

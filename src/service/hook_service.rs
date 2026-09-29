@@ -1084,7 +1084,7 @@ mod tests {
         let config = Config {
             extension_hooks: std::collections::BTreeMap::from([(
                 ".rs".to_string(),
-                vec!["echo lint {file}".to_string()],
+                vec!["echo lint {file}".into()],
             )]),
             ..Config::default()
         };
@@ -1100,7 +1100,9 @@ mod tests {
         };
 
         match service.process(&input) {
-            Decision::Allow { additional_context } => {
+            Decision::Allow {
+                additional_context, ..
+            } => {
                 assert!(
                     additional_context.is_none(),
                     "保存前イベントでは拡張子フックを実行してはならない"

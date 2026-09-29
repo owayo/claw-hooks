@@ -67,10 +67,10 @@ pub struct Config {
     #[serde(default)]
     pub custom_filters: Vec<CustomFilter>,
 
-    /// 拡張子ベースのフック（マップ形式: ".ext" = ["cmd1", "cmd2"]）。
+    /// 拡張子ベースのフック（マップ形式: ".ext" = ["cmd1", { command = "cmd2", condition = {...} }]）。
     /// キー `"*"` のコマンドはすべてのファイルに、拡張子のキーのコマンドの後で当てる
     #[serde(default)]
-    pub extension_hooks: BTreeMap<String, Vec<String>>,
+    pub extension_hooks: BTreeMap<String, Vec<ExtensionHookCommand>>,
 
     /// Stop イベントフック
     #[serde(default)]
@@ -222,25 +222,28 @@ impl Config {
 
         // 拡張子フックと Stop フックはどちらも「任意コマンドの実行」そのものなので、
         // プロジェクト設定からは一切受け付けない（信頼確認なしのコード実行になるため）。
-        if let Some(ref v) = project.extension_hooks
-            && !v.is_empty()
-        {
-            self.warnings.push(format!(
+        // 値は形を問わず受けている（`ProjectConfig` 参照）ので、件数は `ignored_entry_count` で数える。
+        if let Some(ref v) = project.extension_hooks {
+            let count = ignored_entry_count(v, true);
+            if count > 0 {
+                self.warnings.push(format!(
                     "project config: {} extension_hooks entr{} ignored \
                      (extension hooks run arbitrary commands on file edits and are only accepted from the global config)",
-                    v.len(),
-                    if v.len() == 1 { "y was" } else { "ies were" }
+                    count,
+                    if count == 1 { "y was" } else { "ies were" }
                 ));
+            }
         }
-        if let Some(ref v) = project.stop_hooks
-            && !v.is_empty()
-        {
-            self.warnings.push(format!(
+        if let Some(ref v) = project.stop_hooks {
+            let count = ignored_entry_count(v, false);
+            if count > 0 {
+                self.warnings.push(format!(
                     "project config: {} stop_hooks entr{} ignored \
                      (stop hooks run arbitrary commands when the agent stops and are only accepted from the global config)",
-                    v.len(),
-                    if v.len() == 1 { "y was" } else { "ies were" }
+                    count,
+                    if count == 1 { "y was" } else { "ies were" }
                 ));
+            }
         }
         // command hooks も判定器という任意コマンドを、しかもシェルコマンドの実行前に毎回走らせる。
         // 値は形を問わず受けている（`ProjectConfig::command_hooks` 参照）ため、件数は
@@ -329,16 +332,30 @@ pub struct ProjectConfig {
     pub output_max_length: Option<usize>,
     /// 追加のカスタムフィルター（グローバルへ追記。削除・置換は不可）
     pub custom_filters: Option<Vec<CustomFilter>>,
-    /// 拡張子フック（**適用されない**。任意コマンド実行のためグローバル設定限定）
-    pub extension_hooks: Option<BTreeMap<String, Vec<String>>>,
-    /// Stop フック（**適用されない**。任意コマンド実行のためグローバル設定限定）
-    pub stop_hooks: Option<Vec<StopHook>>,
+    /// 拡張子フック（**適用されない**。任意コマンド実行のためグローバル設定限定）。
+    /// 形を問わず受ける理由は `command_hooks` と同じ。
+    pub extension_hooks: Option<toml::Value>,
+    /// Stop フック（**適用されない**。任意コマンド実行のためグローバル設定限定）。
+    /// 形を問わず受ける理由は `command_hooks` と同じ。
+    pub stop_hooks: Option<toml::Value>,
     /// command hooks（**適用されない**。任意コマンド実行のためグローバル設定限定）。
     ///
     /// 型付きで受けると、無視するだけの項目の書き損じ（`run` の欠落など）で
     /// デシリアライズ全体が失敗し、そのディレクトリでは全コマンドがフェイルクローズドで
     /// deny になる。適用しない値で読み込みを落とさないよう、形を問わず受ける。
     pub command_hooks: Option<toml::Value>,
+}
+
+/// プロジェクト設定で無視した項目の件数を数える。
+///
+/// 本来の形（`[[stop_hooks]]` のような配列、`[extension_hooks]` のようなキーの表）なら
+/// その要素数、それ以外の形（書き損じ）は 1 件と数える。
+fn ignored_entry_count(value: &toml::Value, entries_are_table_keys: bool) -> usize {
+    match value {
+        toml::Value::Array(entries) => entries.len(),
+        toml::Value::Table(entries) if entries_are_table_keys => entries.len(),
+        _ => 1,
+    }
 }
 
 /// カスタムコマンドフィルター設定。
@@ -377,9 +394,14 @@ pub struct CustomFilter {
     pub message: String,
 }
 
-/// Stop フックの実行条件。
+/// Stop フック・拡張子フックの実行条件。
 /// 指定されたすべてのフィールドは AND で評価（すべて満たす必要がある）。
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// 未知のフィールドは設定エラーにする。黙って読み飛ばすと、`command_exits` のような
+/// 書き損じが「条件なし」と同じになり、条件で止めたつもりのフックが無条件で走る
+/// （Stop フックのゲートなら検査をすり抜けて後続の stage が走る）。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HookCondition {
     /// このファイルが存在する場合のみフックを実行（cwd からの相対パス）
     #[serde(default)]
@@ -400,40 +422,56 @@ pub struct HookCondition {
 
 impl HookCondition {
     /// 作業ディレクトリに対して条件を評価する。
-    /// 指定されたすべての条件が満たされる場合に true を返す（AND ロジック）。
-    pub fn is_satisfied(&self, cwd: &Path) -> bool {
+    /// 指定されたすべての条件が満たされる場合に `Ok(true)` を返す（AND ロジック）。
+    ///
+    /// ファイルの有無を確かめられなかった場合（権限不足など）は `Err` を返す。
+    /// `Path::exists` のように「無い」へ潰すと、`file_exists` の条件を持つ必須の検査が
+    /// 「条件不成立なので実行しない」になり、Stop フックのゲートを黙ってすり抜けてしまう。
+    pub fn evaluate(&self, cwd: &Path) -> Result<bool, ConditionError> {
         if let Some(ref file) = self.file_exists
-            && !cwd.join(file).exists()
+            && !Self::file_present(cwd, file, "file_exists")?
         {
-            return false;
+            return Ok(false);
         }
         if let Some(ref file) = self.file_not_exists
-            && cwd.join(file).exists()
+            && Self::file_present(cwd, file, "file_not_exists")?
         {
-            return false;
+            return Ok(false);
         }
         if let Some(ref cmd) = self.command_exists
             && !Self::command_in_path(cmd)
         {
-            return false;
+            return Ok(false);
         }
         if let Some(ref cmd) = self.command_not_exists
             && Self::command_in_path(cmd)
         {
-            return false;
+            return Ok(false);
         }
-        true
+        Ok(true)
+    }
+
+    /// `cwd` 基準のファイルの有無を返す。確かめられなければ `Err`。
+    fn file_present(cwd: &Path, file: &str, field: &'static str) -> Result<bool, ConditionError> {
+        cwd.join(file).try_exists().map_err(|e| ConditionError {
+            field,
+            kind: e.kind(),
+        })
     }
 
     /// コマンドが PATH に存在するか確認する。
-    fn command_in_path(cmd: &str) -> bool {
+    ///
+    /// 明示的なパス（`./tool` / `/usr/bin/tool`）はそのファイルを直接確かめる。
+    /// `claw-hooks check` がフックのプログラムの有無を警告するときにも使う
+    /// （条件の評価と同じ解決規則で判定するため）。
+    pub(crate) fn command_in_path(cmd: &str) -> bool {
         if cmd.is_empty() {
             return false;
         }
 
         let command_path = Path::new(cmd);
         // 明示的なパス（"./tool", "/usr/bin/tool", "dir\\tool.exe"）は直接チェック。
-        if command_path.components().count() > 1 || command_path.is_absolute() {
+        if Self::is_explicit_path(cmd) {
             return Self::is_executable_command_file(command_path);
         }
 
@@ -484,6 +522,16 @@ impl HookCondition {
         }
     }
 
+    /// コマンド名が明示的なパス（`./tool` / `/usr/bin/tool` / `dir\tool.exe`）かを判定する。
+    ///
+    /// 明示的なパスは PATH を検索せず、そのファイルを直接確かめる（`command_in_path`）。
+    /// `claw-hooks check` の警告を「PATH に無い」と「設定したパスに無い」で書き分けるのにも
+    /// 使う（同じ判定で書き分けないと、確かめ方と文面が食い違う）。
+    pub(crate) fn is_explicit_path(cmd: &str) -> bool {
+        let command_path = Path::new(cmd);
+        command_path.components().count() > 1 || command_path.is_absolute()
+    }
+
     /// パスがコマンドとして実行可能な通常ファイルか確認する。
     fn is_executable_command_file(path: &Path) -> bool {
         #[cfg(unix)]
@@ -496,6 +544,118 @@ impl HookCondition {
         {
             path.is_file()
         }
+    }
+}
+
+/// 実行条件を評価できなかったこと（ファイルの有無を確かめられない等）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConditionError {
+    /// 評価できなかった条件のフィールド名（`file_exists` 等）。
+    pub field: &'static str,
+    /// 失敗の種類。パスは含めない（ログとエージェント向けの文面に残さないため）。
+    pub kind: std::io::ErrorKind,
+}
+
+impl std::fmt::Display for ConditionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not evaluate condition.{} ({})",
+            self.field, self.kind
+        )
+    }
+}
+
+/// 拡張子フックの 1 コマンド。
+///
+/// 設定ではコマンド文字列か、実行条件付きのテーブルで書く:
+///
+/// ```toml
+/// [extension_hooks]
+/// ".go" = [
+///   "gofmt -w {file}",
+///   { command = "golangci-lint run {file}", condition = { command_exists = "golangci-lint" } },
+/// ]
+/// ```
+///
+/// 条件は Stop フックと同じ `HookCondition`（フックプロセスの cwd 基準、AND）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionHookCommand {
+    /// コマンドテンプレート（`{file}` をちょうど 1 回含む）
+    pub command: String,
+    /// 実行条件（任意）。満たさないときはそのコマンドだけを実行しない
+    pub condition: Option<HookCondition>,
+}
+
+impl From<String> for ExtensionHookCommand {
+    fn from(command: String) -> Self {
+        Self {
+            command,
+            condition: None,
+        }
+    }
+}
+
+impl From<&str> for ExtensionHookCommand {
+    fn from(command: &str) -> Self {
+        Self::from(command.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtensionHookCommand {
+    /// 文字列かテーブルかだけをここで振り分け、テーブルの中身は未知のフィールドを拒否する
+    /// 補助の構造体へ任せる。`#[serde(untagged)]` にしないのは、`condtion` のような
+    /// 書き損じが「どの形にも合わない」という手掛かりの無いエラーになるため。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Table {
+            command: String,
+            #[serde(default)]
+            condition: Option<HookCondition>,
+        }
+
+        struct EntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+            type Value = ExtensionHookCommand;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(
+                    "a command string, or a table with `command` and an optional `condition`",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ExtensionHookCommand::from(value))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ExtensionHookCommand::from(value))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let table = Table::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(ExtensionHookCommand {
+                    command: table.command,
+                    condition: table.condition,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(EntryVisitor)
     }
 }
 
@@ -559,6 +719,15 @@ pub struct StopHook {
     #[serde(default)]
     pub report: Option<bool>,
 
+    /// 失敗したら後続の stage を実行しないかどうか（未指定時は true）。
+    ///
+    /// 効くのは結果を待つフック（`report` が true）だけ。`report = false` のフックは
+    /// 結果を取らないので、後続を止める条件にならない。`gate = false` にすると、失敗を
+    /// エージェントへ返しつつ後続の stage も実行する（解析ツールの助言のように、
+    /// commit までは止めたくない検査向け）。
+    #[serde(default)]
+    pub gate: Option<bool>,
+
     /// 実行対象のセッション種別（デフォルト: primary = メインセッションのみ）。
     /// teammate 等のエージェントセッションでも実行したい場合は
     /// "delegated"（エージェントのみ）または "all"（両方）を指定する。
@@ -576,6 +745,12 @@ impl StopHook {
     /// 明示的な `report` 値が優先され、未指定時は `condition` の有無に基づくデフォルト。
     pub fn should_report(&self) -> bool {
         self.report.unwrap_or(self.condition.is_some())
+    }
+
+    /// このフックの失敗で後続の stage を止めるかを判定する。
+    /// 結果を待つフック（`should_report`）で、`gate` が false でないときだけ true。
+    pub fn gates_later_stages(&self) -> bool {
+        self.should_report() && self.gate.unwrap_or(true)
     }
 }
 
@@ -678,7 +853,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -690,7 +865,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     #[test]
@@ -702,7 +877,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -715,7 +890,7 @@ mod tests {
         };
         let cwd = Path::new("/nonexistent-path-xyz");
         // 空文字列と存在しないパスの結合 → 条件不成立
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     // === command_exists テスト ===
@@ -730,7 +905,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -742,7 +917,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new("/tmp");
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     #[test]
@@ -755,7 +930,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -768,7 +943,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     #[test]
@@ -781,7 +956,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     // === file_not_exists / command_not_exists テスト ===
@@ -794,7 +969,7 @@ mod tests {
             ..Default::default()
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -805,7 +980,7 @@ mod tests {
             ..Default::default()
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     #[test]
@@ -816,7 +991,7 @@ mod tests {
             ..Default::default()
         };
         let cwd = Path::new("/tmp");
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -827,7 +1002,7 @@ mod tests {
             ..Default::default()
         };
         let cwd = Path::new("/tmp");
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     #[test]
@@ -839,7 +1014,7 @@ mod tests {
             ..Default::default()
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(false));
     }
 
     // === TOML デシリアライゼーションテスト ===
@@ -1167,9 +1342,53 @@ mod tests {
             condition = { file_exists = "tsconfig.json" }
         "#;
         let pc: ProjectConfig = toml::from_str(toml_str).unwrap();
+        // プロジェクト設定の stop_hooks は適用しないので、形を問わず toml の値のまま受ける
         let hooks = pc.stop_hooks.unwrap();
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0].commands, vec!["pnpm exec tsc --noEmit"]);
+        let entries = hooks.as_array().expect("配列として受ける");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0]["commands"][0].as_str(),
+            Some("pnpm exec tsc --noEmit")
+        );
+    }
+
+    #[test]
+    fn test_project_config_accepts_malformed_stop_and_extension_hooks() {
+        // 適用しない項目の書き損じで、読み込み全体を失敗させない（失敗すると、そのディレクトリの
+        // 全コマンドがフェイルクローズドで deny になる）
+        let toml_str = r#"
+            stop_hooks = "not a table"
+            [extension_hooks]
+            ".rs" = [{ command = "rustfmt {file}", condtion = { file_exists = "x" } }]
+            ".go" = 42
+        "#;
+        let pc: ProjectConfig = toml::from_str(toml_str).unwrap();
+        let mut config = Config::default();
+        config.merge_project(&pc);
+        assert!(config.stop_hooks.is_empty());
+        assert!(config.extension_hooks.is_empty());
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("1 stop_hooks entry was ignored")),
+            "{:?}",
+            config.warnings
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("2 extension_hooks entries were ignored")),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    /// TOML の断片からトップレベルの `key` の値を取り出す（プロジェクト設定の値を作る）。
+    fn toml_value(toml_str: &str, key: &str) -> toml::Value {
+        let table: toml::Table = toml::from_str(toml_str).unwrap();
+        table[key].clone()
     }
 
     // === merge_project テスト ===
@@ -1303,17 +1522,15 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
 
         let project = ProjectConfig {
-            stop_hooks: Some(vec![StopHook {
-                commands: vec!["project-cmd".to_string()],
-                condition: None,
-                stage: None,
-                report: None,
-                session_scope: Default::default(),
-            }]),
+            stop_hooks: Some(toml_value(
+                "[[stop_hooks]]\ncommands = [\"project-cmd\"]\n",
+                "stop_hooks",
+            )),
             ..Default::default()
         };
         config.merge_project(&project);
@@ -1333,14 +1550,13 @@ mod tests {
         let mut config = Config::default();
         config
             .extension_hooks
-            .insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
+            .insert(".rs".to_string(), vec!["rustfmt {file}".into()]);
 
         let project = ProjectConfig {
-            extension_hooks: Some({
-                let mut m = BTreeMap::new();
-                m.insert(".ts".to_string(), vec!["biome check {file}".to_string()]);
-                m
-            }),
+            extension_hooks: Some(toml_value(
+                "[extension_hooks]\n\".ts\" = [\"biome check {file}\"]\n",
+                "extension_hooks",
+            )),
             ..Default::default()
         };
         config.merge_project(&project);
@@ -1403,6 +1619,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         };
         assert_eq!(hook.stage_value(), 5);
@@ -1415,6 +1632,7 @@ mod tests {
             condition: None,
             stage: Some(1),
             report: None,
+            gate: None,
             session_scope: Default::default(),
         };
         assert_eq!(hook.stage_value(), 1);
@@ -1432,6 +1650,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         };
         assert!(hook.should_report());
@@ -1444,6 +1663,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         };
         assert!(!hook.should_report());
@@ -1456,6 +1676,7 @@ mod tests {
             condition: None,
             stage: None,
             report: Some(true),
+            gate: None,
             session_scope: Default::default(),
         };
         assert!(hook.should_report());
@@ -1473,6 +1694,7 @@ mod tests {
             }),
             stage: None,
             report: Some(false),
+            gate: None,
             session_scope: Default::default(),
         };
         assert!(!hook.should_report());
@@ -1609,7 +1831,7 @@ mod tests {
         };
         // 任意のパスで条件を満たす
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     #[test]
@@ -1622,7 +1844,7 @@ mod tests {
             command_not_exists: None,
         };
         let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(condition.is_satisfied(cwd));
+        assert_eq!(condition.evaluate(cwd), Ok(true));
     }
 
     // === merge_project のテスト ===
@@ -1746,17 +1968,17 @@ mod tests {
         // ファイル編集のたびに任意コマンドを実行させられた。
         let mut config = Config {
             extension_hooks: BTreeMap::from([
-                (".rs".to_string(), vec!["rustfmt {file}".to_string()]),
-                (".ts".to_string(), vec!["prettier {file}".to_string()]),
+                (".rs".to_string(), vec!["rustfmt {file}".into()]),
+                (".ts".to_string(), vec!["prettier {file}".into()]),
             ]),
             ..Default::default()
         };
 
         let project = ProjectConfig {
-            extension_hooks: Some(BTreeMap::from([(
-                ".py".to_string(),
-                vec!["black {file}".to_string()],
-            )])),
+            extension_hooks: Some(toml_value(
+                "[extension_hooks]\n\".py\" = [\"black {file}\"]\n",
+                "extension_hooks",
+            )),
             ..Default::default()
         };
         config.merge_project(&project);
@@ -1778,19 +2000,17 @@ mod tests {
                 condition: None,
                 stage: None,
                 report: None,
+                gate: None,
                 session_scope: Default::default(),
             }],
             ..Default::default()
         };
 
         let project = ProjectConfig {
-            stop_hooks: Some(vec![StopHook {
-                commands: vec!["echo project".to_string()],
-                condition: None,
-                stage: None,
-                report: None,
-                session_scope: Default::default(),
-            }]),
+            stop_hooks: Some(toml_value(
+                "[[stop_hooks]]\ncommands = [\"echo project\"]\n",
+                "stop_hooks",
+            )),
             ..Default::default()
         };
         config.merge_project(&project);
@@ -1813,8 +2033,8 @@ mod tests {
 
         let project = ProjectConfig {
             custom_filters: Some(vec![]),
-            stop_hooks: Some(vec![]),
-            extension_hooks: Some(BTreeMap::new()),
+            stop_hooks: Some(toml::Value::Array(Vec::new())),
+            extension_hooks: Some(toml::Value::Table(toml::Table::new())),
             ..Default::default()
         };
         config.merge_project(&project);
@@ -2075,5 +2295,207 @@ mod tests {
                 }
             }
         }
+    }
+
+    // === 拡張子フックのエントリ（文字列 / テーブル）と条件の書き損じ ===
+
+    #[test]
+    fn test_extension_hook_entries_accept_strings_and_tables() {
+        let config: Config = toml::from_str(
+            r#"
+            [extension_hooks]
+            ".go" = [
+              "gofmt -w {file}",
+              { command = "golangci-lint run {file}", condition = { command_exists = "golangci-lint" } },
+              { command = "go vet {file}" },
+            ]
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.extension_hooks[".go"],
+            vec![
+                ExtensionHookCommand::from("gofmt -w {file}"),
+                ExtensionHookCommand {
+                    command: "golangci-lint run {file}".to_string(),
+                    condition: Some(HookCondition {
+                        command_exists: Some("golangci-lint".to_string()),
+                        ..Default::default()
+                    }),
+                },
+                // `condition` の無いテーブルは文字列と同じ
+                ExtensionHookCommand::from("go vet {file}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extension_hook_entry_rejects_unknown_table_field() {
+        // `condtion` の書き損じを読み飛ばすと、条件なし = 無条件で走るエントリになる
+        let err = toml::from_str::<Config>(
+            r#"
+            [extension_hooks]
+            ".go" = [{ command = "golangci-lint run {file}", condtion = { command_exists = "golangci-lint" } }]
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("condtion"), "{err}");
+    }
+
+    #[test]
+    fn test_extension_hook_entry_table_requires_command() {
+        let err = toml::from_str::<Config>(
+            r#"
+            [extension_hooks]
+            ".go" = [{ condition = { command_exists = "golangci-lint" } }]
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("command"), "{err}");
+    }
+
+    #[test]
+    fn test_extension_hook_entry_rejects_other_value_types() {
+        // 文字列でもテーブルでもない値は、書ける形を示して拒否する
+        for value in ["42", "true", r#"["gofmt", "-w"]"#] {
+            let err =
+                toml::from_str::<Config>(&format!("[extension_hooks]\n\".go\" = [{value}]\n"))
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                err.contains("a command string, or a table with `command`"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hook_condition_rejects_unknown_field_in_stop_and_extension_hooks() {
+        // `command_exits` の書き損じが「条件なし」になると、条件で止めたつもりのフックが
+        // 無条件で走る。Stop フックでも拡張子フックでも読み込みエラーにする
+        for toml_str in [
+            r#"
+            [[stop_hooks]]
+            commands = ["cargo clippy"]
+            condition = { command_exits = "cargo" }
+        "#,
+            r#"
+            [extension_hooks]
+            ".go" = [{ command = "golangci-lint run {file}", condition = { command_exits = "golangci-lint" } }]
+        "#,
+        ] {
+            let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+            assert!(err.contains("command_exits"), "{toml_str}\n{err}");
+        }
+    }
+
+    #[test]
+    fn test_hook_condition_evaluate_reports_success_as_ok() {
+        // 評価できた条件は Ok（成り立つ / 成り立たない）で返す
+        let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let present = HookCondition {
+            file_exists: Some("Cargo.toml".to_string()),
+            command_exists: Some("sh".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(present.evaluate(cwd), Ok(true));
+        let absent = HookCondition {
+            file_exists: Some("nonexistent-file-xyz.toml".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(absent.evaluate(cwd), Ok(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hook_condition_evaluate_reports_unverifiable_file_as_error() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // 辿れないディレクトリの中のファイルは有無を確かめられない。「無い」へ潰すと、
+        // file_exists を条件に持つ必須の検査が黙ってスキップされる
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        // root は権限を無視して辿れるので、この状況を作れない
+        if std::fs::metadata(&locked).unwrap().uid() == 0 {
+            return;
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let condition = HookCondition {
+            file_exists: Some("locked/Cargo.toml".to_string()),
+            ..Default::default()
+        };
+        let result = condition.evaluate(dir.path());
+        // TempDir が消せるよう権限を戻してから確かめる
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = result.expect_err("確かめられない条件は Err にする");
+        assert_eq!(
+            error,
+            ConditionError {
+                field: "file_exists",
+                kind: std::io::ErrorKind::PermissionDenied,
+            }
+        );
+        // エージェントやログへ出す文面にパスを含めない
+        assert_eq!(
+            error.to_string(),
+            "could not evaluate condition.file_exists (permission denied)"
+        );
+    }
+
+    #[test]
+    fn test_is_explicit_path() {
+        // 区切りを含む名前・絶対パスは明示的なパス（PATH を検索しない）
+        assert!(!HookCondition::is_explicit_path("golangci-lint"));
+        assert!(HookCondition::is_explicit_path("./tool"));
+        assert!(HookCondition::is_explicit_path("bin/tool"));
+        assert!(HookCondition::is_explicit_path("/usr/local/bin/tool"));
+    }
+
+    #[test]
+    fn test_stop_hook_gate_deserializes_and_gates_only_reported_hooks() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            stop_hooks: Vec<StopHook>,
+        }
+
+        let wrapper: Wrapper = toml::from_str(
+            r#"
+            [[stop_hooks]]
+            commands = ["astro-sight review --dir . --git --hook"]
+            stage = 1
+            report = true
+
+            [[stop_hooks]]
+            commands = ["noslop hook git-diff --max-chars 900"]
+            stage = 1
+            report = true
+            gate = false
+
+            [[stop_hooks]]
+            commands = ["git-sc --all --yes --quiet"]
+            gate = true
+        "#,
+        )
+        .unwrap();
+
+        let hooks = &wrapper.stop_hooks;
+        assert_eq!(
+            hooks.iter().map(|h| h.gate).collect::<Vec<_>>(),
+            vec![None, Some(false), Some(true)]
+        );
+        // 既定は true。gate = false なら止めない。report = false（detached）は gate = true でも止めない
+        assert_eq!(
+            hooks
+                .iter()
+                .map(StopHook::gates_later_stages)
+                .collect::<Vec<_>>(),
+            vec![true, false, false]
+        );
     }
 }

@@ -905,6 +905,7 @@ fn run_hook_with_config_format_and_event(
     config_path: &std::path::Path,
     event: Option<&str>,
 ) -> (String, String, i32) {
+    let state_home = isolated_state_home();
     let mut command = Command::new(env!("CARGO_BIN_EXE_claw-hooks"));
     command
         .arg("run")
@@ -912,6 +913,7 @@ fn run_hook_with_config_format_and_event(
         .arg(format)
         .arg("--config")
         .arg(config_path);
+    isolate_state_dir(&mut command, state_home.path());
     if let Some(event) = event {
         command.arg("--event").arg(event);
     }
@@ -940,10 +942,34 @@ fn run_hook_with_config(json_input: &str, config_path: &std::path::Path) -> (Str
     run_hook_with_config_and_format(json_input, "claude", config_path)
 }
 
+/// フック呼び出しをまたぐ状態（見つからないコマンドの通知の記録・Stop フックの再試行の予定）の
+/// 置き場所に使う一時ディレクトリを作る。
+fn isolated_state_home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("claw-hooks-test-home")
+        .tempdir()
+        .expect("Failed to create temp home")
+}
+
+/// 状態の置き場所（`dirs::cache_dir()`）を一時ディレクトリへ向ける。
+///
+/// claw-hooks はユーザーのキャッシュディレクトリに状態を置くため、テストの実行で開発者の
+/// 実キャッシュを汚さず、テスト同士が状態を共有しないようにする。macOS は `$HOME/Library/Caches`、
+/// Linux は `$XDG_CACHE_HOME` を見る（Windows は環境変数で向け先を変えられないので、
+/// 状態に依存するテストは Unix 限定にする）。
+fn isolate_state_dir(command: &mut Command, home: &std::path::Path) {
+    command
+        .env("HOME", home)
+        .env("XDG_CACHE_HOME", home.join("cache"));
+}
+
 /// 生のバイト列（不正な UTF-8 を含み得る）を stdin に渡して実行し、
 /// `(stdout, exit_code)` を返す。
 fn run_hook_raw_bytes(input: &[u8], format: &str, config_path: &std::path::Path) -> (Vec<u8>, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+    let state_home = isolated_state_home();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_claw-hooks"));
+    isolate_state_dir(&mut command, state_home.path());
+    let mut child = command
         .arg("run")
         .arg("--format")
         .arg(format)

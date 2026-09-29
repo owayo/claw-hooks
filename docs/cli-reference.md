@@ -1,6 +1,6 @@
 # CLI Reference
 
-claw-hooks reads one hook event from stdin and answers in the calling agent's native format. This page covers the subcommands and options, how each `--format` reads its agent's payload, the output for every event, the exit codes, the fail-closed rules, and the protocol between claw-hooks and a command hook's checker. Registering claw-hooks in each agent is covered in [Agent Integration](integrations.md).
+claw-hooks reads one hook event from stdin and answers in the calling agent's native format. This page covers the subcommands and options, how each `--format` reads its agent's payload, the output for every event, the exit codes, the fail-closed rules, the protocol between claw-hooks and a command hook's checker, and the state files claw-hooks keeps between hook calls. Registering claw-hooks in each agent is covered in [Agent Integration](integrations.md).
 
 ## Commands
 
@@ -8,7 +8,7 @@ claw-hooks reads one hook event from stdin and answers in the calling agent's na
 |---------|-------------|
 | `hook` (alias: `run`) | Process hook events from stdin |
 | `init` | Generate default configuration |
-| `check` | Validate configuration |
+| `check` | Validate configuration, and warn about problems that do not make it invalid, such as hook programs missing from `PATH` (see [Checking the Configuration](configuration.md#checking-the-configuration)) |
 | `version` | Show version |
 
 ## Options
@@ -81,6 +81,8 @@ Handled hook events: `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, and `
 
 `stop_hook_active` is required on Claude `Stop`. If it is absent or mistyped, claw-hooks treats the payload as malformed, does not run stop hooks, and allows the session to terminate (`{}` + exit `0`). Defaulting an unreadable guard to `false` would run the hooks and could make a failing reported hook re-trigger `Stop` forever.
 
+`stop_hook_active: true` marks a *continuing* stop: Claude is stopping again after a Stop hook kept it working. claw-hooks runs no stop hooks on such a stop, except the single retry it may have scheduled at the previous stop (see [Continuing Stops](#continuing-stops)).
+
 ### Cursor (`--format cursor`)
 
 Uses the `hook_event_name` field for event detection:
@@ -96,7 +98,9 @@ Unsupported Cursor events, including non-shell `preToolUse` tools, pass through 
 
 Blocks are returned as `{"permission":"deny", …}` on stdout with exit code `0`. Cursor only consumes the stdout JSON when the hook exits `0`, so exiting `2` would discard the `user_message` that carries the "use safe-rm instead" guidance. Claude Code differs here: its current hook contract reads valid stdout JSON on every exit code, while exit `2` remains unconditionally blocking.
 
-For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hook has already triggered, starting at 0) is used for loop prevention: when it is 1 or higher, all stop hooks are skipped — the same role `stop_hook_active` plays for Claude Code, so a failing lint feeds back to the agent once instead of looping up to Cursor's `loop_limit`.
+On `afterFileEdit`, `afterTabFileEdit`, and `stop`, a non-blank `conversation_id` is used as the session ID. It keys the once-per-session notice for a missing extension hook program and the stop hook retry. The other events keep no session ID, so on Cursor the `session_id` a command hook checker receives stays `null`.
+
+For `stop`, Cursor's `loop_count` field (how many automatic follow-ups the stop hooks have already triggered, starting at 0) plays the role `stop_hook_active` plays for Claude Code. At `0`, the stop hooks run as configured. At `1`, they are skipped, unless claw-hooks scheduled a retry at the previous stop because a gating hook failed and left later stages unrun; that retry then runs once and returns `{}` whatever it finds, never another `followup_message`. At `2` or higher, every stop hook is skipped. A failing lint therefore feeds back to the agent once instead of looping up to Cursor's `loop_limit` (see [Continuing Stops](#continuing-stops)).
 
 Malformed `stop` payloads let the stop through (`{}` + exit `0`) instead of failing closed: a `followup_message` is auto-submitted as the next user message, so returning one for a payload claw-hooks could not parse would re-trigger the same failure forever. See [Fail-Closed Behavior](#fail-closed-behavior).
 
@@ -111,6 +115,8 @@ Uses `agent_action_name` field:
 | `post_cascade_response` | Stop |
 
 Unsupported Windsurf actions are passed through as allow.
+
+On `post_write_code`, a non-blank `trajectory_id` is used as the session ID, so a missing extension hook program is reported once per session rather than on every edit.
 
 ### Antigravity CLI (`--format agy`)
 
@@ -162,6 +168,8 @@ Validation is limited to the fields claw-hooks actually reads: the event name, `
 | `Stop` | Stop |
 
 Codex returns all decisions — allow, block, and fail-closed — with exit code `0`; non-zero is treated as hook infrastructure failure. See [Input/Output Reference](#inputoutput-reference) for the per-event output JSON.
+
+On `Stop`, `stop_hook_active: true` marks a continuing stop, handled as on Claude Code (see [Continuing Stops](#continuing-stops)).
 
 ### Grok CLI (`--format grok`)
 
@@ -252,22 +260,39 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 |---|---|---|---|
 | Claude Code | PreToolUse | `{}` (no decision — the normal permission flow still applies), or `…additionalContext:"…"`, still without a decision, when a command hook returns context | `…permissionDecision:"deny", permissionDecisionReason:"…"` (exit 0). Parse errors: plain text on **stderr**, exit 2 |
 | Claude Code | PostToolUse | `{}` or `…additionalContext:"…"` (lint feedback) | `{"decision":"block","reason":"…"}` |
-| Claude Code | Stop | `{}` | `{"decision":"block","reason":"…"}` |
+| Claude Code | Stop | `{}`, or `{"systemMessage":"…"}` when a scheduled stop hook retry failed or was skipped (a warning for the user with no decision, so Claude still stops) | `{"decision":"block","reason":"…"}` |
 | Cursor | preToolUse / beforeShellExecution | `{}` | `{"permission":"deny","user_message":"…","agent_message":"…"}` (exit 0 — Cursor reads the stdout JSON only on exit 0) |
-| Cursor | stop | `{}` | `{"followup_message":"…"}` |
+| Cursor | stop | `{}` (a failed or skipped retry is not reported here: `followup_message` would keep the agent working) | `{"followup_message":"…"}` |
 | Windsurf | pre_run_command | `{}` | exit code 2 + **stderr** plain text (not JSON) |
 | Windsurf | post_write_code | `{}` (no findings) | exit code 2 + **stderr** plain text (lint findings; post-hooks cannot block, so the edit stands) |
 | Windsurf | post_cascade_response | `{}` | `{}` (best-effort post-hook; cannot block) |
 | Antigravity | PreToolUse | `{"decision":"allow"}` | `{"decision":"deny","reason":"…"}` |
 | Antigravity | PostToolUse / PreInvocation / PostInvocation | `{}` | `{}` (spec defines no block path) |
 | Antigravity | Stop | `{"decision":"stop"}` | `{"decision":"continue","reason":"…"}` (re-enters the agent loop, `reason` injected as a system message) |
-| Codex CLI | any | `{}` or `…additionalContext:"…"` | PreToolUse: `…permissionDecision:"deny",…`. PermissionRequest: `…decision:{behavior:"deny",message:"…"}`. PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
+| Codex CLI | any | `{}` or `…additionalContext:"…"`; on Stop, `{"systemMessage":"…"}` as on Claude Code | PreToolUse: `…permissionDecision:"deny",…`. PermissionRequest: `…decision:{behavior:"deny",message:"…"}`. PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
 | Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
 
 `additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`, and command hook context to Claude `PreToolUse` and Codex `PreToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
 
-claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's event schemas require explicit decisions: safe `PreToolUse` returns `"allow"`, while an allowed Stop returns the non-continuing value `"stop"`.
+`systemMessage` appears only on an allowed `Stop` for Claude Code and Codex CLI, and never together with `decision`. It is a warning shown to the user, not a decision: it approves nothing and does not keep the agent working, so claw-hooks uses it to tell the user that a scheduled stop hook retry failed or was skipped (see [Continuing Stops](#continuing-stops)). The notice is meant for the user, since the agent is stopping and a message to it would only ask it to keep going.
+
+claw-hooks never emits an `allow` decision for Claude Code, Cursor, or Grok CLI. `{}` + exit `0` (or `{"systemMessage":"…"}` on a Claude Code or Codex CLI `Stop`) means "claw-hooks has no objection", so the agent's own permission prompts and rules still decide. Antigravity's event schemas require explicit decisions: safe `PreToolUse` returns `"allow"`, while an allowed Stop returns the non-continuing value `"stop"`.
+
+### Continuing Stops
+
+A *continuing* stop is one that follows a Stop hook's block: the agent was kept working and is now stopping again. claw-hooks runs no stop hooks on a continuing stop, so a check that keeps failing cannot keep the agent going forever. The one exception is a single retry, scheduled at the previous stop when a gating hook failed and left later stages unrun: the retry re-runs the failed checks, starts the stages that were not run if the checks pass, and never returns a block (see [Stop Hook Failures and Retry](configuration.md#stop-hook-failures-and-retry)).
+
+| Agent | Continuing stop | Retry scheduled | Failed or skipped retry is shown |
+|---|---|---|---|
+| Claude Code | `stop_hook_active: true` | Yes, when `session_id` is present | To the user, as `systemMessage` |
+| Codex CLI | `stop_hook_active: true` | Yes, when `session_id` is present | To the user, as `systemMessage` |
+| Cursor | `loop_count` of `1` (`2` or more always skips) | Yes, when `conversation_id` is present | Only in the debug log |
+| Windsurf | Not signalled | No | — |
+| Antigravity CLI | Not signalled | No | — |
+| Grok CLI | Not signalled | No | — |
+
+A retry is scheduled only for the main session. Before any of this, the environment variable `CLAW_HOOKS_STOP_ACTIVE`, which claw-hooks sets for its own stop hook processes, still makes every stop hook skip, so a stop hook that drives an agent cannot start another round of stop hooks, retry or not.
 
 ### Exit Codes
 
@@ -399,3 +424,23 @@ A hook matches a call by its program name, so the name has to be written out in 
 ### Logging
 
 Debug logs keep only the checker's program name, the number of matching calls, exit codes, byte counts, durations and the `on_error` policy. The arguments, the input JSON and the checker's output are not written to the log.
+
+## State Files
+
+claw-hooks runs as one process per hook event, so the two things that must outlive a call are kept in small files under the user's cache directory. Nothing is written to the repository.
+
+| Platform | Directory |
+|---|---|
+| macOS | `~/Library/Caches/claw-hooks` |
+| Linux | `$XDG_CACHE_HOME/claw-hooks`, by default `~/.cache/claw-hooks` |
+| Windows | `%LOCALAPPDATA%\claw-hooks` |
+
+| Subdirectory | Written when | Contents |
+|---|---|---|
+| `notices/` | An extension hook program is reported missing for the first time in a session ([details](configuration.md#when-a-command-cannot-be-started)) | An empty file |
+| `stop-retry/` | A gating stop hook failed and a retry was scheduled ([details](configuration.md#one-retry-at-the-next-stop)) | `{"version":1,"failed_stage":<stage>,"fingerprint":"<16 hex digits>"}` |
+
+- Each file is named by a 16-hex-digit hash (FNV-1a 64) of its key: a version tag, the agent, and the session ID, plus the program for a notice (and the working directory when the program is a relative path). Session IDs, paths and commands are never written out. The `fingerprint` is a hash of the `[[stop_hooks]]` configuration, so a retry is skipped when that configuration changed in between.
+- A retry record is deleted when the next continuing stop reads it, and at the next first stop of the same session. Any record older than 7 days is deleted when a new record is written.
+- On Unix the directories are created with mode `0700`. claw-hooks leaves the state unused when the directory is a symbolic link or not a directory, or, on Unix, when another user owns it or the group or others can write to it. Missing-program notices are then returned on every edit, and no retry is scheduled.
+- The directory can be deleted at any time. A notice may then be shown once more, and a scheduled retry is dropped, which leaves the stages that were not run for the next turn's stop.

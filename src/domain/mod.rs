@@ -5,6 +5,7 @@
 //! - Filter トレイトとその実装
 //! - シェルコマンドパーサー
 //! - ローテーション付きロガー
+//! - フック呼び出しをまたいで残す状態の置き場所
 
 pub mod command;
 pub mod filters;
@@ -12,6 +13,7 @@ pub mod invocation;
 pub mod logger;
 pub mod normalize;
 pub mod parser;
+pub mod state_store;
 #[cfg(test)]
 pub mod test_helpers;
 mod types;

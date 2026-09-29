@@ -633,10 +633,12 @@ mod tests {
     const CLAUDE: AgentProfile = AgentProfile {
         id: "claude-code",
         pre_command_context: true,
+        stop_retry: true,
     };
     const CURSOR: AgentProfile = AgentProfile {
         id: "cursor",
         pre_command_context: false,
+        stop_retry: true,
     };
 
     /// 値が静的に確定した語。
@@ -745,7 +747,9 @@ mod tests {
 
     fn expect_allow(decision: Decision) -> Option<String> {
         match decision {
-            Decision::Allow { additional_context } => additional_context,
+            Decision::Allow {
+                additional_context, ..
+            } => additional_context,
             other => panic!("Allow を期待したが {other:?}"),
         }
     }

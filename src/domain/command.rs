@@ -85,6 +85,18 @@ pub(crate) fn program_label(program: &str) -> &str {
         .unwrap_or("<unknown>")
 }
 
+/// エージェントやユーザーへ見せる文面に埋め込むための、プログラムの表示ラベルを返す。
+///
+/// `program_label` と同じくファイル名だけにしたうえで、制御文字（改行・ESC など）を `?` に
+/// 置き換える。設定値に紛れた改行や ANSI エスケープが、ラベルの位置から別の行や色付きの
+/// 文面を偽装できないようにするため。
+pub(crate) fn display_label(program: &str) -> String {
+    program_label(program)
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 /// Unix で子プロセスを新しいプロセスグループに配置する。
 ///
 /// 効果: プロセスグループID == 子プロセスPID となるため、子の孫プロセス
@@ -620,6 +632,14 @@ mod tests {
         assert_eq!(program_label(r"C:\\Users\\private\\tool.exe"), "tool.exe");
         assert_eq!(program_label("cargo"), "cargo");
         assert_eq!(program_label("/"), "<unknown>");
+    }
+
+    #[test]
+    fn test_display_label_replaces_control_characters() {
+        assert_eq!(display_label("/opt/bin/golangci-lint"), "golangci-lint");
+        assert_eq!(display_label("to\nol"), "to?ol");
+        assert_eq!(display_label("\u{1b}[31mred"), "?[31mred");
+        assert_eq!(display_label("/"), "<unknown>");
     }
 
     /// テストヘルパー：追加の環境変数なしでspawnする。

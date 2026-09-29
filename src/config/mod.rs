@@ -12,7 +12,7 @@ pub use types::Config;
 pub use service::ConfigService;
 #[allow(unused_imports)]
 pub(crate) use types::{
-    CommandHook, CommandHookErrorPolicy, CustomFilter, HookCondition, ProjectConfig, StopHook,
-    StopSessionScope,
+    CommandHook, CommandHookErrorPolicy, ConditionError, CustomFilter, ExtensionHookCommand,
+    HookCondition, ProjectConfig, StopHook, StopSessionScope,
 };
 pub use validation::validate;

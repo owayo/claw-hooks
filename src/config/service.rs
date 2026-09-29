@@ -139,11 +139,17 @@ impl ConfigService {
             .validate()
             .with_context(|| format!("Invalid configuration in {}", path.display()))?;
 
-        // エラーにはしないが知らせる点（拡張子のキーと "*" に同じコマンドがある等）。
-        // 拡張子フックはグローバル設定からしか読まないので、プロジェクト設定のマージ前に見る
+        // エラーにはしないが知らせる点（拡張子のキーと "*" に同じコマンドがある、
+        // 結果を待たない Stop フックに gate = true を書いた等）。
+        // どちらのフックもグローバル設定からしか読まないので、プロジェクト設定のマージ前に見る。
+        // フックのプログラムが PATH に有るかは、ここ（フック実行のたびに通る経路）では
+        // 確かめない。`claw-hooks check` だけが確かめる（`validation::validate`）
         config
             .warnings
             .extend(validation::extension_hook_warnings(&config.extension_hooks));
+        config
+            .warnings
+            .extend(validation::stop_hook_warnings(&config.stop_hooks));
 
         // プロジェクトレベルの設定を検索してマージ
         let project_path = project_search_dir.and_then(Self::find_project_config_from);
@@ -337,6 +343,7 @@ impl ConfigService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ExtensionHookCommand;
 
     #[test]
     fn test_default_path_ends_with_config_toml() {
@@ -1181,6 +1188,132 @@ timeout = 0
             config.warnings[0].contains("2 command_hooks entries were ignored"),
             "{:?}",
             config.warnings
+        );
+    }
+
+    // === 拡張子フックの条件付きエントリ・条件の書き損じ・Stop フックの gate ===
+
+    /// グローバル設定を書いて読み込む（プロジェクト設定は探さない）。
+    fn load_global(content: &str) -> Result<Config> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, content).unwrap();
+        ConfigService::load_inner(Some(&config_path), None)
+    }
+
+    #[test]
+    fn test_load_accepts_extension_hook_strings_and_tables() {
+        let config = load_global(
+            r#"
+[extension_hooks]
+".go" = [
+  "gofmt -w {file}",
+  { command = "golangci-lint run {file}", condition = { command_exists = "golangci-lint" } },
+  { command = "claw-hooks-test-missing-vet {file}" },
+]
+"#,
+        )
+        .unwrap();
+
+        let entries = &config.extension_hooks[".go"];
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], ExtensionHookCommand::from("gofmt -w {file}"));
+        assert_eq!(entries[1].command, "golangci-lint run {file}");
+        assert_eq!(
+            entries[1]
+                .condition
+                .as_ref()
+                .and_then(|c| c.command_exists.as_deref()),
+            Some("golangci-lint")
+        );
+        assert_eq!(
+            entries[2],
+            ExtensionHookCommand::from("claw-hooks-test-missing-vet {file}")
+        );
+        // 読み込み（フック実行のたびに通る経路）では、プログラムの有無を確かめない
+        // （PATH に無い claw-hooks-test-missing-vet についての警告が積まれていない）
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn test_load_rejects_extension_hook_entry_with_unknown_field() {
+        // `condtion` の書き損じを読み飛ばすと、条件なし = 無条件で走るエントリになる
+        let err = load_global(
+            r#"
+[extension_hooks]
+".go" = [{ command = "golangci-lint run {file}", condtion = { command_exists = "golangci-lint" } }]
+"#,
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("condtion"), "{message}");
+    }
+
+    #[test]
+    fn test_load_rejects_unknown_condition_field_in_stop_and_extension_hooks() {
+        // `command_exits` の書き損じが「条件なし」になると、条件で止めたつもりのフックが
+        // 無条件で走る（Stop フックのゲートなら検査をすり抜ける）。どちらのフックでも設定エラー
+        for content in [
+            r#"
+[extension_hooks]
+".go" = [{ command = "golangci-lint run {file}", condition = { command_exits = "golangci-lint" } }]
+"#,
+            r#"
+[[stop_hooks]]
+commands = ["cargo clippy"]
+condition = { command_exits = "cargo" }
+report = true
+"#,
+        ] {
+            let err = load_global(content).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("command_exits"), "{content}\n{message}");
+        }
+    }
+
+    #[test]
+    fn test_load_rejects_empty_extension_hook_condition() {
+        let err = load_global(
+            r#"
+[extension_hooks]
+".go" = ["gofmt -w {file}", { command = "golangci-lint run {file}", condition = { file_exists = "" } }]
+"#,
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "extension_hooks['.go']: command[1]: condition.file_exists cannot be empty"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn test_load_records_gate_warning_for_detached_stop_hook() {
+        let config = load_global(
+            r#"
+[[stop_hooks]]
+commands = ["cargo clippy"]
+stage = 1
+report = true
+gate = true
+
+[[stop_hooks]]
+commands = ["git-sc --all --yes --quiet"]
+report = false
+gate = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.warnings,
+            vec![
+                "stop_hooks[1]: gate = true has no effect because the hook is not reported \
+                 (report = false starts it detached, so its result is never checked)"
+                    .to_string()
+            ]
         );
     }
 }

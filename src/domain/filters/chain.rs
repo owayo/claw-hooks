@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::domain::AgentProfile;
 use crate::domain::Decision;
 use crate::domain::HookInput;
+use crate::domain::state_store::StateStore;
 
 use super::{
     CommandHookFilter, CustomCommandFilter, ExtensionHookFilter, Filter, StopHookFilter,
@@ -93,24 +94,29 @@ impl FilterChain {
             )));
         }
 
-        // 拡張子フックフィルターを追加
+        // 拡張子フックフィルターを追加。
+        // 見つからないコマンドの通知を「セッションにつき 1 回」にするため、状態の置き場所と
+        // エージェントの識別子（セッション ID の名前空間）を渡す。
         if !config.extension_hooks.is_empty() {
             let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
-            filters.push(Box::new(ExtensionHookFilter::new(
-                config.extension_hooks.clone(),
-                nano_buddy,
-                config.hook_timeout,
-            )));
+            filters.push(Box::new(
+                ExtensionHookFilter::new(
+                    config.extension_hooks.clone(),
+                    nano_buddy,
+                    config.hook_timeout,
+                )
+                .with_state(agent, StateStore::for_user()),
+            ));
         }
 
-        // ストップフックフィルターを追加
+        // ストップフックフィルターを追加。
+        // 失敗した stage の再試行を次の停止へ引き継ぐため、状態の置き場所とエージェントの性質を渡す。
         if !config.stop_hooks.is_empty() {
             let nano_buddy = cfg!(target_os = "macos") && config.nano_buddy;
-            filters.push(Box::new(StopHookFilter::new(
-                config.stop_hooks.clone(),
-                nano_buddy,
-                config.hook_timeout,
-            )));
+            filters.push(Box::new(
+                StopHookFilter::new(config.stop_hooks.clone(), nano_buddy, config.hook_timeout)
+                    .with_state(agent, StateStore::for_user()),
+            ));
         }
 
         // サブエージェントフィルターを追加（SubagentStart/SubagentStop用のNanoBuddy通知）
@@ -134,9 +140,14 @@ impl FilterChain {
                 let decision = filter.execute(input);
                 match decision {
                     Decision::Block { .. } => return decision,
-                    // 全Allow判定のadditional_contextを改行区切りでマージする
-                    Decision::Allow { additional_context } => {
-                        result = result.merge_context(additional_context);
+                    // 全Allow判定のadditional_contextとユーザー向け通知を改行区切りでマージする
+                    Decision::Allow {
+                        additional_context,
+                        user_notice,
+                    } => {
+                        result = result
+                            .merge_context(additional_context)
+                            .merge_notice(user_notice);
                     }
                 }
             }
@@ -299,7 +310,9 @@ mod tests {
         let input = make_bash_input("echo hello");
         let decision = chain.execute(&input);
         match decision {
-            Decision::Allow { additional_context } => {
+            Decision::Allow {
+                additional_context, ..
+            } => {
                 assert!(additional_context.is_none());
             }
             _ => panic!("Expected Allow"),
@@ -364,6 +377,7 @@ mod tests {
         let agent = AgentProfile {
             id: "claude-code",
             pre_command_context: true,
+            stop_retry: true,
         };
         assert!(has_command_hooks(&FilterChain::with_agent(&config, agent)));
     }
@@ -411,11 +425,14 @@ mod tests {
         let agent = AgentProfile {
             id: "codex",
             pre_command_context: true,
+            stop_retry: true,
         };
         let chain = FilterChain::with_agent(&config, agent);
 
         match chain.execute(&make_bash_input("gws docs create")) {
-            Decision::Allow { additional_context } => {
+            Decision::Allow {
+                additional_context, ..
+            } => {
                 assert_eq!(additional_context.as_deref(), Some("[sh] check the draft"));
             }
             other => panic!("補足付きの Allow を期待したが {other:?}"),
@@ -445,11 +462,14 @@ mod tests {
         let agent = AgentProfile {
             id: "claude-code",
             pre_command_context: true,
+            stop_retry: true,
         };
         let chain = FilterChain::with_agent(&config, agent);
 
         match chain.execute(&make_bash_input("gws docs")) {
-            Decision::Allow { additional_context } => {
+            Decision::Allow {
+                additional_context, ..
+            } => {
                 assert_eq!(additional_context.as_deref(), Some("[sh] still judged"));
             }
             other => panic!("判定器の補足付きの Allow を期待したが {other:?}"),

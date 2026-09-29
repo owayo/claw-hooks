@@ -145,6 +145,20 @@ fn reported_cwd(value: Option<&serde_json::Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// セッション（会話）の識別子として報告された値を取り出す。
+///
+/// 文字列以外と空白のみの文字列は「報告なし」として `None` にする。セッション識別子は
+/// 判定そのものには使わない補助情報（フック呼び出しをまたぐ状態のキー: 見つからない
+/// コマンドの通知の抑止、Stop フックの再試行の記録）なので、`reported_cwd` と同じく
+/// 型の食い違いでパース全体を落とさない。無いときは状態を使わない側（毎回通知する・
+/// 再試行を予定しない）に倒れるだけで済む。
+fn reported_session_id(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
+
 /// フォーマット固有のI/Oと内部型を変換するアダプター。
 pub struct FormatAdapter {
     format: Format,
@@ -188,18 +202,26 @@ impl FormatAdapter {
     /// テストで全形式を突き合わせて固定している）。
     /// - Claude Code / Codex: PreToolUse の `hookSpecificOutput.additionalContext` で届く
     /// - Cursor / Windsurf / Antigravity / Grok: 実行前フックに判定なしの補足経路が無く、捨てる
+    ///
+    /// `stop_retry` は「Stop の Block で作業を続けさせ、その後の停止を継続中の停止として
+    /// 知らせてくるか」で、Stop フックの再試行を予定してよいエージェントかを表す。
+    /// - Claude Code / Codex: `stop_hook_active` で知らせる
+    /// - Cursor: `loop_count` で知らせる
+    /// - Windsurf / Grok: Stop の Block がエージェントへ届かない（事後フック）
+    /// - Antigravity: Stop の入力に継続中を示すフィールドが無い
     pub fn agent_profile(&self) -> AgentProfile {
-        let (id, pre_command_context) = match self.format {
-            Format::Claude => ("claude-code", true),
-            Format::Codex => ("codex", true),
-            Format::Cursor => ("cursor", false),
-            Format::Windsurf => ("windsurf", false),
-            Format::Agy => ("antigravity", false),
-            Format::Grok => ("grok", false),
+        let (id, pre_command_context, stop_retry) = match self.format {
+            Format::Claude => ("claude-code", true, true),
+            Format::Codex => ("codex", true, true),
+            Format::Cursor => ("cursor", false, true),
+            Format::Windsurf => ("windsurf", false, false),
+            Format::Agy => ("antigravity", false, false),
+            Format::Grok => ("grok", false, false),
         };
         AgentProfile {
             id,
             pre_command_context,
+            stop_retry,
         }
     }
 
@@ -987,17 +1009,24 @@ impl FormatAdapter {
     fn format_claude_output(&self, decision: &Decision, event: HookEvent) -> Result<String> {
         // Stop イベントでは Block 時に "decision":"block" + "reason" を使用。
         // Allow 時は decision を省略（"Omit to allow Claude to stop"）。
+        // Allow に付いたユーザー向け通知は `systemMessage`（ユーザーに見せる警告）で返す。
+        // `hookSpecificOutput.additionalContext` は Stop では会話を継続させるので使わない。
         if event == HookEvent::Stop {
             let output = match decision {
-                Decision::Allow { .. } => ClaudeStopOutput {
+                Decision::Allow { user_notice, .. } => ClaudeStopOutput {
                     decision: None,
                     reason: None,
+                    system_message: user_notice
+                        .as_ref()
+                        .filter(|notice| !notice.trim().is_empty())
+                        .map(|notice| truncate_output(notice, self.output_max_length)),
                 },
                 Decision::Block { message } => {
                     let truncated = self.normalize_and_truncate(message);
                     ClaudeStopOutput {
                         decision: Some("block".to_string()),
                         reason: Some(truncated),
+                        system_message: None,
                     }
                 }
             };
@@ -1171,11 +1200,14 @@ impl FormatAdapter {
         if parsed.file_path.trim().is_empty() {
             return Err(anyhow!("Missing file_path for Cursor afterFileEdit"));
         }
+        // 見つからないコマンドの通知をセッションにつき 1 回にするキーに使う
+        let session_id = reported_session_id(parsed.conversation_id.as_ref());
 
         debug!(
             agent = self.format.label(),
             hook_type = event_name,
             file_path_bytes = parsed.file_path.len(),
+            has_session_id = session_id.is_some(),
             mapped_event = ?HookEvent::AfterFileEdit,
             mapped_tool = "Write",
             "{} parsed input", self.log_prefix()
@@ -1188,7 +1220,7 @@ impl FormatAdapter {
                 file_path: parsed.file_path,
                 content: None,
             }),
-            session_id: None,
+            session_id,
         })
     }
 
@@ -1196,12 +1228,15 @@ impl FormatAdapter {
     fn parse_cursor_stop(&self, raw: serde_json::Value) -> Result<HookInput> {
         let parsed: CursorStopInput = serde_json::from_value(raw)
             .map_err(|e| anyhow!("Failed to parse Cursor stop: {}", e))?;
+        // Stop フックの再試行の記録（`loop_count` = 1 の停止で 1 回だけ使う）のキーに使う
+        let session_id = reported_session_id(parsed.conversation_id.as_ref());
 
         debug!(
             agent = self.format.label(),
             hook_type = "stop",
             status = ?parsed.status,
             loop_count = ?parsed.loop_count,
+            has_session_id = session_id.is_some(),
             mapped_event = ?HookEvent::Stop,
             "{} parsed input", self.log_prefix()
         );
@@ -1218,7 +1253,7 @@ impl FormatAdapter {
                 // Cursor にはセッション種別を判別する入力フィールドが無いため常にメイン扱い
                 session_kind: crate::domain::StopSessionKind::Primary,
             }),
-            session_id: None,
+            session_id,
         })
     }
 
@@ -1422,6 +1457,16 @@ impl FormatAdapter {
             }
         };
 
+        // 会話の識別子は保存後フック（post_write_code）にだけ付ける。見つからないコマンドの
+        // 通知をセッションにつき 1 回にするキーに使う。pre_run_command の session_id は
+        // command hooks の判定器へ渡る入力なので変えない。post_cascade_response（Stop）は
+        // Block がエージェントへ届かず、再試行の記録を作らないので要らない。
+        let session_id = if event == HookEvent::AfterFileEdit {
+            reported_session_id(windsurf_input.trajectory_id.as_ref())
+        } else {
+            None
+        };
+
         debug!(
             agent = self.format.label(),
             agent_action_name = %windsurf_input.agent_action_name,
@@ -1432,6 +1477,7 @@ impl FormatAdapter {
                 .as_ref()
                 .and_then(|ti| reported_cwd(ti.cwd.as_ref()))
                 .is_some(),
+            has_session_id = session_id.is_some(),
             "{} parsed input", self.log_prefix()
         );
 
@@ -1439,7 +1485,7 @@ impl FormatAdapter {
             event,
             tool_name,
             tool_input,
-            session_id: None,
+            session_id,
         })
     }
 
@@ -1467,6 +1513,7 @@ impl FormatAdapter {
             // `show_output: true` を設定していればユーザーにも同じ本文が表示される。
             Decision::Allow {
                 additional_context: Some(context),
+                ..
             } if event == HookEvent::AfterFileEdit && !context.trim().is_empty() => {
                 Ok(self.normalize_and_truncate(context))
             }
@@ -1487,6 +1534,7 @@ impl FormatAdapter {
                 decision,
                 Decision::Allow {
                     additional_context: Some(context),
+                    ..
                 } if !context.trim().is_empty()
             )
     }
@@ -1551,6 +1599,9 @@ struct ClaudeStopOutput {
     /// ブロック理由（エージェントへの修正指示）
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// ユーザーに見せる警告（停止は許したまま知らせる。判定のフィールドではない）
+    #[serde(rename = "systemMessage", skip_serializing_if = "Option::is_none")]
+    system_message: Option<String>,
 }
 
 // === Cursor フォーマット型 ===
@@ -1572,6 +1623,10 @@ struct CursorFileEditInput {
     /// 編集されたファイルのパス
     #[serde(alias = "filePath")]
     file_path: String,
+    /// 会話の識別子（全フック共通の入力で、会話の間は変わらない）。判定には使わない
+    /// 補助情報のため、型不一致でパース全体を落とさないよう Value で受け、文字列だけを採用する。
+    #[serde(default)]
+    conversation_id: Option<serde_json::Value>,
 }
 
 /// Cursor の stop 入力フォーマット。
@@ -1588,6 +1643,11 @@ struct CursorStopInput {
     /// この会話で発生した自動フォローアップ回数
     #[serde(default)]
     loop_count: Option<u32>,
+    /// 会話の識別子（全フック共通の入力で、会話の間は変わらない）。判定には使わない
+    /// 補助情報のため、型不一致でパース全体を落とさないよう Value で受け、文字列だけを採用する
+    /// （ここを必須にすると、`status` と同じくフィールド 1 つで全 stop hook が沈黙する）。
+    #[serde(default)]
+    conversation_id: Option<serde_json::Value>,
 }
 
 /// Cursor の subagentStart 入力フォーマット。
@@ -1649,6 +1709,11 @@ struct CursorOutput {
 struct WindsurfInput {
     /// アクション名: "pre_run_command", "post_write_code" など
     agent_action_name: String,
+    /// Cascade の会話全体の識別子（全フック共通のトップレベルの入力で、会話の間は変わらない）。
+    /// 判定には使わない補助情報のため、型不一致でパース全体を落とさないよう Value で受け、
+    /// 文字列だけを採用する。
+    #[serde(default)]
+    trajectory_id: Option<serde_json::Value>,
     /// ツール固有情報
     #[serde(default)]
     tool_info: Option<WindsurfToolInfo>,
@@ -1975,6 +2040,7 @@ impl FormatAdapter {
         let output = match decision {
             Decision::Allow {
                 additional_context: Some(ctx),
+                ..
             } if event == HookEvent::AfterFileEdit => {
                 let truncated = truncate_output(ctx, self.output_max_length);
                 serde_json::json!({
@@ -1991,6 +2057,7 @@ impl FormatAdapter {
             // ここには含めず `{}` に落とす。
             Decision::Allow {
                 additional_context: Some(ctx),
+                ..
             } if event == HookEvent::BeforeCommand && !ctx.trim().is_empty() => {
                 let truncated = truncate_output(ctx, self.output_max_length);
                 serde_json::json!({
@@ -1998,6 +2065,17 @@ impl FormatAdapter {
                         "hookEventName": "PreToolUse",
                         "additionalContext": truncated
                     }
+                })
+            }
+            // Stop の Allow に付いたユーザー向け通知は `systemMessage` で返す。公式仕様では
+            // Stop の共通フィールドで「UI かイベントストリームに警告として出す」もので、
+            // `decision:"block"` と違って作業を継続させない（停止は許したまま知らせる）。
+            Decision::Allow {
+                user_notice: Some(notice),
+                ..
+            } if event == HookEvent::Stop && !notice.trim().is_empty() => {
+                serde_json::json!({
+                    "systemMessage": truncate_output(notice, self.output_max_length)
                 })
             }
             Decision::Allow { .. } => serde_json::json!({}),
@@ -2038,10 +2116,14 @@ impl FormatAdapter {
         match decision {
             Decision::Allow {
                 additional_context: ctx,
+                user_notice,
             } => Decision::Allow {
                 additional_context: ctx
                     .as_ref()
                     .map(|c| truncate_output(c, self.output_max_length)),
+                user_notice: user_notice
+                    .as_ref()
+                    .map(|n| truncate_output(n, self.output_max_length)),
             },
             Decision::Block { message } => Decision::Block {
                 message: truncate_output(message, self.output_max_length),
@@ -7065,19 +7147,20 @@ mod tests {
     #[test]
     fn test_agent_profile_matches_each_format() {
         let cases = [
-            (Format::Claude, "claude-code", true),
-            (Format::Codex, "codex", true),
-            (Format::Cursor, "cursor", false),
-            (Format::Windsurf, "windsurf", false),
-            (Format::Agy, "antigravity", false),
-            (Format::Grok, "grok", false),
+            (Format::Claude, "claude-code", true, true),
+            (Format::Codex, "codex", true, true),
+            (Format::Cursor, "cursor", false, true),
+            (Format::Windsurf, "windsurf", false, false),
+            (Format::Agy, "antigravity", false, false),
+            (Format::Grok, "grok", false, false),
         ];
-        for (format, id, pre_command_context) in cases {
+        for (format, id, pre_command_context, stop_retry) in cases {
             assert_eq!(
                 FormatAdapter::new(format, 0).agent_profile(),
                 AgentProfile {
                     id,
-                    pre_command_context
+                    pre_command_context,
+                    stop_retry,
                 },
                 "{format:?}"
             );
@@ -7395,5 +7478,262 @@ mod tests {
             parsed_bash_cwd(&adapter, input).as_deref(),
             Some("/work/dir ")
         );
+    }
+
+    // === Stop の Allow に付けるユーザー向け通知（systemMessage） ===
+
+    /// Stop フックの再試行が失敗したときにユーザーへ見せる通知の例。
+    const RETRY_NOTICE: &str = "claw-hooks: stop hook retry failed at stage 1 [astro-sight]. \
+                                Not run: stage 5 [git-sc]. No further retry is scheduled.";
+
+    #[test]
+    fn test_stop_allow_with_notice_is_system_message_for_claude_and_codex() {
+        // 停止は許したまま知らせる。`decision` / `reason` / `hookSpecificOutput.additionalContext` /
+        // `continue` のどれを付けても作業を続けさせる意味になるので、`systemMessage` だけを返す
+        let decision = Decision::allow_with_notice(RETRY_NOTICE.to_string());
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 0);
+            let output = adapter.format_output(&decision, HookEvent::Stop).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(
+                parsed,
+                serde_json::json!({ "systemMessage": RETRY_NOTICE }),
+                "{format:?}"
+            );
+            // 判定は stdout の JSON + exit 0（Allow のまま）
+            assert_eq!(
+                adapter.exit_code(&decision, HookEvent::Stop),
+                0,
+                "{format:?}"
+            );
+            assert!(
+                !adapter.use_stderr(&decision, HookEvent::Stop),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_allow_with_blank_notice_is_empty_json_for_claude_and_codex() {
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 0);
+            for decision in [
+                Decision::allow(),
+                Decision::allow_with_notice(String::new()),
+                Decision::allow_with_notice(" \n\t".to_string()),
+            ] {
+                assert_eq!(
+                    adapter.format_output(&decision, HookEvent::Stop).unwrap(),
+                    "{}",
+                    "{format:?}: {decision:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_stop_block_is_unchanged_for_claude_and_codex() {
+        // Block は従来どおり `decision:"block"` + `reason`（systemMessage は付けない）
+        let decision = Decision::Block {
+            message: "Stop hooks failed: stage 1 [cargo].".to_string(),
+        };
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 0);
+            let output = adapter.format_output(&decision, HookEvent::Stop).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(
+                parsed,
+                serde_json::json!({
+                    "decision": "block",
+                    "reason": "Stop hooks failed: stage 1 [cargo]."
+                }),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_notice_is_truncated_to_output_max_length() {
+        for format in [Format::Claude, Format::Codex] {
+            let adapter = FormatAdapter::new(format, 50);
+            let output = adapter
+                .format_output(
+                    &Decision::allow_with_notice(format!("claw-hooks: {}", "x".repeat(100))),
+                    HookEvent::Stop,
+                )
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let message = parsed["systemMessage"].as_str().unwrap();
+            assert!(
+                message.chars().count() <= 50,
+                "{format:?}: systemMessage は切り詰められるべき: {message:?}"
+            );
+            // 先頭から残す（通知の主旨は先頭にある）
+            assert!(
+                message.starts_with("claw-hooks: xxx") && message.ends_with("... (truncated)"),
+                "{format:?}: {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_allow_with_notice_is_unchanged_for_other_formats() {
+        // Cursor の followup_message と Antigravity の continue は作業を続けさせる指示なので、
+        // 通知には使えない。Windsurf / Grok の Stop は stdout を読まない事後フック。
+        // いずれも通知を捨て、通知の無い Allow と同じ応答を返す
+        let decision = Decision::allow_with_notice(RETRY_NOTICE.to_string());
+        let cases = [
+            (Format::Cursor, "{}"),
+            (Format::Windsurf, "{}"),
+            (Format::Agy, r#"{"decision":"stop"}"#),
+            (Format::Grok, "{}"),
+        ];
+        for (format, expected) in cases {
+            let adapter = FormatAdapter::new(format, 0);
+            assert_eq!(
+                adapter.format_output(&decision, HookEvent::Stop).unwrap(),
+                expected,
+                "{format:?}"
+            );
+            assert_eq!(
+                adapter
+                    .format_output(&Decision::allow(), HookEvent::Stop)
+                    .unwrap(),
+                expected,
+                "{format:?}"
+            );
+            assert_eq!(
+                adapter.exit_code(&decision, HookEvent::Stop),
+                0,
+                "{format:?}"
+            );
+            assert!(
+                !adapter.use_stderr(&decision, HookEvent::Stop),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_user_notice_is_only_emitted_on_stop() {
+        // 通知は Stop のためのもの。他のイベントの Allow の応答に混ざらないこと
+        let decision = Decision::allow_with_notice("notice-marker".to_string());
+        let events = [
+            HookEvent::BeforeCommand,
+            HookEvent::PermissionRequest,
+            HookEvent::AfterFileEdit,
+            HookEvent::SubagentStart,
+            HookEvent::SubagentStop,
+            HookEvent::Passthrough,
+        ];
+        for format in ALL_FORMATS {
+            let adapter = FormatAdapter::new(format, 0);
+            for event in events {
+                let output = adapter.format_output(&decision, event).unwrap();
+                assert!(
+                    !output.contains("notice-marker") && !output.contains("systemMessage"),
+                    "{format:?} {event:?}: {output}"
+                );
+            }
+        }
+    }
+
+    // === セッション識別子（Cursor の conversation_id / Windsurf の trajectory_id） ===
+
+    /// 入力をパースして `session_id` を返す（パースできなければ panic）。
+    fn parsed_session_id(adapter: &FormatAdapter, input: &str) -> Option<String> {
+        adapter
+            .parse_input(input)
+            .unwrap_or_else(|e| panic!("パースできるべき: {e}\n{input}"))
+            .session_id
+    }
+
+    #[test]
+    fn test_cursor_conversation_id_is_session_id_for_file_edit_and_stop() {
+        // 見つからないコマンドの通知の抑止と、Stop フックの再試行の記録のキーになる
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        for input in [
+            r#"{"hook_event_name":"afterFileEdit","conversation_id":"conv-1","generation_id":"gen-1","file_path":"/repo/main.go"}"#,
+            r#"{"hook_event_name":"afterTabFileEdit","conversation_id":"conv-1","file_path":"/repo/main.go"}"#,
+            r#"{"hook_event_name":"stop","conversation_id":"conv-1","status":"completed","loop_count":1}"#,
+        ] {
+            assert_eq!(
+                parsed_session_id(&adapter, input).as_deref(),
+                Some("conv-1"),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_conversation_id_absent_blank_or_non_string_is_none() {
+        // 判定に使わない補助情報なので、欠落・空白のみ・型違いでもパースを失敗させない
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        let bases = [
+            r#"{"hook_event_name":"afterFileEdit","file_path":"/repo/main.go""#,
+            r#"{"hook_event_name":"stop","status":"completed""#,
+        ];
+        for base in bases {
+            assert_eq!(
+                parsed_session_id(&adapter, &format!("{base}}}")),
+                None,
+                "{base}"
+            );
+            for value in [r#""   ""#, "42", "null", r#"{"id":"conv-1"}"#] {
+                let input = format!(r#"{base},"conversation_id":{value}}}"#);
+                assert_eq!(parsed_session_id(&adapter, &input), None, "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_conversation_id_is_not_used_for_shell_and_subagent_events() {
+        // シェル系の session_id は command hooks の判定器への入力、サブエージェント系は
+        // NanoBuddy の sid になる。どちらも変えないよう、conversation_id があっても取り込まない
+        let adapter = FormatAdapter::new(Format::Cursor, 0);
+        for input in [
+            r#"{"hook_event_name":"beforeShellExecution","conversation_id":"conv-1","command":"ls","cwd":"/repo"}"#,
+            r#"{"hook_event_name":"preToolUse","conversation_id":"conv-1","tool_name":"Shell","tool_input":{"command":"ls"}}"#,
+            r#"{"hook_event_name":"preToolUse","conversation_id":"conv-1","tool_name":"Read","tool_input":{"file_path":"/repo/a.txt"}}"#,
+            r#"{"hook_event_name":"subagentStart","conversation_id":"conv-1","subagent_type":"explore","task":"look around"}"#,
+            r#"{"hook_event_name":"subagentStop","conversation_id":"conv-1","subagent_type":"explore","status":"completed"}"#,
+            r#"{"hook_event_name":"afterShellExecution","conversation_id":"conv-1","command":"ls"}"#,
+        ] {
+            assert_eq!(parsed_session_id(&adapter, input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_windsurf_trajectory_id_is_session_id_for_post_write_code_only() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let post_write_code = r#"{"agent_action_name":"post_write_code","trajectory_id":"traj-1","execution_id":"exec-1","tool_info":{"file_path":"/repo/main.go"}}"#;
+        assert_eq!(
+            parsed_session_id(&adapter, post_write_code).as_deref(),
+            Some("traj-1")
+        );
+
+        // pre_run_command の session_id は command hooks の判定器への入力なので変えない。
+        // Stop（post_cascade_response）は再試行の記録を作らないので要らない
+        for input in [
+            r#"{"agent_action_name":"pre_run_command","trajectory_id":"traj-1","tool_info":{"command_line":"ls","cwd":"/repo"}}"#,
+            r#"{"agent_action_name":"post_cascade_response","trajectory_id":"traj-1","tool_info":{"response":"done"}}"#,
+            r#"{"agent_action_name":"post_read_code","trajectory_id":"traj-1","tool_info":{"file_path":"/repo/main.go"}}"#,
+        ] {
+            assert_eq!(parsed_session_id(&adapter, input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn test_windsurf_trajectory_id_absent_blank_or_non_string_is_none() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        let without_id =
+            r#"{"agent_action_name":"post_write_code","tool_info":{"file_path":"/repo/main.go"}}"#;
+        assert_eq!(parsed_session_id(&adapter, without_id), None);
+        for value in [r#""  ""#, "7", "null", "[]"] {
+            let input = format!(
+                r#"{{"agent_action_name":"post_write_code","trajectory_id":{value},"tool_info":{{"file_path":"/repo/main.go"}}}}"#
+            );
+            assert_eq!(parsed_session_id(&adapter, &input), None, "{input}");
+        }
     }
 }

@@ -43,8 +43,8 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **AST解析**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - **カスタムコマンドフィルター**: 正規表現サポート付きのカスタムフィルターを定義
 - **コマンドフック**: シェルコマンドの中にある特定のプログラムの呼び出し（たとえば `gws` の呼び出しすべて）を、実行前に外部の判定器へ渡す。呼び出しは危険コマンドの検出と同じパーサーで探すので、`sudo gws …` や `bash -c 'gws …'` の中の呼び出しも対象になる。判定器に渡すのはその呼び出しのクォート除去後の引数を収めた JSON で、コマンド全体は渡さない。判定器はコマンドを拒否する、エージェントへ補足を返す（Claude Code と Codex CLI）、何もしない、のいずれかを選べる
-- **拡張子フック**: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` のファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行。コマンドは拡張子（`".rs"`）ごとに書き、`"*"` のキーに書いたコマンドは、編集したすべてのファイルで拡張子のコマンドの後に実行する（拡張子のない `Makefile` やドットファイルの `.gitignore` も対象）。lint 出力は Claude Code / Codex CLI に `additionalContext`、Windsurf に exit 2 + stderr で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ
-- **Stopフック**: エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）
+- **拡張子フック**: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` のファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行。コマンドは拡張子（`".rs"`）ごとに書き、`"*"` のキーに書いたコマンドは、編集したすべてのファイルで拡張子のコマンドの後に実行する（拡張子のない `Makefile` やドットファイルの `.gitignore` も対象）。lint 出力は Claude Code / Codex CLI に `additionalContext`、Windsurf に exit 2 + stderr で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ。エントリには Stop フックと同じ `condition` を付けられ、起動できないコマンドはプログラム名を付けて返す（見つからないプログラムはセッションにつき 1 回）
+- **Stopフック**: エージェントループ終了時にコマンドを実行（通知、git commit（[git-sc](https://github.com/owayo/git-smart-commit)等）、クリーンアップ等）。ステージは順に実行し、report=true の検査が失敗すると後続のステージを実行しないので、検査で落ちた変更を後ろのステージのコミットがコミットしてしまうことはない（フックに `gate = false` を書くと止めない）。Claude Code・Codex CLI・Cursor では、実行しなかったステージを、エージェントが失敗を直した後の次の停止で 1 回だけ再試行する（[詳細](docs/configuration.ja.md#stopフックの失敗と再試行)）
 - **Stop時プロジェクト全体Lint**: プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf と Grok CLI はベストエフォート）
 - **フックタイムアウト**: フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - **出力長制限**: エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
@@ -263,7 +263,7 @@ condition = { file_exists = "Cargo.toml" }
 
 作業ディレクトリの `.claw-hooks.toml` はグローバル設定にマージされますが、反映されるのは防御を強める方向だけです。ガードの有効化とフィルターの追加は効き、ガードの無効化と、Stop フック・拡張子フック・コマンドフックの宣言は警告付きで無視されます。`--config <path>` を渡すと、グローバル設定の代わりにそのファイルを使います。
 
-全設定項目と既定値、プロジェクト設定のマージルール、ステージとセッションスコープを使う Stop フック、Stop フックに渡す環境変数、カスタムフィルターのモード、コマンドフック: [docs/configuration.ja.md](docs/configuration.ja.md)
+全設定項目と既定値、プロジェクト設定のマージルール、ステージとセッションスコープを使う Stop フックとそのゲート・再試行、Stop フックに渡す環境変数、カスタムフィルターのモード、コマンドフック、条件付きの拡張子フック: [docs/configuration.ja.md](docs/configuration.ja.md)
 
 ## パフォーマンス
 

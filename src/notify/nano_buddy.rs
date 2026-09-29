@@ -24,6 +24,7 @@ mod macos {
     const STOP_NOTIFICATION: &str = "owayo.nanobuddy.stop";
     const SUBAGENT_START_NOTIFICATION: &str = "owayo.nanobuddy.subagent.start";
     const SUBAGENT_STOP_NOTIFICATION: &str = "owayo.nanobuddy.subagent.stop";
+    const SPEECH_NOTIFICATION: &str = "owayo.nanobuddy.speech";
 
     unsafe extern "C" {
         fn notify_register_check(name: *const i8, out_token: *mut c_int) -> u32;
@@ -166,6 +167,12 @@ mod macos {
         let object = format_subagent_object(subagent_type, session_id);
         post_distributed_notification(SUBAGENT_STOP_NOTIFICATION, &object);
     }
+
+    /// NanoBuddyに吹き出しの文面を送る。
+    /// 任意長の文面を渡すためDistributedNotificationCenterを使用（objectが文面そのもの）。
+    pub fn notify_speech(text: &str) {
+        post_distributed_notification(SPEECH_NOTIFICATION, text);
+    }
 }
 
 /// 拡張子フックの完了をNanoBuddyに通知する。
@@ -205,6 +212,17 @@ pub fn notify_subagent_stop(subagent_type: &str, session_id: Option<&str>) {
         let _ = subagent_type;
         let _ = session_id;
     }
+}
+
+/// NanoBuddyに吹き出しで短い文面を表示させる（Stop フックの再試行の結果など）。
+///
+/// 文面はエージェントには届かない、ユーザー向けの補助の知らせ。macOS 以外では何もしない。
+pub fn notify_speech(text: &str) {
+    #[cfg(target_os = "macos")]
+    macos::notify_speech(text);
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = text;
 }
 
 #[cfg(test)]
@@ -331,6 +349,12 @@ mod tests {
         // 空文字列の subagent_type でもパニックしない
         notify_subagent_start("", None);
         notify_subagent_stop("", None);
+    }
+
+    #[test]
+    fn test_notify_speech_does_not_panic() {
+        // 空文字列でもパニックしない（CFString の生成が失敗しても黙って戻る）
+        notify_speech("");
     }
 
     // === format_subagent_object 追加テスト ===

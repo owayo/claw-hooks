@@ -62,8 +62,17 @@ debug = false
 # that decide for themselves which files to check and exit quickly on the rest.
 # Each command template must contain exactly one {file}
 # File paths containing ../, <, or > are blocked for safety
+# An entry can also be a table with a condition (the same fields as stop hooks):
+# the command then runs only where the condition holds, e.g. only where an optional
+# tool is installed. Leave the condition off for a tool every machine should have.
+# A command that cannot be started is reported with its program name
+# (a missing program only once per session).
 # [extension_hooks]
 # ".css" = ["biome format --write {file}", "biome lint --write {file}"]
+# ".go" = [
+#   "gofmt -w {file}",
+#   { command = "golangci-lint run {file}", condition = { command_exists = "golangci-lint" } },
+# ]
 # ".py" = ["ruff format --check {file}", "ruff check --preview --select=I,F,DOC {file}"]
 # ".rs" = ["rustfmt {file}"]
 # ".ts" = ["biome check {file}"]
@@ -97,6 +106,13 @@ debug = false
 # stage: 1-5 (default: 5) — lower stages run first
 # report: true/false (default: true if condition is set, false otherwise)
 # report=false starts commands detached; stdout/stderr are discarded.
+# gate: true/false (default: true). When a reported hook fails (non-zero exit,
+#   timeout, or start failure), the rest of its stage finishes and the later stages
+#   do not run. gate = false returns the failure to the agent but lets them run.
+#   report=false hooks are never waited on, so they never stop later stages.
+#   Keep a check and a commit in different stages: hooks in one stage start together.
+#   On Claude Code, Codex CLI and Cursor, the stages that did not run get one retry
+#   at the agent's next stop, after it has fixed the failures.
 # session_scope: "primary" (default) / "delegated" / "all"
 #   primary   = run only when the main session stops
 #   delegated = run only for delegated agent sessions (e.g. Claude Code teammates)
@@ -113,6 +129,8 @@ debug = false
 # Detects project type and runs lint/typecheck.
 # On failure, the result is returned to the AI agent so it can fix the issues.
 # condition fields (AND logic): file_exists, file_not_exists, command_exists, command_not_exists
+# An unknown condition field (a typo such as command_exits) is a configuration error.
+# Conditions are evaluated right before their stage starts.
 # [[stop_hooks]]
 # commands = ["cargo clippy --all-targets --all-features -- -D warnings", "cargo fmt --check"]
 # condition = { file_exists = "Cargo.toml" }
@@ -126,11 +144,15 @@ debug = false
 # [[stop_hooks]]
 # commands = ["ruff format .", "ruff check --preview --fix --select=I,F,DOC --unsafe-fixes"]
 # condition = { file_exists = "pyproject.toml", command_exists = "ruff" }
+# stage = 3
 
 # [[stop_hooks]]
 # commands = ["biome check --write ."]
 # condition = { file_exists = "package.json" }
+# stage = 3
 
 # Auto commit & push (requires git-sc: https://github.com/owayo/git-smart-commit)
+# stage is not set, so it runs in stage 5, and not at all when a reported check
+# in stages 1-4 failed (unless that check sets gate = false).
 # [[stop_hooks]]
 # commands = ["git-sc --all --yes --quiet"]

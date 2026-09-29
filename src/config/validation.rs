@@ -5,26 +5,43 @@ use regex::Regex;
 use std::collections::BTreeMap;
 
 use super::types::ProjectConfig;
-use super::{CommandHook, Config, CustomFilter, StopHook};
+use super::{CommandHook, Config, CustomFilter, ExtensionHookCommand, HookCondition, StopHook};
+use crate::domain::command::display_label;
 use crate::domain::filters::ExtensionHookFilter;
 
 /// フックコマンドの最大タイムアウト秒数。
 /// フックは短時間で終わる前提のため、1日を超える値は設定ミスとして扱う。
 pub(crate) const MAX_HOOK_TIMEOUT_SECS: u64 = 86_400;
 
+/// `claw-hooks check` のプログラムの有無の警告に付ける断り書き。
+///
+/// 確かめたのは `check` を動かしたシェルの PATH で、エージェントがフックを動かす環境
+/// （PATH を絞った GUI アプリの環境など）とは違い得る。
+const PROGRAM_CHECK_NOTE: &str = "(checked in this shell; the agent's hook environment may differ)";
+
 /// `claw-hooks check` 用の検証エントリポイント。
 ///
-/// 値の検証に加えて、読み込み時に記録された警告（無視したプロジェクト設定・未知キー）を
+/// 値の検証に加えて、読み込み時に記録された警告（無視したプロジェクト設定・未知キー）と、
+/// フックが起動するプログラムが見つからない旨の警告（`missing_program_warnings`）を
 /// stderr に出力する。検証に失敗しても警告は見えるよう、先に警告を出す。
+/// 警告だけでは失敗にしない。
 ///
 /// フック実行経路（`Config::validate`）は `validate_values` を直接呼んで沈黙させる。
 /// Claude / Windsurf ではブロック時の stderr 本文がそのままエージェントへ渡す理由に
 /// なるため、そこへ設定警告が混ざると判定メッセージが濁るからである。
 pub fn validate(config: &Config) -> Result<()> {
-    // `check` はロガー初期化後に走るため、ログにも同じ警告を残せる
-    // （設定読み込み時点ではロガーがまだ無い — ログの出力先が設定そのものだから）。
-    config.log_warnings();
-    for warning in &config.warnings {
+    // 読み込み時の警告（`config.warnings`）のログへの記録は、main がロガーの初期化直後に
+    // 全コマンド共通で済ませている（`Config::log_warnings`）。ここでも記録すると、check の
+    // ログに同じ警告が 2 回ずつ残る。
+    //
+    // プログラムの有無はここ（check）でだけ確かめる。読み込み時に積むと、フック呼び出しの
+    // たびに全フックのプログラムについて PATH を走査することになる。check はロガーの
+    // 初期化後に走るので、ここで記録すればログにも残る。
+    let program_warnings = missing_program_warnings(config);
+    for warning in &program_warnings {
+        tracing::warn!("{}", warning);
+    }
+    for warning in config.warnings.iter().chain(&program_warnings) {
         eprintln!("warning: {}", warning);
     }
     validate_values(config)
@@ -101,7 +118,7 @@ pub fn validate_custom_filters(filters: &[CustomFilter]) -> Result<()> {
 /// キーは `.` で始まる拡張子か、すべてのファイルに当てる `"*"` のどちらか。glob やファイル名の
 /// キーは無いので弾く。受け付けてしまうと、`"*.rs"` を glob のつもりで書いた設定が
 /// どのファイルにも当たらないまま `check` が "Configuration is valid." と答えてしまう。
-pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result<()> {
+pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<ExtensionHookCommand>>) -> Result<()> {
     for (ext, commands) in hooks {
         if ext != ExtensionHookFilter::CATCH_ALL_KEY && !ext.starts_with('.') {
             bail!(
@@ -116,11 +133,11 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
         }
 
         // セキュリティ: すべてのコマンドが {file} プレースホルダーを1つだけ含むことを保証
-        for (j, cmd) in commands.iter().enumerate() {
-            if cmd.is_empty() {
+        for (j, entry) in commands.iter().enumerate() {
+            if entry.command.is_empty() {
                 bail!("extension_hooks['{}']: command[{}] cannot be empty", ext, j);
             }
-            if let Err(e) = ExtensionHookFilter::parse_command_template(cmd) {
+            if let Err(e) = ExtensionHookFilter::parse_command_template(&entry.command) {
                 bail!(
                     "extension_hooks['{}']: command[{}] {}",
                     ext,
@@ -128,6 +145,30 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
                     e.to_lowercase()
                 );
             }
+            if let Some(ref condition) = entry.condition {
+                validate_condition(
+                    condition,
+                    &format!("extension_hooks['{}']: command[{}]", ext, j),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 実行条件の値を検証する（空文字列の条件は書き損じとして弾く）。
+///
+/// `prefix` はエラー文の先頭に付ける設定上の場所（`stop_hooks[0]` 等）。
+fn validate_condition(condition: &HookCondition, prefix: &str) -> Result<()> {
+    let fields = [
+        ("file_exists", &condition.file_exists),
+        ("file_not_exists", &condition.file_not_exists),
+        ("command_exists", &condition.command_exists),
+        ("command_not_exists", &condition.command_not_exists),
+    ];
+    for (field, value) in fields {
+        if value.as_deref().is_some_and(str::is_empty) {
+            bail!("{}: condition.{} cannot be empty", prefix, field);
         }
     }
     Ok(())
@@ -139,9 +180,15 @@ pub fn validate_extension_hooks(hooks: &BTreeMap<String, Vec<String>>) -> Result
 /// 重複を黙って除くと書いた順序と回数が読めなくなるので、書いたとおりに動かしたうえで
 /// 知らせる。`"*"` を足したときに拡張子のキーへ残した同じ行を消し忘れると起きる。
 ///
+/// 重複とみなすのは、条件まで含めて完全に同じエントリ（コマンド文字列と `condition` の
+/// 両方が一致するもの）だけ。条件が違えば、コマンドが同じでも一方だけが動くことがあるので
+/// 別のエントリとして扱う。
+///
 /// 警告はフック実行時にデバッグログ（ディスク）にも残るため、コマンド本文は入れず、
 /// キーと番号で場所を示す（実行ファイルのディレクトリをログに残さない方針）。
-pub(crate) fn extension_hook_warnings(hooks: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+pub(crate) fn extension_hook_warnings(
+    hooks: &BTreeMap<String, Vec<ExtensionHookCommand>>,
+) -> Vec<String> {
     let Some(catch_all) = hooks.get(ExtensionHookFilter::CATCH_ALL_KEY) else {
         return Vec::new();
     };
@@ -194,38 +241,110 @@ pub fn validate_stop_hooks(hooks: &[StopHook]) -> Result<()> {
 
         // 条件が指定されている場合の検証
         if let Some(ref condition) = hook.condition {
-            if let Some(ref file_exists) = condition.file_exists
-                && file_exists.is_empty()
-            {
-                bail!("stop_hooks[{}]: condition.file_exists cannot be empty", i);
-            }
-            if let Some(ref file_not_exists) = condition.file_not_exists
-                && file_not_exists.is_empty()
-            {
-                bail!(
-                    "stop_hooks[{}]: condition.file_not_exists cannot be empty",
-                    i
-                );
-            }
-            if let Some(ref command_exists) = condition.command_exists
-                && command_exists.is_empty()
-            {
-                bail!(
-                    "stop_hooks[{}]: condition.command_exists cannot be empty",
-                    i
-                );
-            }
-            if let Some(ref command_not_exists) = condition.command_not_exists
-                && command_not_exists.is_empty()
-            {
-                bail!(
-                    "stop_hooks[{}]: condition.command_not_exists cannot be empty",
-                    i
-                );
-            }
+            validate_condition(condition, &format!("stop_hooks[{}]", i))?;
         }
     }
     Ok(())
+}
+
+/// Stop フックの設定のうち、エラーにはしないが知らせておくべき点を警告文にする。
+///
+/// `gate` が効くのは結果を待つフック（`report` が true）だけ。`report = false` のフックは
+/// detached で起動して結果を取らないので、失敗しても後続の stage は止まらない。明示した
+/// `gate = true` が効いていないことを黙っていると、後続を止めるつもりの検査が素通りしている
+/// ことに気づけない。`gate` を書いていない detached のフックは既定のままなので知らせない。
+///
+/// 警告はフック実行時にデバッグログ（ディスク）にも残るため、コマンド本文は入れず、
+/// 番号で場所を示す。
+pub(crate) fn stop_hook_warnings(hooks: &[StopHook]) -> Vec<String> {
+    hooks
+        .iter()
+        .enumerate()
+        .filter(|(_, hook)| hook.gate == Some(true) && !hook.should_report())
+        .map(|(i, _)| {
+            format!(
+                "stop_hooks[{}]: gate = true has no effect because the hook is not reported \
+                 (report = false starts it detached, so its result is never checked)",
+                i
+            )
+        })
+        .collect()
+}
+
+/// フックが起動するプログラムのうち、今のシェルで見つからないものを警告文にする。
+///
+/// `claw-hooks check` 専用（`validate` から呼ぶ）。対象は拡張子フックの各エントリ・
+/// Stop フックの各コマンド・command hooks の `run`。プログラムはフックの起動と同じく
+/// `parse_shell_tokens` の先頭語で、有無は条件の `command_exists` と同じ
+/// `HookCondition::command_in_path` で確かめる（明示的なパスはそのファイルを確かめる）。
+/// `sh -c '...'` や `env` の先で動くプログラムは推測しない。プログラムは実行しない。
+///
+/// 見つからなくても、条件によって今は実行されないエントリ（`command_exists` が指す
+/// コマンドが無い・`command_not_exists` が指すコマンドが有る）は知らせない。任意のツールを
+/// 条件付きで書いた設定に、毎回警告を出さないため。ファイルの条件（`file_exists` 等）は
+/// フックを動かすディレクトリで決まり、ここでは評価できないので、実行されるものとして扱う。
+///
+/// 警告はログにも残るため、プログラムはディレクトリを除いた表示ラベルで示す
+/// （実行ファイルのディレクトリをログに残さない方針）。
+pub(crate) fn missing_program_warnings(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (key, entries) in &config.extension_hooks {
+        for (j, entry) in entries.iter().enumerate() {
+            if let Some(problem) = missing_program(&entry.command, entry.condition.as_ref()) {
+                warnings.push(format!(
+                    "extension_hooks[{:?}] command[{}]: {}",
+                    key, j, problem
+                ));
+            }
+        }
+    }
+    for (i, hook) in config.stop_hooks.iter().enumerate() {
+        for (j, command) in hook.commands.iter().enumerate() {
+            if let Some(problem) = missing_program(command, hook.condition.as_ref()) {
+                warnings.push(format!("stop_hooks[{}] commands[{}]: {}", i, j, problem));
+            }
+        }
+    }
+    for (i, hook) in config.command_hooks.iter().enumerate() {
+        // command hooks には条件が無い。照合する `command` ではなく、起動する判定器を確かめる
+        if let Some(problem) = missing_program(&hook.run, None) {
+            warnings.push(format!("command_hooks[{}].run: {}", i, problem));
+        }
+    }
+    warnings
+}
+
+/// コマンドの先頭のプログラムが見つからず、条件でも除かれないとき、警告文の本体を返す。
+fn missing_program(command: &str, condition: Option<&HookCondition>) -> Option<String> {
+    let tokens = crate::domain::parse_shell_tokens(command);
+    let program = tokens.first().filter(|program| !program.is_empty())?;
+    if HookCondition::command_in_path(program) || condition.is_some_and(skipped_by_path_condition) {
+        return None;
+    }
+    // 明示的なパスは PATH を検索しないので、「PATH に無い」と書くと探す場所を誤らせる
+    let location = if HookCondition::is_explicit_path(program) {
+        "at the configured path"
+    } else {
+        "in PATH"
+    };
+    Some(format!(
+        "{:?} was not found {} {}",
+        display_label(program),
+        location,
+        PROGRAM_CHECK_NOTE
+    ))
+}
+
+/// 条件のうち PATH で決まる部分が、今のシェルでは成り立たないか（= 今は実行されないか）。
+fn skipped_by_path_condition(condition: &HookCondition) -> bool {
+    condition
+        .command_exists
+        .as_deref()
+        .is_some_and(|command| !HookCondition::command_in_path(command))
+        || condition
+            .command_not_exists
+            .as_deref()
+            .is_some_and(HookCondition::command_in_path)
 }
 
 /// command hooks の定義を検証する。
@@ -357,45 +476,35 @@ mod tests {
     #[test]
     fn test_validate_rejects_extension_hooks_without_dot() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert("rs".to_string(), vec!["rustfmt {file}".to_string()]);
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[("rs", &["rustfmt {file}"])]);
         assert!(validate(&config).is_err());
     }
 
     #[test]
     fn test_validate_rejects_extension_hook_missing_placeholder() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["rustfmt".to_string()]);
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[(".rs", &["rustfmt"])]);
         assert!(validate(&config).is_err());
     }
 
     #[test]
     fn test_validate_rejects_extension_hook_multiple_placeholders() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["tool {file} {file}".to_string()]);
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[(".rs", &["tool {file} {file}"])]);
         assert!(validate(&config).is_err());
     }
 
     #[test]
     fn test_validate_rejects_extension_hook_placeholder_as_program() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["{file} --write".to_string()]);
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[(".rs", &["{file} --write"])]);
         assert!(validate(&config).is_err());
     }
 
     #[test]
     fn test_validate_rejects_empty_extension_hook_command() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["".to_string()]);
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[(".rs", &[""])]);
         assert!(validate(&config).is_err());
     }
 
@@ -407,6 +516,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -472,13 +582,10 @@ mod tests {
     #[test]
     fn test_validate_accepts_valid_extension_hooks() {
         let mut config = default_config();
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
-        hooks.insert(
-            ".go".to_string(),
-            vec!["gofmt -w {file}".to_string(), "golint {file}".to_string()],
-        );
-        config.extension_hooks = hooks;
+        config.extension_hooks = extension_hooks(&[
+            (".rs", &["rustfmt {file}"]),
+            (".go", &["gofmt -w {file}", "golint {file}"]),
+        ]);
         assert!(validate(&config).is_ok());
     }
 
@@ -501,6 +608,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
@@ -519,6 +627,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -537,6 +646,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
@@ -557,6 +667,7 @@ mod tests {
             stage: None,
 
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -573,6 +684,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -589,6 +701,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -607,6 +720,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
@@ -620,6 +734,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
@@ -633,6 +748,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_err());
@@ -654,6 +770,7 @@ mod tests {
             }),
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         });
         assert!(validate(&config).is_ok());
@@ -683,43 +800,39 @@ mod tests {
 
     #[test]
     fn test_validate_extension_hooks_valid() {
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        let hooks = extension_hooks(&[(".rs", &["rustfmt {file}"])]);
         assert!(validate_extension_hooks(&hooks).is_ok());
     }
 
     #[test]
     fn test_validate_extension_hooks_missing_dot() {
-        let mut hooks = BTreeMap::new();
-        hooks.insert("rs".to_string(), vec!["rustfmt {file}".to_string()]);
+        let hooks = extension_hooks(&[("rs", &["rustfmt {file}"])]);
         assert!(validate_extension_hooks(&hooks).is_err());
     }
 
     #[test]
     fn test_validate_extension_hooks_rejects_multiple_placeholders() {
-        let mut hooks = BTreeMap::new();
-        hooks.insert(
-            ".rs".to_string(),
-            vec!["tool --in={file}:{file}".to_string()],
-        );
+        let hooks = extension_hooks(&[(".rs", &["tool --in={file}:{file}"])]);
         assert!(validate_extension_hooks(&hooks).is_err());
     }
 
     #[test]
     fn test_validate_extension_hooks_rejects_placeholder_as_program() {
-        let mut hooks = BTreeMap::new();
-        hooks.insert(".rs".to_string(), vec!["{file} --flag".to_string()]);
+        let hooks = extension_hooks(&[(".rs", &["{file} --flag"])]);
         assert!(validate_extension_hooks(&hooks).is_err());
     }
 
     /// `[extension_hooks]` を (キー, コマンド) の組から作る。
-    fn extension_hooks(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    fn extension_hooks(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<ExtensionHookCommand>> {
         entries
             .iter()
             .map(|(key, commands)| {
                 (
                     key.to_string(),
-                    commands.iter().map(|c| c.to_string()).collect(),
+                    commands
+                        .iter()
+                        .map(|c| ExtensionHookCommand::from(*c))
+                        .collect(),
                 )
             })
             .collect()
@@ -833,6 +946,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
@@ -845,6 +959,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_err());
@@ -893,16 +1008,14 @@ mod tests {
         assert!(validate_project(&pc).is_err());
     }
 
+    /// TOML の断片をプロジェクト設定として読む。
+    fn project_config(toml_str: &str) -> ProjectConfig {
+        toml::from_str(toml_str).unwrap()
+    }
+
     #[test]
     fn test_validate_project_valid_extension_hooks() {
-        let pc = ProjectConfig {
-            extension_hooks: Some({
-                let mut m = BTreeMap::new();
-                m.insert(".ts".to_string(), vec!["biome check {file}".to_string()]);
-                m
-            }),
-            ..Default::default()
-        };
+        let pc = project_config("[extension_hooks]\n\".ts\" = [\"biome check {file}\"]\n");
         assert!(validate_project(&pc).is_ok());
     }
 
@@ -911,69 +1024,32 @@ mod tests {
         // プロジェクト設定の `extension_hooks` は適用されない（`merge_project` 参照）。
         // 適用しない値の書式エラーで設定読み込み全体を落とすと、clone したリポジトリの
         // 2 行で無関係なコマンドまで deny になるため、ここでは検証しない。
-        let pc = ProjectConfig {
-            extension_hooks: Some({
-                let mut m = BTreeMap::new();
-                // `.` 始まりでない不正なキー。
-                m.insert("ts".to_string(), vec!["biome check {file}".to_string()]);
-                m
-            }),
-            ..Default::default()
-        };
+        // `.` 始まりでない不正なキー。
+        let pc = project_config("[extension_hooks]\n\"ts\" = [\"biome check {file}\"]\n");
         assert!(validate_project(&pc).is_ok());
     }
 
     #[test]
     fn test_validate_project_valid_stop_hooks() {
-        let pc = ProjectConfig {
-            stop_hooks: Some(vec![StopHook {
-                commands: vec!["pnpm exec tsc --noEmit".to_string()],
-                condition: Some(HookCondition {
-                    file_exists: Some("tsconfig.json".to_string()),
-                    command_exists: None,
-                    file_not_exists: None,
-                    command_not_exists: None,
-                }),
-                stage: None,
-                report: None,
-                session_scope: Default::default(),
-            }]),
-            ..Default::default()
-        };
+        let pc = project_config(
+            "[[stop_hooks]]\ncommands = [\"pnpm exec tsc --noEmit\"]\n\
+             condition = { file_exists = \"tsconfig.json\" }\n",
+        );
         assert!(validate_project(&pc).is_ok());
     }
 
     #[test]
     fn test_validate_project_does_not_reject_ignored_stop_hooks() {
         // `extension_hooks` と同じ理由で、適用されない `stop_hooks` も検証しない。
-        let pc = ProjectConfig {
-            stop_hooks: Some(vec![StopHook {
-                // 空コマンド = 適用されるなら不正な書式。
-                commands: vec!["".to_string()],
-                condition: None,
-                stage: None,
-                report: None,
-                session_scope: Default::default(),
-            }]),
-            ..Default::default()
-        };
+        // 空コマンド = 適用されるなら不正な書式。
+        let pc = project_config("[[stop_hooks]]\ncommands = [\"\"]\n");
         assert!(validate_project(&pc).is_ok());
     }
 
     #[test]
     fn test_validate_project_skips_none_fields() {
         // stop_hooksのみ設定済み、custom_filtersとextension_hooksはNone
-        let pc = ProjectConfig {
-            rm_block: Some(false),
-            stop_hooks: Some(vec![StopHook {
-                commands: vec!["echo done".to_string()],
-                condition: None,
-                stage: None,
-                report: None,
-                session_scope: Default::default(),
-            }]),
-            ..Default::default()
-        };
+        let pc = project_config("rm_block = false\n[[stop_hooks]]\ncommands = [\"echo done\"]\n");
         assert!(validate_project(&pc).is_ok());
     }
 
@@ -987,6 +1063,7 @@ mod tests {
                 condition: None,
                 stage: Some(stage),
                 report: None,
+                gate: None,
                 session_scope: Default::default(),
             }];
             assert!(
@@ -1004,6 +1081,7 @@ mod tests {
             condition: None,
             stage: Some(0),
             report: None,
+            gate: None,
             session_scope: Default::default(),
         }];
         let err = validate_stop_hooks(&hooks).unwrap_err();
@@ -1021,6 +1099,7 @@ mod tests {
             condition: None,
             stage: Some(6),
             report: None,
+            gate: None,
             session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_err());
@@ -1033,6 +1112,7 @@ mod tests {
             condition: None,
             stage: None,
             report: None,
+            gate: None,
             session_scope: Default::default(),
         }];
         assert!(validate_stop_hooks(&hooks).is_ok());
@@ -1177,5 +1257,370 @@ mod tests {
         let pc: ProjectConfig =
             toml::from_str("[[command_hooks]]\ncommand = \"\"\nrun = \"\"\ntimeout = 0\n").unwrap();
         assert!(validate_project(&pc).is_ok());
+    }
+
+    // === 拡張子フックの条件付きエントリ ===
+
+    /// `command_exists` だけを持つ条件を作る。
+    fn command_exists(command: &str) -> HookCondition {
+        HookCondition {
+            command_exists: Some(command.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 条件付きの拡張子フックのエントリを作る。
+    fn conditional_entry(command: &str, condition: HookCondition) -> ExtensionHookCommand {
+        ExtensionHookCommand {
+            command: command.to_string(),
+            condition: Some(condition),
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_conditional_extension_hook_entries() {
+        let mut config = default_config();
+        config.extension_hooks = BTreeMap::from([(
+            ".go".to_string(),
+            vec![
+                ExtensionHookCommand::from("gofmt -w {file}"),
+                conditional_entry("golangci-lint run {file}", command_exists("golangci-lint")),
+            ],
+        )]);
+        assert!(validate_values(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_extension_hook_condition() {
+        // 空文字列の条件は書き損じ。Stop フックと同じく設定エラーにする
+        for condition in [
+            HookCondition {
+                file_exists: Some(String::new()),
+                ..Default::default()
+            },
+            HookCondition {
+                file_not_exists: Some(String::new()),
+                ..Default::default()
+            },
+            command_exists(""),
+            HookCondition {
+                command_not_exists: Some(String::new()),
+                ..Default::default()
+            },
+        ] {
+            let hooks = BTreeMap::from([(
+                ".go".to_string(),
+                vec![
+                    ExtensionHookCommand::from("gofmt -w {file}"),
+                    conditional_entry("golangci-lint run {file}", condition.clone()),
+                ],
+            )]);
+            let message = validate_extension_hooks(&hooks)
+                .expect_err("空の条件は拒否すべき")
+                .to_string();
+            assert!(
+                message.starts_with("extension_hooks['.go']: command[1]: condition.")
+                    && message.ends_with(" cannot be empty"),
+                "{condition:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extension_hook_warnings_compares_conditions_too() {
+        // 条件まで含めて同じエントリだけを重複とみなす
+        let with_condition = conditional_entry("noslop hook file {file}", command_exists("noslop"));
+        let mut hooks = BTreeMap::from([
+            (
+                ".md".to_string(),
+                vec![ExtensionHookCommand::from("noslop hook file {file}")],
+            ),
+            ("*".to_string(), vec![with_condition.clone()]),
+        ]);
+        assert!(
+            extension_hook_warnings(&hooks).is_empty(),
+            "条件が違えば別のエントリ"
+        );
+
+        hooks.insert(".md".to_string(), vec![with_condition]);
+        let warnings = extension_hook_warnings(&hooks);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("\"*\" command[0]") && warnings[0].contains("\".md\""),
+            "{warnings:?}"
+        );
+    }
+
+    // === Stop フックの gate の警告 ===
+
+    /// `report` / `gate` / 条件を指定した Stop フックを作る。
+    fn stop_hook_with(
+        report: Option<bool>,
+        gate: Option<bool>,
+        condition: Option<HookCondition>,
+    ) -> StopHook {
+        StopHook {
+            commands: vec!["echo done".to_string()],
+            condition,
+            stage: None,
+            report,
+            gate,
+            session_scope: Default::default(),
+        }
+    }
+
+    /// `stop_hooks[i]` の gate の警告文（期待値）。
+    fn gate_warning(i: usize) -> String {
+        format!(
+            "stop_hooks[{i}]: gate = true has no effect because the hook is not reported \
+             (report = false starts it detached, so its result is never checked)"
+        )
+    }
+
+    #[test]
+    fn test_stop_hook_warnings_reports_gate_on_detached_hook() {
+        let hooks = vec![
+            // 結果を待つフックの gate は効く
+            stop_hook_with(Some(true), Some(true), None),
+            // report = false の gate = true は効かない
+            stop_hook_with(Some(false), Some(true), None),
+            // report 未指定・条件なしは detached（report = false と同じ）
+            stop_hook_with(None, Some(true), None),
+            // report 未指定でも条件があれば結果を待つので効く
+            stop_hook_with(
+                None,
+                Some(true),
+                Some(HookCondition {
+                    file_exists: Some("Cargo.toml".to_string()),
+                    ..Default::default()
+                }),
+            ),
+            // gate を書いていない・false の detached フックは既定のままなので知らせない
+            stop_hook_with(Some(false), None, None),
+            stop_hook_with(Some(false), Some(false), None),
+        ];
+        assert_eq!(
+            stop_hook_warnings(&hooks),
+            vec![gate_warning(1), gate_warning(2)]
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_gate_on_detached_hook() {
+        // 警告に留め、設定エラーにはしない
+        let mut config = default_config();
+        config
+            .stop_hooks
+            .push(stop_hook_with(Some(false), Some(true), None));
+        assert!(validate_values(&config).is_ok());
+        assert!(validate(&config).is_ok());
+    }
+
+    // === フックのプログラムの有無の警告（claw-hooks check） ===
+
+    /// PATH に必ずある想定のプログラム（`command_in_path` の既存のテストと同じ前提）。
+    const PRESENT_PROGRAM: &str = "sh";
+
+    /// PATH に無いプログラムの警告文（期待値）。
+    fn not_found_in_path(location: &str, label: &str) -> String {
+        format!(
+            "{location}: \"{label}\" was not found in PATH \
+             (checked in this shell; the agent's hook environment may differ)"
+        )
+    }
+
+    /// コマンドを並べた Stop フックを作る。
+    fn stop_hook_running(commands: &[&str], condition: Option<HookCondition>) -> StopHook {
+        StopHook {
+            commands: commands.iter().map(|c| c.to_string()).collect(),
+            condition,
+            stage: None,
+            report: Some(true),
+            gate: None,
+            session_scope: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_missing_program_warnings_covers_extension_stop_and_command_hooks() {
+        let mut config = default_config();
+        config.extension_hooks = extension_hooks(&[(
+            ".go",
+            &["sh -n {file}", "claw-hooks-test-missing-lint run {file}"],
+        )]);
+        config.stop_hooks = vec![
+            stop_hook_running(&["sh -c 'exit 0'"], None),
+            stop_hook_running(&["sh -c 'exit 0'"], None),
+            stop_hook_running(&["claw-hooks-test-missing-sc --all --yes --quiet"], None),
+        ];
+        config.command_hooks = vec![command_hook(
+            "gws",
+            "claw-hooks-test-missing-checker hook command",
+            None,
+        )];
+
+        assert_eq!(
+            missing_program_warnings(&config),
+            vec![
+                not_found_in_path(
+                    "extension_hooks[\".go\"] command[1]",
+                    "claw-hooks-test-missing-lint"
+                ),
+                not_found_in_path("stop_hooks[2] commands[0]", "claw-hooks-test-missing-sc"),
+                not_found_in_path("command_hooks[0].run", "claw-hooks-test-missing-checker"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_missing_program_warnings_empty_when_programs_are_found() {
+        let mut config = default_config();
+        config.extension_hooks = extension_hooks(&[("*", &["sh -n {file}"])]);
+        config.stop_hooks = vec![stop_hook_running(&["sh -c 'exit 0'"], None)];
+        // command hooks は照合する `command` ではなく、起動する `run` を確かめる
+        config.command_hooks = vec![command_hook(
+            "claw-hooks-test-missing-gws",
+            "sh -c 'exit 0'",
+            None,
+        )];
+        assert!(HookCondition::command_in_path(PRESENT_PROGRAM));
+        assert_eq!(missing_program_warnings(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_missing_program_warnings_skip_entries_the_condition_skips_now() {
+        let missing = "claw-hooks-test-missing-lint run {file}";
+        let mut config = default_config();
+        config.extension_hooks = BTreeMap::from([(
+            ".go".to_string(),
+            vec![
+                // 任意のツール: 無ければ条件で動かないので知らせない
+                conditional_entry(missing, command_exists("claw-hooks-test-missing-lint")),
+                // 条件が今成り立つ（sh はある）なら動くので知らせる
+                conditional_entry(missing, command_exists(PRESENT_PROGRAM)),
+                // command_not_exists が指すコマンドが有る = 今は動かない
+                conditional_entry(
+                    missing,
+                    HookCondition {
+                        command_not_exists: Some(PRESENT_PROGRAM.to_string()),
+                        ..Default::default()
+                    },
+                ),
+                // ファイルの条件はフックを動かすディレクトリで決まるので、動くものとして扱う
+                conditional_entry(
+                    missing,
+                    HookCondition {
+                        file_exists: Some("claw-hooks-test-no-such-file".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )]);
+        // Stop フックの条件はフックの全コマンドに掛かる
+        config.stop_hooks = vec![stop_hook_running(
+            &[
+                "claw-hooks-test-missing-sc --all",
+                "claw-hooks-test-missing-notify",
+            ],
+            Some(command_exists("claw-hooks-test-missing-sc")),
+        )];
+
+        assert_eq!(
+            missing_program_warnings(&config),
+            vec![
+                not_found_in_path(
+                    "extension_hooks[\".go\"] command[1]",
+                    "claw-hooks-test-missing-lint"
+                ),
+                not_found_in_path(
+                    "extension_hooks[\".go\"] command[3]",
+                    "claw-hooks-test-missing-lint"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_missing_program_warnings_names_configured_path_without_its_directory() {
+        // 明示的なパスは PATH を検索しないので、そう書き分ける。警告はログにも残るので、
+        // ディレクトリは出さずファイル名だけで示す
+        let mut config = default_config();
+        config.stop_hooks = vec![stop_hook_running(
+            &["/nonexistent-claw-hooks-test/bin/git-sc --all"],
+            None,
+        )];
+        let warnings = missing_program_warnings(&config);
+        assert_eq!(
+            warnings,
+            vec![
+                "stop_hooks[0] commands[0]: \"git-sc\" was not found at the configured path \
+                 (checked in this shell; the agent's hook environment may differ)"
+                    .to_string()
+            ]
+        );
+        assert!(!warnings[0].contains("nonexistent-claw-hooks-test"));
+    }
+
+    #[test]
+    fn test_missing_program_warnings_accepts_existing_explicit_path() {
+        // 実在する絶対パス。Unix は /bin/sh、Windows は ComSpec（cmd.exe の絶対パス）。
+        // Windows のパスの `\` をエスケープと読ませないよう、単一引用で囲む
+        #[cfg(unix)]
+        let program = String::from("/bin/sh");
+        #[cfg(windows)]
+        let program = std::env::var("ComSpec").expect("ComSpec should be set on Windows");
+        let mut config = default_config();
+        config.stop_hooks = vec![stop_hook_running(&[&format!("'{program}' -c true")], None)];
+        assert_eq!(missing_program_warnings(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_missing_program_warnings_checks_only_the_first_word() {
+        // `sh -c '...'` の先で動くプログラムは推測しない（先頭の sh だけを確かめる）
+        let mut config = default_config();
+        config.stop_hooks = vec![stop_hook_running(
+            &["sh -c 'claw-hooks-test-missing-sc --all'"],
+            None,
+        )];
+        assert_eq!(missing_program_warnings(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_missing_program_warnings_skips_empty_program() {
+        // クォートだけの先頭語は起動するプログラムが無い（空として扱い、確かめない）
+        let mut config = default_config();
+        config.stop_hooks = vec![stop_hook_running(&["'' --flag"], None)];
+        assert_eq!(missing_program_warnings(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_missing_program_warnings_label_has_no_control_characters() {
+        // 設定値に紛れた ESC などの制御文字は、ラベルでは `?` に置き換える
+        let mut config = default_config();
+        config.stop_hooks = vec![stop_hook_running(
+            &["claw-hooks-test-\u{1b}[31mmissing --flag"],
+            None,
+        )];
+        let warnings = missing_program_warnings(&config);
+        assert_eq!(
+            warnings,
+            vec![not_found_in_path(
+                "stop_hooks[0] commands[0]",
+                "claw-hooks-test-?[31mmissing"
+            )]
+        );
+    }
+
+    #[test]
+    fn test_validate_does_not_fail_on_missing_programs() {
+        // 見つからないのは check を動かしたシェルでの話で、フックの環境では見つかることもある。
+        // 警告だけで check を失敗させない
+        let mut config = default_config();
+        config.extension_hooks =
+            extension_hooks(&[(".go", &["claw-hooks-test-missing-lint run {file}"])]);
+        config.stop_hooks = vec![stop_hook_running(&["claw-hooks-test-missing-sc"], None)];
+        config.command_hooks = vec![command_hook("gws", "claw-hooks-test-missing-checker", None)];
+        assert_eq!(missing_program_warnings(&config).len(), 3);
+        assert!(validate(&config).is_ok());
     }
 }

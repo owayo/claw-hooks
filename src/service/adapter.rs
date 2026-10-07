@@ -1421,7 +1421,7 @@ impl FormatAdapter {
                     }),
                 )
             }
-            "post_cascade_response" => {
+            "post_cascade_response" | "post_cascade_response_with_transcript" => {
                 let response = windsurf_input
                     .tool_info
                     .as_ref()
@@ -3303,6 +3303,23 @@ mod tests {
         } else {
             panic!("Expected Stop tool input");
         }
+    }
+
+    #[test]
+    fn test_windsurf_input_parsing_post_cascade_response_with_transcript() {
+        let adapter = FormatAdapter::new(Format::Windsurf, 0);
+        // 停止イベントの別形式。会話ファイルの本文を読む必要はない。
+        let input = r#"{"agent_action_name":"post_cascade_response_with_transcript","tool_info":{"transcript_path":"/missing/transcript.jsonl"}}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(result.event, HookEvent::Stop);
+        assert_eq!(result.tool_name, "Stop");
+        let crate::domain::ToolInput::Stop(stop) = result.tool_input else {
+            panic!("停止イベントの入力でなければならない");
+        };
+        assert!(stop.agent_message.is_none());
+        assert!(stop.response.is_none());
+        assert!(!stop.stop_hook_active);
+        assert_eq!(stop.session_kind, crate::domain::StopSessionKind::Primary);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! `ast-parser` フィーチャーが有効な場合、tree-sitter-bash による正確な AST ベースの解析を使用する。
 
 #[cfg(feature = "ast-parser")]
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use std::cell::Cell;
 
@@ -100,6 +100,7 @@ const COMMAND_WRAPPERS: &[&str] = &[
     "doas",
     "command",
     "exec",
+    "builtin",
     "setsid",
     "stdbuf",
     "unshare",
@@ -133,7 +134,7 @@ const SHELL_COMMANDS: &[&str] = &[
 ];
 
 /// find で後続引数をコマンドとして実行する述語
-const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir"];
+const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// tree-sitter-bash が `command` の引数に取り得るノード種別の**網羅**。
 ///
@@ -599,6 +600,123 @@ impl ShellParser {
         }
     }
 
+    /// 語中の行継続を空引用として解析し、元のソースのバイト位置を維持する。
+    #[cfg(feature = "ast-parser")]
+    fn parse_command_tree(&mut self, command: &str) -> Option<Tree> {
+        let tree = self.parser.parse(command, None)?;
+        if !command.contains("\\\n") {
+            return Some(tree);
+        }
+        let root = tree.root_node();
+        let bytes = command.as_bytes();
+        let joins: Vec<usize> = command
+            .match_indices("\\\n")
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                bytes[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|&&c| c == b'\\')
+                    .count()
+                    % 2
+                    == 0
+            })
+            .collect();
+        // 連続する行継続でも、前後を毎回たどり直して二乗時間にしない。
+        let logical: Vec<usize> = (0..bytes.len())
+            .filter(|&at| {
+                joins.binary_search(&at).is_err()
+                    && at
+                        .checked_sub(1)
+                        .is_none_or(|previous| joins.binary_search(&previous).is_err())
+            })
+            .collect();
+        let previous = |at| {
+            logical
+                .partition_point(|&pos| pos < at)
+                .checked_sub(1)
+                .map(|index| (logical[index], bytes[logical[index]]))
+        };
+        let next = |at| {
+            logical
+                .get(logical.partition_point(|&pos| pos < at))
+                .map(|&pos| bytes[pos])
+        };
+        let wordish = |c| {
+            !matches!(
+                c,
+                b' ' | b'\t' | b'\n' | b'|' | b'&' | b';' | b'(' | b')' | b'<' | b'>'
+            )
+        };
+        let mut syntax = bytes.to_vec();
+        let mut repaired = false;
+        let mut word_start = 0;
+        let mut heredoc_prefix = (usize::MAX, false);
+        for (index, &at) in joins.iter().enumerate() {
+            let gap_start = if index == 0 { 0 } else { joins[index - 1] + 2 };
+            for (pos, &c) in bytes.iter().enumerate().take(at).skip(gap_start) {
+                if !wordish(c) {
+                    word_start = pos + 1;
+                }
+            }
+            let (Some((before_at, before)), Some(after)) = (previous(at), next(at + 2)) else {
+                continue;
+            };
+            // 演算子・展開の起点に空引用を挟むと、元のシェル構文を変えてしまう。
+            if !wordish(before)
+                || !wordish(after)
+                || before == b'$'
+                || before == b'{' && previous(before_at).is_some_and(|(_, c)| c == b'$')
+            {
+                continue;
+            }
+            // 区切り語に引用を加えると、非引用のヒアドキュメント本文までリテラルになる。
+            if heredoc_prefix.0 != word_start {
+                let lead = command[..word_start].trim_end_matches([' ', '\t']);
+                heredoc_prefix = (word_start, lead.ends_with("<<") || lead.ends_with("<<-"));
+            }
+            if heredoc_prefix.1 {
+                continue;
+            }
+            let mut node = root.descendant_for_byte_range(at, at + 1);
+            let mut literal = false;
+            while let Some(current) = node {
+                match current.kind() {
+                    "heredoc_body"
+                    | "raw_string"
+                    | "string"
+                    | "ansi_c_string"
+                    | "translated_string"
+                    | "arithmetic_expansion" => {
+                        literal = true;
+                        break;
+                    }
+                    "comment" => {
+                        // 語中の `#` を、行継続の誤解析によるコメントと取り違えない。
+                        if previous(current.start_byte()).is_none_or(|(_, c)| !wordish(c)) {
+                            literal = true;
+                            break;
+                        }
+                        node = current.parent();
+                    }
+                    // 二重引用の中でも、置換の内部は独立したシェル構文として読む。
+                    "command_substitution" | "process_substitution" => break,
+                    _ => node = current.parent(),
+                }
+            }
+            if !literal {
+                // 2 バイトの空引用なら語を結合しつつ、後続ノードの位置も変わらない。
+                syntax[at..at + 2].copy_from_slice(b"''");
+                repaired = true;
+            }
+        }
+        if repaired {
+            self.parser.parse(syntax, None)
+        } else {
+            Some(tree)
+        }
+    }
+
     /// シェルコマンド文字列からコマンドを抽出する。
     ///
     /// 対応する構文:
@@ -618,7 +736,7 @@ impl ShellParser {
         if Self::is_pathological_command(command) {
             return Self::pathological_block_commands();
         }
-        let tree = match self.parser.parse(command, None) {
+        let tree = match self.parse_command_tree(command) {
             Some(tree) => tree,
             None => return self.extract_commands_fallback(command),
         };
@@ -722,7 +840,7 @@ impl ShellParser {
         if Self::is_pathological_command(command) {
             return Self::pathological_block_commands();
         }
-        let tree = match self.parser.parse(command, None) {
+        let tree = match self.parse_command_tree(command) {
             Some(tree) => tree,
             None => return self.extract_command_strings_fallback(command),
         };
@@ -2828,7 +2946,7 @@ impl ShellParser {
 
     #[cfg(feature = "ast-parser")]
     fn ir_collect_ast(&mut self, command: &str, ctx: &IrContext, out: &mut IrCollector) {
-        let Some(tree) = self.parser.parse(command, None) else {
+        let Some(tree) = self.parse_command_tree(command) else {
             self.ir_collect_fallback(command, &ctx.for_fallback(), out);
             return;
         };
@@ -3615,6 +3733,106 @@ pub(crate) fn split_shell_words_raw(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_maintenance_execution_delegation_and_line_continuation() {
+        let mut parser = ShellParser::new();
+        for input in [
+            "r\\\nm -f /tmp/sample",
+            "sudo r\\\nm /tmp/sample",
+            "\"r\\\nm\" /tmp/sample",
+            "echo \"$(r\\\nm /tmp/sample)\"",
+            "bash -c 'r\\\nm /tmp/sample'",
+            "builtin command rm /tmp/sample",
+            "builtin exec rm /tmp/sample",
+            "builtin eval 'rm /tmp/sample'",
+            "builtin trap 'rm /tmp/sample' EXIT",
+            "find . -ok rm {} \\;",
+            "find . -okdir rm {} \\;",
+        ] {
+            assert!(
+                parser
+                    .extract_commands(input)
+                    .iter()
+                    .any(|name| name == "rm"),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "echo 'r\\\nm /tmp/sample'",
+            "r\\\n m /tmp/sample",
+            "r\\\\\nm /tmp/sample",
+            "builtin printf '%s' 'rm /tmp/sample'",
+            "find . -name rm",
+        ] {
+            assert!(
+                !parser
+                    .extract_commands(input)
+                    .iter()
+                    .any(|name| name == "rm"),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "ast-parser")]
+    #[test]
+    fn test_line_continuations_in_heredoc_text_are_not_commands() {
+        let input = "cat > Dockerfile <<'EOF'\nRUN apt-get update \\\n && apt-get install -y curl \\\n && rm -rf /var/lib/apt/lists/*\nEOF";
+        let mut parser = ShellParser::new();
+        assert!(
+            !parser
+                .extract_commands(input)
+                .iter()
+                .any(|name| name == "rm")
+        );
+        assert!(
+            !parser
+                .extract_command_strings(input)
+                .iter()
+                .any(|command| command.starts_with("rm "))
+        );
+        // シェルへ渡す本文は、文字列として再解析されるため検出対象になる。
+        assert!(
+            parser
+                .extract_commands("bash <<'EOF'\nr\\\nm /tmp/sample\nEOF")
+                .iter()
+                .any(|name| name == "rm")
+        );
+    }
+
+    #[cfg(feature = "ast-parser")]
+    #[test]
+    fn test_line_continuation_repair_does_not_quote_shell_syntax() {
+        let mut parser = ShellParser::new();
+        for input in [
+            "cat <<EO\\\nF\n$(rm /tmp/sample)\nEOF",
+            "echo $\\\n(rm /tmp/sample)",
+            "cat <\\\n(rm /tmp/sample)",
+            "true &\\\n& rm /tmp/sample",
+            "r\\\n\\\nm /tmp/sample",
+        ] {
+            assert!(
+                parser
+                    .extract_commands(input)
+                    .iter()
+                    .any(|name| name == "rm"),
+                "{input:?}"
+            );
+        }
+        let invocation = parser
+            .extract_invocations("echo a\\\n#b\\\nc")
+            .invocations
+            .remove(0);
+        assert_eq!(invocation.words[1].value.as_deref(), Some("a#bc"));
+        let input = format!("r{}m /tmp/sample", "\\\n".repeat(256));
+        assert!(
+            parser
+                .extract_commands(&input)
+                .iter()
+                .any(|name| name == "rm")
+        );
+    }
 
     #[test]
     fn test_extract_simple_command() {

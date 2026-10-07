@@ -89,6 +89,8 @@
 }
 ```
 
+`post_cascade_response_with_transcript` も Stop イベントとして扱います。停止フックの二重実行を避けるため、同じコマンドを登録する応答イベントは **どちらか1つ**にしてください。トランスクリプトのパスは読み込みません。この形式には最終応答がないため、`CLAW_HOOKS_AGENT_MESSAGE` も渡されません。どちらも非同期イベントなので、停止フックの失敗でエージェントをブロックすることはできません。
+
 ## Antigravity CLI
 
 `~/.gemini/config/hooks.json`（ユーザー）または `<project>/.agents/hooks.json`（プロジェクトワークスペース）に追加:

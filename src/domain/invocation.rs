@@ -202,7 +202,17 @@ impl WordScanner<'_> {
 
     /// 引用の外を読む。
     fn scan_unquoted(&mut self) {
+        // bash は代入形式の引数でも、最初の `=` と非引用の `:` の直後を展開する。
+        let assignment_equals = self.chars.iter().position(|&c| c == '=').filter(|&end| {
+            end > 0
+                && (self.chars[0] == '_' || self.chars[0].is_ascii_alphabetic())
+                && self.chars[..end]
+                    .iter()
+                    .all(|c| *c == '_' || c.is_ascii_alphanumeric())
+        });
+        let mut tilde_prefix = false;
         while let Some(c) = self.peek(0) {
+            let word_pos = self.pos;
             match c {
                 '\\' => match self.peek(1) {
                     // 行継続: バックスラッシュと改行は語から消える
@@ -252,8 +262,8 @@ impl WordScanner<'_> {
                     self.value.push(c);
                     self.pos += 1;
                 }
-                // 語頭のチルダはホームディレクトリへ展開される
-                '~' if self.pos == 0 => {
+                // 語頭、または代入値の有効な区切り直後のチルダを展開として扱う。
+                '~' if self.pos == 0 || assignment_equals.is_some() && tilde_prefix => {
                     self.value.push(c);
                     self.pos += 1;
                     self.dynamic_one();
@@ -276,6 +286,8 @@ impl WordScanner<'_> {
                     self.pos += 1;
                 }
             }
+            // 引用・エスケープで読み取った区切りは、展開の起点にならない。
+            tilde_prefix = c == ':' || assignment_equals == Some(word_pos);
         }
     }
 
@@ -385,6 +397,25 @@ impl WordScanner<'_> {
                 } else {
                     expanded(self);
                 }
+            }
+            Some('[') => {
+                // bash の旧式算術展開 `$[...]` も、実行時に数値 1 個へ変わる。
+                self.pos += 2;
+                let mut depth = 1usize;
+                while let Some(c) = self.peek(0) {
+                    self.pos += 1;
+                    match c {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.dynamic_one();
             }
             Some(next) if next == '_' || next.is_ascii_alphabetic() => {
                 self.pos += 1;
@@ -761,7 +792,10 @@ pub(crate) fn expand_unquoted_heredoc_body(body: &str) -> Option<String> {
                 Some(&next)
                     if next == '_'
                         || next.is_ascii_alphanumeric()
-                        || matches!(next, '{' | '(' | '@' | '*' | '#' | '?' | '$' | '!' | '-') =>
+                        || matches!(
+                            next,
+                            '{' | '(' | '[' | '@' | '*' | '#' | '?' | '$' | '!' | '-'
+                        ) =>
                 {
                     return None;
                 }
@@ -796,6 +830,73 @@ pub(crate) fn strip_heredoc_tabs(body: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn test_maintenance_legacy_arithmetic_and_assignment_tilde() {
+        for raw in ["\"$[1+2]\"", "$[1+2]", "x=~", "a=b:~/x"] {
+            assert_eq!(analyze_word(raw), (None, Cardinality::One), "{raw}");
+        }
+        for raw in [
+            "--flag=~",
+            "'x=~'",
+            "x='~'",
+            "x=\\~",
+            "x=a\\:~",
+            "x=a=~",
+            "x=\"a:\"~",
+        ] {
+            assert!(analyze_word(raw).0.is_some(), "{raw}");
+        }
+        assert_eq!(expand_unquoted_heredoc_body("v=$[2*3]"), None);
+        assert_eq!(
+            expand_unquoted_heredoc_body("v=\\$[2*3]"),
+            Some("v=$[2*3]".into())
+        );
+        assert_eq!(analyze_word("\"$(cat <<EOF\nv=$[2*3]\nEOF\n)\"").0, None);
+    }
+
+    #[test]
+    fn test_maintenance_invocation_execution_delegation() {
+        for input in [
+            "g\\\nws x",
+            "builtin command gws x",
+            "find . -ok gws x \\;",
+            "find . -okdir gws x \\;",
+        ] {
+            let invocation = only_invocation(input, "gws");
+            assert_eq!(invocation.words[0].value.as_deref(), Some("gws"));
+        }
+    }
+
+    #[cfg(feature = "ast-parser")]
+    #[test]
+    fn test_line_continuation_keeps_heredoc_stdin_and_raw_words() {
+        for input in [
+            "gws docs x \\\n --title t <<'EOF'\nbody\nEOF",
+            "g\\\nws docs x <<'EOF'\nbody\nEOF",
+        ] {
+            let invocation = only_invocation(input, "gws");
+            assert_eq!(
+                invocation.stdin,
+                StdinSource::Literal {
+                    value: Some("body\n".into())
+                }
+            );
+            assert_eq!(invocation.analysis, Analysis::Complete);
+            assert_eq!(
+                invocation.words[0].raw,
+                input.split(" docs").next().unwrap()
+            );
+        }
+        assert!(invocations_of("cat <<'EOF'\na \\\nb\ngws docs x\nEOF", "gws").is_empty());
+        let invocation = only_invocation("gws do\\\ncs x", "gws");
+        assert_eq!(invocation.words[1].raw, "do\\\ncs");
+        assert_eq!(invocation.words[1].value.as_deref(), Some("docs"));
+        assert_eq!(
+            only_invocation("echo \"$(g\\\nws docs x)\"", "gws").words[0].raw,
+            "g\\\nws"
+        );
+    }
 
     /// AST 経路では確定、フォールバック経路では候補になる呼び出しの確度。
     fn parsed_analysis() -> Analysis {

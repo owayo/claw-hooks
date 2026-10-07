@@ -57,7 +57,7 @@ message = "Use `uv pip` instead"
 
 [[custom_filters]]
 command = "docker"
-args = ["rm", "rmi", "system prune"]   # Blocks: docker rm, docker rmi
+args = ["rm", "rmi", "system prune"]   # Blocks: docker rm, docker rmi, docker system prune
 message = "Ask the user to run this command manually"
 
 # Command hooks: pass each call of a program in a shell command to an external checker
@@ -430,7 +430,7 @@ claw-hooks passes the following environment variables to stop hook child process
 
 **`CLAW_HOOKS_AGENT_MESSAGE`** is populated from:
 - **Claude Code**: `last_assistant_message` field in the Stop event
-- **Windsurf**: `response` field in the `post_cascade_response` event
+- **Windsurf**: `response` field in the `post_cascade_response` event (`post_cascade_response_with_transcript` has no response field; the transcript is not read)
 - **Cursor**: Not available
 
 This is useful for tools that benefit from knowing the agent's context. For example, [git-sc](https://github.com/owayo/git-smart-commit) uses this to generate more accurate commit messages:
@@ -467,6 +467,8 @@ command = "pip3?"                  # Matches both pip and pip3
 args = ["install", "uninstall"]    # First argument must match one of these
 message = "Use uv pip instead"
 ```
+
+Each `args` entry matches the leading argument or argument sequence after the command. For example, `args = ["system prune"]` matches `docker system prune -af`, but not `docker system df`. Command-name patterns match the whole name in args mode, including every branch of an alternation such as `pip|pip3`. Regex-only patterns anchor every branch to the command start, even when the pattern already begins with `^`.
 
 Both modes detect commands even when chained with `;`, `&&`, `||`, or `|`:
 

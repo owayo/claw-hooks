@@ -186,7 +186,8 @@ pub fn normalize_lint_output(output: &str) -> String {
         let line = collapse_carriage_return(line);
         // rustfmt は `Diff in ...`、一般的な unified diff は `@@ ...` の後に
         // 先頭 1 文字をマーカーとする文脈行を出す。文脈行の空白もコードそのもの。
-        if line.starts_with("Diff in ") || line.starts_with("@@ ") {
+        let without_label = strip_tool_label_prefix(line);
+        if without_label.starts_with("Diff in ") || without_label.starts_with("@@ ") {
             in_unified_diff = true;
         } else if in_unified_diff {
             if line.starts_with([' ', '+', '-']) {
@@ -259,6 +260,7 @@ pub fn normalize_lint_output(output: &str) -> String {
 
 /// formatter の追加・削除行を判定する。位置マーカー（`-->`）は対象外。
 fn is_unified_diff_content_line(line: &str) -> bool {
+    let line = strip_tool_label_prefix(line);
     line.starts_with('+')
         || (line.starts_with('-') && !line.trim_start_matches('-').starts_with('>'))
 }
@@ -754,7 +756,14 @@ fn leading_progress_prefix(line: &str) -> Option<&str> {
 /// rustc のマルチライン span 下線（`| |_______^`）は区切りの前が空なので `None` になり、
 /// 従来どおり圧縮対象に残る。
 fn source_line_body_offset(line: &str) -> Option<usize> {
-    let start = if line.starts_with("> ") { 2 } else { 0 };
+    // 拡張子フックの先頭行には `[tool] ` が付く。ラベルの分もオフセットに含める。
+    let without_label = strip_tool_label_prefix(line);
+    let start = line.len() - without_label.len()
+        + if without_label.starts_with("> ") {
+            2
+        } else {
+            0
+        };
     let head = &line[start..];
     let (sep_at, sep) = head.char_indices().find(|(_, c)| *c == '|' || *c == '│')?;
     let prefix = &head[..sep_at];
@@ -899,7 +908,33 @@ fn collapse_duplicate_diff_context_line_number(line: &str) -> String {
 /// - パターン `c( c){3,}` (= c が 4 回以上、間に単一スペース 1 個) を `c` に置き換える
 /// - 圧縮後に末尾がさらに別の文字に続く場合はスペースを 1 個残す
 ///   例: `→ → → → → → → Google` → `→ Google`
+/// - 行番号付きソース抜粋では、差分マーカー後の可視化されたインデントだけを圧縮し、
+///   最初のコード文字以降は文字列リテラルも含めて保持する
 fn collapse_space_separated_decorative(input: &str) -> String {
+    if let Some(offset) = source_line_body_offset(input) {
+        let (head, body) = input.split_at(offset);
+        let leading = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let after_space = &body[leading..];
+        let marker_end = leading
+            + if after_space.starts_with("- ") || after_space.starts_with("+ ") {
+                2
+            } else {
+                0
+            };
+        let (marker, code) = body.split_at(marker_end);
+        let prefix_end = code
+            .find(|c| !matches!(c, ' ' | '\t' | '→' | '·'))
+            .unwrap_or(code.len());
+        let (decoration, source) = code.split_at(prefix_end);
+        // 再帰対象は空白・矢印・中点のみで、行番号や区切りを含まない。
+        return format!(
+            "{}{}{}{}",
+            head,
+            marker,
+            collapse_space_separated_decorative(decoration),
+            source
+        );
+    }
     let chars: Vec<char> = input.chars().collect();
     let mut result = String::with_capacity(input.len());
     let mut i = 0;
@@ -1713,6 +1748,41 @@ mod tests {
     fn test_normalize_preserves_source_excerpt_whitespace() {
         // インデントと文字列内の空白は診断対象のコードそのものなので維持する。
         let input = "3 │     if enabled:\n4 │         print(\"a  b\")  ";
+        assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_preserves_space_separated_symbols_in_source_excerpts() {
+        // 矢印や中点が文字列リテラルに含まれる場合は、装飾ではなく実際のコード。
+        for prefix in ["3 │", "3 |", "> 3 │", "12 13 │"] {
+            for symbols in ["→ → → →", "· · · ·"] {
+                let input = format!("{prefix}     let text = \"{symbols}\";  ");
+                assert_eq!(normalize_lint_output(&input), input);
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalize_preserves_labeled_source_excerpts() {
+        // 拡張子フックが先頭行に付けるツール名が、ソース本体の保護を外してはいけない。
+        let input = "[formatter] 3 │     let text = \"a  b → → → → · · · ·\";  ";
+        assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_compresses_indent_and_preserves_source_symbols() {
+        // 可視化されたインデントを圧縮しても、後続の文字列リテラルはそのまま残す。
+        let input = "[formatter] 3 │ - → → → → let text = \"a  b → → → → · · · ·\";  ";
+        let expected = "[formatter] 3 │ - → let text = \"a  b → → → → · · · ·\";  ";
+        assert_eq!(normalize_lint_output(input), expected);
+    }
+
+    #[test]
+    fn test_normalize_preserves_labeled_unified_diff() {
+        // ラベル付きの差分ヘッダーでも、続く文脈行・追加行・削除行をコードとして扱う。
+        let input = "[formatter] Diff in /tmp/a.rs:1:\n     let text = \"a  b → → → →\";\n-    old();\n+    new();";
+        assert_eq!(normalize_lint_output(input), input);
+        let input = "[formatter] +    let text = \"a  b → → → →\";  ";
         assert_eq!(normalize_lint_output(input), input);
     }
 

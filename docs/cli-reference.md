@@ -112,7 +112,7 @@ Uses `agent_action_name` field:
 |-------------------|------------------|
 | `pre_run_command` | PreToolUse + Bash |
 | `post_write_code` | PostToolUse + Write |
-| `post_cascade_response` | Stop |
+| `post_cascade_response` / `post_cascade_response_with_transcript` | Stop |
 
 Unsupported Windsurf actions are passed through as allow.
 
@@ -331,7 +331,7 @@ Checkers run only for shell tool calls (`Bash` / `PowerShell`) on the events in 
 
 Calls are checked in the order they appear in the command, and several hooks matching the same call run in config order. A check with the same hook and the same input as an earlier one is not repeated. The first block ends the event: later checkers do not run, and any context collected so far is dropped.
 
-Calls behind wrappers (`sudo`, `env`, `timeout`, …), in shell strings (`bash -c`, `eval`, `env -S`, `trap`), in here-documents and here-strings fed to a shell, and under `xargs` / `find -exec` are calls of their own. `sudo gws docs …`, for example, yields a `sudo` call and a `gws` call.
+Calls behind wrappers (`sudo`, `env`, `timeout`, …), in shell strings (`bash -c`, `eval`, `env -S`, `trap`), in here-documents and here-strings fed to a shell, and under `xargs` / `find -exec` / `-execdir` / `-ok` / `-okdir` are calls of their own. `sudo gws docs …`, for example, yields a `sudo` call and a `gws` call.
 
 ### Input
 
@@ -378,7 +378,9 @@ With Codex CLI, when both `PreToolUse` and `PermissionRequest` are registered, a
 Two cases are worth knowing when writing a checker:
 
 - Inside double quotes, `$(cat <<'EOF' … EOF)` (a `cat` with no arguments reading a single here-document) is static. Its value is the here-document body with the trailing newlines removed, as command substitution does. This covers the `gws … --json "$(cat <<'EOF' … EOF)"` form.
-- Under `xargs`, the inner call ends with one extra `zero_or_more` element that stands for the arguments `xargs` appends. With `-I`, nothing is appended; instead, each word containing the replacement string is not static. The `{}` of `find -exec` is not static either.
+- Under `xargs`, the inner call ends with one extra `zero_or_more` element that stands for the arguments `xargs` appends. With `-I`, nothing is appended; instead, each word containing the replacement string is not static. The `{}` of `find -exec` / `-execdir` / `-ok` / `-okdir` is not static either.
+
+Arithmetic expansions (`$((…))` and the legacy bash `$[…]`) and an unquoted tilde after a valid assignment prefix (`x=~`, `x=a:~/dir`) are dynamic, with cardinality `"one"`. Quoted or escaped tildes remain literal. An unquoted here-document containing arithmetic expansion has no static body value.
 
 **`analysis`.** `"complete"` means the call is certain from the command's syntax. `"uncertain"` means the call is a candidate whose words may not be exactly what runs: it was found by re-parsing a string that is not static (`bash -c "gws docs $ARGS"`), in a command that contains syntax errors, or in a `PowerShell` tool command, which claw-hooks reads with shell grammar. Candidates that claw-hooks builds only for dangerous-command detection, such as the one made by folding a brace expansion in the program name to its first choice, are never passed to a checker.
 

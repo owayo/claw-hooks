@@ -20,6 +20,26 @@ const MISSING_TOOL: &str = "claw-hooks-test-missing-tool";
 /// 見つからないコマンドの通知を初めて返すときに付く一文。
 const NOT_REPEATED: &str = ". This notice is not repeated in this session.";
 
+#[test]
+fn test_labeled_lint_source_preserves_literals_and_whitespace() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.write_source("sample.rs");
+    let config = sandbox.write_config("[extension_hooks]\n\".rs\" = [\"sh lint.sh {file}\"]\n");
+    std::fs::write(
+        sandbox.path().join("lint.sh"),
+        r#"printf '%s\n' '3 │     let text = "a  b → → → → · · · ·";  '
+exit 1
+"#,
+    )
+    .unwrap();
+    // 生出力の正規化と、ツール名を付けた後の正規化の両方を通して確かめる。
+    let context = sandbox.edit(&config, &source, None).unwrap();
+    assert_eq!(
+        context,
+        "[sh] 3 │     let text = \"a  b → → → → · · · ·\";  "
+    );
+}
+
 /// PATH に無いプログラムの通知の文面（後ろの一文なし）。
 fn missing_tool_notice() -> String {
     format!("[{MISSING_TOOL}] not started: command not found in PATH")

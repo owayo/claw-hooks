@@ -57,7 +57,7 @@ message = "`uv pip`を使用してください"
 
 [[custom_filters]]
 command = "docker"
-args = ["rm", "rmi", "system prune"]   # ブロック対象: docker rm, docker rmi
+args = ["rm", "rmi", "system prune"]   # ブロック対象: docker rm, docker rmi, docker system prune
 message = "ユーザーに直接実行を依頼してください"
 
 # コマンドフック: シェルコマンド中のプログラムの呼び出しを、実行前に外部の判定器へ渡す
@@ -430,7 +430,7 @@ claw-hooksはStopフックの子プロセスに以下の環境変数を渡しま
 
 **`CLAW_HOOKS_AGENT_MESSAGE`** の取得元:
 - **Claude Code**: Stopイベントの `last_assistant_message` フィールド
-- **Windsurf**: `post_cascade_response` イベントの `response` フィールド
+- **Windsurf**: `post_cascade_response` イベントの `response` フィールド（`post_cascade_response_with_transcript` には応答本文がなく、トランスクリプトは読み込まない）
 - **Cursor**: 利用不可
 
 これはエージェントのコンテキストを活用できるツールに有用です。例えば、[git-sc](https://github.com/owayo/git-smart-commit)はこの情報を使ってより正確なコミットメッセージを生成します:
@@ -467,6 +467,8 @@ command = "pip3?"                  # pip と pip3 両方にマッチ
 args = ["install", "uninstall"]    # 第1引数がこれらのいずれかにマッチ
 message = "uv pipを使用してください"
 ```
+
+`args` の各項目は、コマンド直後の第1引数または引数列に一致します。たとえば `args = ["system prune"]` は `docker system prune -af` に一致し、`docker system df` には一致しません。args モードのコマンド名パターンは名前全体と照合し、`pip|pip3` の各選択肢にも同じ制約が掛かります。正規表現のみのモードでは、パターン自体が `^` で始まっていても、すべての選択肢をコマンド先頭に固定します。
 
 両モードとも `;`、`&&`、`||`、`|` でチェーンされたコマンドも検出します:
 

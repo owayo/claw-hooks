@@ -185,6 +185,27 @@ fn test_block_quoted_concatenated_rm_command() {
 }
 
 #[test]
+fn test_shell_execution_delegation_bypasses_are_blocked() {
+    for command in [
+        "r\\\nm /tmp/sample",
+        "builtin command rm /tmp/sample",
+        "builtin eval 'rm /tmp/sample'",
+        "yes | find . -ok rm {} \\;",
+        "find . -okdir rm {} \\;",
+    ] {
+        let input = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+        .to_string();
+        let (stdout, _, exit_code) = run_hook(&input);
+        assert_eq!(exit_code, 0, "{command:?}: {stdout}");
+        assert!(stdout.contains("deny"), "{command:?}: {stdout}");
+    }
+}
+
+#[test]
 fn test_block_ansi_c_quoted_rm_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"$'r\\x6d' -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
@@ -857,6 +878,32 @@ fn test_windsurf_format_unsupported_event_passthrough() {
 
     assert_eq!(exit_code, 0, "未対応の Windsurf イベントは透過させるべき");
     assert_eq!(stdout.trim(), "{}", "未対応イベントでも allow を返すべき");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_windsurf_transcript_stop_runs_configured_hooks() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let script = temp_dir.path().join("stop.sh");
+    let marker = temp_dir.path().join("stopped");
+    std::fs::write(&script, "printf ran > \"$(dirname \"$0\")/stopped\"\n").unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let command = format!("sh '{}'", script.display());
+    std::fs::write(
+        &config_path,
+        format!(
+            "[[stop_hooks]]\ncommands = [{}]\nreport = true\n",
+            serde_json::to_string(&command).unwrap(),
+        ),
+    )
+    .unwrap();
+
+    // 存在しないトランスクリプトでも停止処理は動き、本文を読み込む必要はない。
+    let input = r#"{"agent_action_name":"post_cascade_response_with_transcript","tool_info":{"transcript_path":"/missing/transcript.jsonl"}}"#;
+    let (stdout, _, exit_code) = run_hook_with_config_and_format(input, "windsurf", &config_path);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "{}");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
 }
 
 #[test]

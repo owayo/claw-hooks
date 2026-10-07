@@ -1,24 +1,22 @@
-# Development tasks for claw-hooks. Run `make` with no arguments to list the targets.
+# claw-hooks の開発タスク。引数なしの `make` でターゲット一覧を表示する。
 #
-# Tool versions are pinned in mise.toml. When mise is available, every tool runs through
-# `mise exec --`, so the pinned versions are used even when mise is not activated in the shell
-# (for example when make is started from an IDE or a GUI). SYSTEM_TOOLS=1 uses the tools on PATH
-# instead (the versions are then not guaranteed).
+# ツールの版は mise.toml で固定する。mise があれば常に `mise exec --` を通すため、
+# IDE や GUI から起動してシェル側で mise が有効でなくても、固定した版を使える。
+# SYSTEM_TOOLS=1 は PATH 上のツールを使う（この場合、版は保証しない）。
 #
-# Only GNU Make 3.81 features are used (the make that ships with macOS):
-# no .ONESHELL, .SHELLFLAGS, $(file ...) or !=.
+# macOS に付属する GNU Make 3.81 で使える構文に限る。
+# .ONESHELL、.SHELLFLAGS、$(file ...)、!= は使わない。
 
 .DEFAULT_GOAL := help
 
 BINARY_NAME := claw-hooks
 INSTALL_PATH ?= /usr/local/bin
-# Cargo.lock is committed, so resolve dependencies exactly as CI does
+# コミットした Cargo.lock を使い、CI と同じ依存関係で実行する。
 CARGO_FLAGS ?= --locked
 
-# ---- Toolchain ------------------------------------------------------------------
-# Look for mise on PATH, then in the usual install locations (make started from a GUI may not
-# inherit the shell's PATH). Override with make MISE=/path/to/mise.
-# To try the behavior without mise, empty the candidates with MISE_CANDIDATES=.
+# ---- ツールチェーン --------------------------------------------------------------
+# GUI 起動時はシェルの PATH を継承しない場合があるため、PATH の次に一般的な配置先を探す。
+# make MISE=/path/to/mise で指定できる。mise が無い場合の動作は MISE_CANDIDATES= で確認する。
 MISE_CANDIDATES ?= $(HOME)/.local/bin/mise /opt/homebrew/bin/mise /usr/local/bin/mise
 ifeq ($(SYSTEM_TOOLS),1)
 RUN :=
@@ -36,69 +34,69 @@ endif
 
 .PHONY: help setup build release run test lint fmt fmt-check check ci install uninstall clean
 
-## Setup
+## 準備
 
-setup: ## Install the toolchain (mise) and dependencies
+setup: ## ツールチェーン（mise）と依存関係を準備
 	@if [ -n "$(MISE)" ]; then "$(MISE)" install; fi
 	$(RUN) cargo fetch $(CARGO_FLAGS)
 
-## Build
+## ビルド
 
-build: ## Build a debug binary
+build: ## デバッグ用バイナリをビルド
 	$(RUN) cargo build $(CARGO_FLAGS)
 
-release: ## Build a release binary
+release: ## リリース用バイナリをビルド
 	$(RUN) cargo build --release $(CARGO_FLAGS)
 
-run: ## Run the debug binary (arguments via ARGS="...")
+run: ## デバッグ用バイナリを実行（引数は ARGS="..."）
 	$(RUN) cargo run $(CARGO_FLAGS) -- $(ARGS)
 
-## Checks
+## 検査
 
-# The tests and clippy run in two configurations: all features (the tree-sitter AST parser) and no
-# default features (the string fallback parser). The fallback build uses a separate parser, so the
-# AST tests alone can miss a detection gap (fail-open) that only the fallback has.
-test: ## Run the tests (all features, then no default features)
+# テストと clippy は all-features（tree-sitter の AST パーサー）と
+# no-default-features（文字列フォールバックパーサー）の 2 構成で実行する。
+# フォールバックは別のパーサーなので、AST の検査だけでは検出漏れを見逃す。
+# 統合テストは共通の実行ファイルを使うため、異なる構成のビルドを別途並行実行しない。
+test: ## テストを実行（all-features の後に no-default-features）
 	$(RUN) cargo test $(CARGO_FLAGS) --all-features
 	$(RUN) cargo test $(CARGO_FLAGS) --no-default-features
 
-lint: ## Run clippy with warnings as errors (all features, then no default features)
+lint: ## 両構成の clippy を実行（警告はエラー扱い）
 	$(RUN) cargo clippy $(CARGO_FLAGS) --all-targets --all-features -- -D warnings
 	$(RUN) cargo clippy $(CARGO_FLAGS) --all-targets --no-default-features -- -D warnings
 
-fmt: ## Format the code (rewrites files)
+fmt: ## コードを整形（ファイルを書き換える）
 	$(RUN) cargo fmt --all
 
-fmt-check: ## Check the formatting (no changes)
+fmt-check: ## 整形を検査（書き換えなし）
 	$(RUN) cargo fmt --all -- --check
 
-# lint covers all features and no default features. The only feature (ast-parser) is the default,
-# so the default feature set is the all-features build and needs no separate check
-check: fmt-check lint ## Run fmt-check and lint (no changes)
+# lint は両構成を検査する。唯一の機能 ast-parser がデフォルトなので、
+# デフォルト構成は all-features と同じになり、別の検査は不要。
+check: fmt-check lint ## 整形と lint を検査（書き換えなし）
 
-ci: check test ## Run the same checks as CI (no changes)
+ci: check test ## CI と同じ検査を実行（書き換えなし）
 
-## Install
+## インストール
 
-# Replace the binary through a temporary file and a rename instead of copying over it. macOS
-# caches the code signature check per inode, so a binary copied over one that is running (or ran
-# a moment ago) is killed with SIGKILL right after it starts (exit 137). claw-hooks starts on every
-# hook event, so its signature is always cached and a plain copy hits this every time. The
-# temporary file sits in the same directory so that the rename swaps the inode.
-install: release ## Install the release binary to INSTALL_PATH (default /usr/local/bin)
+# 一時ファイルを rename してバイナリを置き換える。macOS は inode ごとに署名検査を
+# キャッシュするため、実行中または直前に実行したファイルへ上書きすると、次の起動で
+# SIGKILL（終了コード 137）になる。毎イベント起動する claw-hooks では特に発生しやすい。
+# 同じディレクトリに一時ファイルを置き、rename によって inode ごと入れ替える。
+install: release ## INSTALL_PATH にインストール（既定は /usr/local/bin）
 	@mkdir -p "$(INSTALL_PATH)"
 	cp "target/release/$(BINARY_NAME)" "$(INSTALL_PATH)/$(BINARY_NAME).new"
 	mv -f "$(INSTALL_PATH)/$(BINARY_NAME).new" "$(INSTALL_PATH)/$(BINARY_NAME)"
 
-uninstall: ## Remove the binary from INSTALL_PATH
+uninstall: ## INSTALL_PATH のバイナリを削除
 	rm -f "$(INSTALL_PATH)/$(BINARY_NAME)"
 
-clean: ## Remove build artifacts
+clean: ## ビルド成果物を削除
 	$(RUN) cargo clean
 
-## Help
+## ヘルプ
 
-help: ## Show this help
+help: ## このヘルプを表示
 	@echo "Development tasks for $(BINARY_NAME)"
 	@echo ""
 	@echo "Usage: make <target>"

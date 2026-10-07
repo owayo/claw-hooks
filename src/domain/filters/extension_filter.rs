@@ -526,13 +526,16 @@ impl ExtensionHookFilter {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // stdout と stderr を結合（空行を除外）
-        let combined_output = [stdout.trim(), stderr.trim()]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
+        // ストリーム境界の改行だけを除く。抜粋の先頭・末尾の空白もコードの一部。
+        let combined_output = [
+            stdout.trim_matches(['\r', '\n']),
+            stderr.trim_matches(['\r', '\n']),
+        ]
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
 
         if !output.status.success() {
             let exit_code = output

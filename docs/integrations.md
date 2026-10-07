@@ -89,6 +89,8 @@ Add to `~/.codeium/windsurf/hooks.json` (user) or `.windsurf/hooks.json` (projec
 }
 ```
 
+`post_cascade_response_with_transcript` is also supported as a Stop event. Register the same command under **one** of the two response events to avoid running stop hooks twice. The transcript path is not read; this event does not supply a final response for `CLAW_HOOKS_AGENT_MESSAGE`. Both events are asynchronous, so stop-hook failures cannot block the agent.
+
 ## Antigravity CLI
 
 Add to `~/.gemini/config/hooks.json` (user) or `<project>/.agents/hooks.json` (project workspace):

@@ -42,11 +42,7 @@ impl CustomCommandFilter {
         // `(^npm install)|(yarn add)` と解釈され、右辺にアンカーが掛からない。
         // その結果 `git commit -m "fix yarn add"` のような無関係なコマンドまで
         // ブロックされ、doc が約束する「コマンド名にマッチする」保証が破れていた。
-        let anchored_pattern = if pattern.starts_with('^') {
-            pattern.to_string()
-        } else {
-            format!("^(?:{})", pattern)
-        };
+        let anchored_pattern = format!("^(?:{})", pattern);
         let regex = Regex::new(&anchored_pattern)?;
         Ok(Self {
             mode: FilterMode::Regex(regex),
@@ -79,7 +75,7 @@ impl CustomCommandFilter {
         message: String,
     ) -> Result<Self, regex::Error> {
         // コマンド名全体にマッチするようアンカー付きで正規表現をコンパイル
-        let anchored = format!("^{}$", command);
+        let anchored = format!("^(?:{})$", command);
         let regex = Regex::new(&anchored)?;
         Ok(Self {
             mode: FilterMode::Args {
@@ -225,8 +221,17 @@ impl CustomCommandFilter {
                     return true;
                 }
 
-                // 対象の引数が存在するか判定
-                if parts.len() > 1 && target_args.iter().any(|arg| &parts[1] == arg) {
+                // 複数語のサブコマンドも、コマンド直後の引数列として照合する。
+                if target_args.iter().any(|arg| {
+                    let wanted: Vec<&str> = arg.split_whitespace().collect();
+                    !wanted.is_empty()
+                        && (parts.get(1) == Some(arg)
+                            || parts.len() > wanted.len()
+                                && parts[1..=wanted.len()]
+                                    .iter()
+                                    .map(String::as_str)
+                                    .eq(wanted.iter().copied()))
+                }) {
                     return true;
                 }
             }
@@ -276,6 +281,68 @@ impl Filter for CustomCommandFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_maintenance_regex_explicit_anchor_alternation() {
+        let filter = CustomCommandFilter::new("^npm install|yarn add", "blocked".into()).unwrap();
+        assert!(filter.matches("yarn add package"));
+        assert!(filter.matches("npm install package"));
+        assert!(!filter.matches("echo yarn add"));
+        assert!(!filter.matches("git commit -m 'fix yarn add'"));
+    }
+
+    #[test]
+    fn test_maintenance_args_command_alternation() {
+        let filter =
+            CustomCommandFilter::with_args("pip|pip3", vec!["install".into()], "blocked".into())
+                .unwrap();
+        for input in ["pip install black", "pip3 install black"] {
+            assert!(filter.matches(input), "{input}");
+        }
+        for input in [
+            "pipx install black",
+            "pip-audit install",
+            "otherpip3 install black",
+        ] {
+            assert!(!filter.matches(input), "{input}");
+        }
+    }
+
+    #[test]
+    fn test_maintenance_args_subcommand_sequence() {
+        let filter = CustomCommandFilter::with_args(
+            "docker",
+            vec!["rm".into(), "system prune".into()],
+            "blocked".into(),
+        )
+        .unwrap();
+        for input in [
+            "docker system prune -af",
+            "docker 'system' 'prune' -af",
+            "sudo docker system prune",
+            "docker rm container",
+        ] {
+            assert!(filter.matches(input), "{input}");
+        }
+        for input in [
+            "docker system df",
+            "docker system",
+            "docker system prune-extra",
+            "echo docker system prune",
+        ] {
+            assert!(!filter.matches(input), "{input}");
+        }
+        let blank =
+            CustomCommandFilter::with_args("docker", vec!["  ".into()], "blocked".into()).unwrap();
+        assert!(!blank.matches("docker system prune"));
+    }
+
+    #[test]
+    fn test_maintenance_custom_filter_line_continuation() {
+        let filter = CustomCommandFilter::new("npm install", "blocked".into()).unwrap();
+        assert!(filter.matches("n\\\npm install package"));
+        assert!(!filter.matches("echo 'n\\\npm install package'"));
+    }
 
     // 正規表現モードのテスト
     #[test]

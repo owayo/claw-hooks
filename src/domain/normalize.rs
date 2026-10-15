@@ -1291,6 +1291,17 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_preserves_diff_headers_and_resets_after_crlf_blank() {
+        // `---` は差分ヘッダーだけでなく、SQL コメントの削除行にも現れる。
+        // 同じ形の行はパスを保持し、空行を挟んだ診断情報だけを短縮する。
+        let input = "--- /work/project/old.sql\r\n+++ /work/project/new.sql\r\n@@ -1 +1 @@\r\n--- /work/project/old\r\n+-- /work/project/new\r\n\r\n --> /work/project/first.sql:1:1\r\n --> /work/project/second.sql:2:1\r\n";
+        assert_eq!(
+            normalize_lint_output(input),
+            "--- /work/project/old.sql\n+++ /work/project/new.sql\n@@ -1 +1 @@\n--- /work/project/old\n+-- /work/project/new\n\n-> first.sql:1:1\n-> second.sql:2:1"
+        );
+    }
+
+    #[test]
     fn test_normalize_source_paths_do_not_determine_diagnostic_prefix() {
         for input in [
             "2 | cp /work/project/input /work/project/output\n3 | cat /work/project/input",

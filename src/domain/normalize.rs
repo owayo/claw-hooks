@@ -186,23 +186,17 @@ pub fn normalize_lint_output(output: &str) -> String {
         let line = collapse_carriage_return(line);
         // rustfmt は `Diff in ...`、一般的な unified diff は `@@ ...` の後に
         // 先頭 1 文字をマーカーとする文脈行を出す。文脈行の空白もコードそのもの。
-        let without_label = strip_tool_label_prefix(line);
-        if without_label.starts_with("Diff in ") || without_label.starts_with("@@ ") {
-            in_unified_diff = true;
-        } else if in_unified_diff {
-            if line.starts_with([' ', '+', '-']) {
-                if line.trim().is_empty() {
-                    if !prev_blank && !lines.is_empty() {
-                        lines.push(String::new());
-                    }
-                    prev_blank = true;
-                } else {
-                    lines.push(line.to_string());
-                    prev_blank = false;
+        if is_unified_diff_context_line(line, &mut in_unified_diff) {
+            if line.trim().is_empty() {
+                if !prev_blank && !lines.is_empty() {
+                    lines.push(String::new());
                 }
-                continue;
+                prev_blank = true;
+            } else {
+                lines.push(line.to_string());
+                prev_blank = false;
             }
-            in_unified_diff = false;
+            continue;
         }
         let trimmed = line.trim();
 
@@ -263,6 +257,25 @@ fn is_unified_diff_content_line(line: &str) -> bool {
     let line = strip_tool_label_prefix(line);
     line.starts_with('+')
         || (line.starts_with('-') && !line.trim_start_matches('-').starts_with('>'))
+}
+
+/// 差分ヘッダーの後では、空白で始まる文脈行もソースとして扱う。
+/// 正規化とパス短縮で同じ判定を使い、片方だけがコードを書き換えるのを防ぐ。
+fn is_unified_diff_context_line(line: &str, in_unified_diff: &mut bool) -> bool {
+    let without_label = strip_tool_label_prefix(line);
+    if without_label.starts_with("Diff in ") || without_label.starts_with("@@ ") {
+        *in_unified_diff = true;
+        return false;
+    }
+    *in_unified_diff = *in_unified_diff && line.starts_with([' ', '+', '-']);
+    *in_unified_diff
+}
+
+/// パスを含んでいても変更してはならないソース抜粋・差分行か。
+fn is_source_output_line(line: &str, in_unified_diff: &mut bool) -> bool {
+    is_unified_diff_context_line(line, in_unified_diff)
+        || is_unified_diff_content_line(line.trim_start())
+        || source_line_body_offset(line.trim_start()).is_some()
 }
 
 /// 行番号付きのソース抜粋では、区切りより後の空白をそのまま残す。
@@ -1151,36 +1164,44 @@ fn strip_common_path_prefix(text: &str) -> String {
     // 偶然部分文字列として現れた場合（例: `foo/proj/src/...` のような文中の出現）に
     // 中身を破壊する。`extract_absolute_paths` のパス開始判定と対称な条件を採用する。
     let mut result = String::with_capacity(text.len());
-    let mut remaining = text;
-    let mut consumed = 0usize;
-    while let Some(pos) = remaining.find(prefix) {
-        result.push_str(&remaining[..pos]);
-        let abs_pos = consumed + pos;
-        let after = &remaining[pos + prefix.len()..];
-        // 直前文字: 行頭/空白/`-`/`>`/`=` のいずれかがパス開始位置として有効
-        let prev = text[..abs_pos].chars().next_back();
-        let is_prev_path_start = match prev {
-            None => true,
-            Some(c) if c.is_ascii_whitespace() => true,
-            Some('-') | Some('>') | Some('=') => true,
-            _ => false,
-        };
-        // 直後文字: ファイル名文字（英数字、_、.、-）が続く場合のみパス継続とみなす
-        let is_next_path_char = after
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-');
-        if is_prev_path_start && is_next_path_char {
-            // プレフィックスを除去（直後のパス部分はそのまま保持）
-            remaining = after;
-        } else {
-            // パスコンテキストでなければプレフィックスをそのまま保持
-            result.push_str(prefix);
-            remaining = after;
+    let mut in_unified_diff = false;
+    for line in text.split_inclusive('\n') {
+        // コード中の絶対パスは実際の引数・値なので、診断ヘッダーと同じ短縮はできない。
+        if is_source_output_line(line, &mut in_unified_diff) {
+            result.push_str(line);
+            continue;
         }
-        consumed = abs_pos + prefix.len();
+        let mut remaining = line;
+        let mut consumed = 0usize;
+        while let Some(pos) = remaining.find(prefix) {
+            result.push_str(&remaining[..pos]);
+            let abs_pos = consumed + pos;
+            let after = &remaining[pos + prefix.len()..];
+            // 直前文字: 行頭/空白/`-`/`>`/`=` のいずれかがパス開始位置として有効
+            let prev = line[..abs_pos].chars().next_back();
+            let is_prev_path_start = match prev {
+                None => true,
+                Some(c) if c.is_ascii_whitespace() => true,
+                Some('-') | Some('>') | Some('=') => true,
+                _ => false,
+            };
+            // 直後文字: ファイル名文字（英数字、_、.、-）が続く場合のみパス継続とみなす
+            let is_next_path_char = after
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-');
+            if is_prev_path_start && is_next_path_char {
+                // プレフィックスを除去（直後のパス部分はそのまま保持）
+                remaining = after;
+            } else {
+                // パスコンテキストでなければプレフィックスをそのまま保持
+                result.push_str(prefix);
+                remaining = after;
+            }
+            consumed = abs_pos + prefix.len();
+        }
+        result.push_str(remaining);
     }
-    result.push_str(remaining);
     result
 }
 
@@ -1193,7 +1214,12 @@ fn strip_common_path_prefix(text: &str) -> String {
 /// パスの開始位置として採用し、`http://` のような URL を誤抽出しないようにする。
 fn extract_absolute_paths(text: &str) -> Vec<&str> {
     let mut paths = Vec::new();
+    let mut in_unified_diff = false;
     for line in text.lines() {
+        // ソース内のパスから共通接頭辞を決めると、無関係な診断まで短縮してしまう。
+        if is_source_output_line(line, &mut in_unified_diff) {
+            continue;
+        }
         let mut search_from = 0;
         while let Some(rel_start) = line[search_from..].find('/') {
             let start = search_from + rel_start;
@@ -1245,6 +1271,56 @@ fn common_directory_prefix<'a>(paths: &[&'a str]) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_preserves_absolute_paths_in_numbered_source() {
+        let input = "error: invalid path\n --> /work/project/main.sh:2:1\n2 | cp /work/project/input /work/project/output\n --> /work/project/other.sh:3:1";
+        assert_eq!(
+            normalize_lint_output(input),
+            "error: invalid path\n-> main.sh:2:1\n2 | cp /work/project/input /work/project/output\n-> other.sh:3:1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_absolute_paths_in_unified_diff() {
+        let input = "Diff in /work/project/main.sh:1:\n cp /work/project/input /work/project/output\n-cp /work/project/old /work/project/output\n+cp /work/project/new /work/project/output\nDiff in /work/project/other.sh:2:";
+        assert_eq!(
+            normalize_lint_output(input),
+            "Diff in main.sh:1:\n cp /work/project/input /work/project/output\n-cp /work/project/old /work/project/output\n+cp /work/project/new /work/project/output\nDiff in other.sh:2:"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_diff_headers_and_resets_after_crlf_blank() {
+        // `---` は差分ヘッダーだけでなく、SQL コメントの削除行にも現れる。
+        // 同じ形の行はパスを保持し、空行を挟んだ診断情報だけを短縮する。
+        let input = "--- /work/project/old.sql\r\n+++ /work/project/new.sql\r\n@@ -1 +1 @@\r\n--- /work/project/old\r\n+-- /work/project/new\r\n\r\n --> /work/project/first.sql:1:1\r\n --> /work/project/second.sql:2:1\r\n";
+        assert_eq!(
+            normalize_lint_output(input),
+            "--- /work/project/old.sql\n+++ /work/project/new.sql\n@@ -1 +1 @@\n--- /work/project/old\n+-- /work/project/new\n\n-> first.sql:1:1\n-> second.sql:2:1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_source_paths_do_not_determine_diagnostic_prefix() {
+        for input in [
+            "2 | cp /work/project/input /work/project/output\n3 | cat /work/project/input",
+            "-cp /work/project/old /work/project/output\n+cp /work/project/new /work/project/output",
+            "error: invalid path\n-> /work/project/main.sh:2:1\n2 | cp /work/project/input /work/project/output",
+        ] {
+            assert_eq!(normalize_lint_output(input), input);
+        }
+    }
+
+    #[test]
+    fn test_normalize_migration_progress_decoration() {
+        assert_eq!(
+            normalize_lint_output(
+                "Using attach strategy to execute scripts...\n==== Starting migration for: 3.8.0.rc001 ====\n...............................................................  63 / 212 ( 29%)"
+            ),
+            "Using attach strategy to execute scripts.\n= Starting migration for: 3.8.0.rc001 =\n. 63 / 212 ( 29%)"
+        );
+    }
 
     #[test]
     fn test_strip_ansi_codes_removes_colors() {

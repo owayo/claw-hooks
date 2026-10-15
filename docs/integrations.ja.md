@@ -33,6 +33,8 @@
 }
 ```
 
+保存後のフォーマッターは `PostToolUse` に登録します。Claude Code のファイル監視イベント `FileChanged` は claw-hooks ではパススルーします。フォーマッターの書き換えでも再発火し、設定したコマンドが毎回ファイルを書き直す場合はループになるため、拡張子フックの登録先には使いません。
+
 ## Cursor
 
 `<project>/.cursor/hooks.json`（プロジェクト）または `~/.cursor/hooks.json`（ユーザー）に追加:

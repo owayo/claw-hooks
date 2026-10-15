@@ -33,6 +33,8 @@ Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
 }
 ```
 
+Use `PostToolUse` for post-edit formatters. Claude Code also offers the filesystem-watcher event `FileChanged`, which claw-hooks passes through: a formatter rewrite can trigger that event again, and a generic formatter need not be idempotent. Do not register extension hooks under `FileChanged`.
+
 ## Cursor
 
 Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user):

@@ -83,6 +83,8 @@ Claude の `Stop` では `stop_hook_active` が必須です。欠落または型
 
 `stop_hook_active: true` は *継続中の停止* を表します。Stop フックに作業を続けさせられた Claude が、もう一度停止したということです。claw-hooks はこの停止では Stop フックを実行しません。例外は、前の停止で予定した 1 回だけの再試行です（[継続中の停止](#継続中の停止) を参照）。
 
+`Stop` はメインセッションか委譲セッションかに分け、それで実行する Stop フック（`session_scope`）が決まります。ペイロードに空白でない `agent_id` と `agent_type` の両方があるときと、claw-hooks の祖先に split-pane モードの teammate（agent team のメンバー）がいるときは委譲セッションです。この teammate の `Stop` には `agent_id` が入りません。そこで claw-hooks は、同じユーザーの祖先プロセスを 32 個まで読み（macOS と Linux）、そのどれかのコマンドラインに `--agent-id`・`--agent-name`・`--team-name` がそろっているかを調べます。`CLAW_HOOKS_TEAMMATE_PROBE=off` でこの祖先の確認を止められます（[条件付きStopフック](configuration.ja.md#条件付きstopフックプロジェクト全体lint) のセッションスコープを参照）。
+
 ### Cursor (`--format cursor`)
 
 `hook_event_name` フィールドでイベントを判定します:

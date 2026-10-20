@@ -83,6 +83,8 @@ Handled hook events: `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`, and `
 
 `stop_hook_active: true` marks a *continuing* stop: Claude is stopping again after a Stop hook kept it working. claw-hooks runs no stop hooks on such a stop, except the single retry it may have scheduled at the previous stop (see [Continuing Stops](#continuing-stops)).
 
+Each `Stop` is classified as the main session or a delegated one, which decides the stop hooks it runs (`session_scope`). It is delegated when the payload carries both non-blank `agent_id` and `agent_type`, or when claw-hooks runs under a split-pane agent-team teammate, whose `Stop` carries no `agent_id`. For the latter, claw-hooks reads the command lines of up to 32 ancestor processes owned by the same user (macOS and Linux) and looks for `--agent-id`, `--agent-name`, and `--team-name` in one of them. `CLAW_HOOKS_TEAMMATE_PROBE=off` turns this ancestor check off; see the session scope rules in [Conditional Stop Hooks](configuration.md#conditional-stop-hooks-project-wide-lint).
+
 ### Cursor (`--format cursor`)
 
 Uses the `hook_event_name` field for event detection:

@@ -961,6 +961,7 @@ fn run_hook_with_config_format_and_event(
         .arg("--config")
         .arg(config_path);
     isolate_state_dir(&mut command, state_home.path());
+    disable_teammate_probe(&mut command);
     if let Some(event) = event {
         command.arg("--event").arg(event);
     }
@@ -1010,12 +1011,22 @@ fn isolate_state_dir(command: &mut Command, home: &std::path::Path) {
         .env("XDG_CACHE_HOME", home.join("cache"));
 }
 
+/// 祖先プロセスによる Claude Code のチームメイトの判定を止める。
+///
+/// テストを Claude Code のチームメイト（split-pane で動く別プロセスの claude）の中で回すと、
+/// 祖先にチームメイトの claude が現れ、Claude の Stop が委譲セッション扱いになる。実行環境に
+/// 左右されないよう、ここでは Stop の入力だけで判定させる。
+fn disable_teammate_probe(command: &mut Command) {
+    command.env("CLAW_HOOKS_TEAMMATE_PROBE", "off");
+}
+
 /// 生のバイト列（不正な UTF-8 を含み得る）を stdin に渡して実行し、
 /// `(stdout, exit_code)` を返す。
 fn run_hook_raw_bytes(input: &[u8], format: &str, config_path: &std::path::Path) -> (Vec<u8>, i32) {
     let state_home = isolated_state_home();
     let mut command = Command::new(env!("CARGO_BIN_EXE_claw-hooks"));
     isolate_state_dir(&mut command, state_home.path());
+    disable_teammate_probe(&mut command);
     let mut child = command
         .arg("run")
         .arg("--format")

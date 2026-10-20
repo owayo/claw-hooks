@@ -1,8 +1,14 @@
-//! Stop フックの stage の打ち切り（gate）と、再停止での 1 回だけの再試行の統合テスト。
+//! Stop フックの stage の打ち切り（gate）と、再停止での 1 回だけの再試行、Claude Code の
+//! チームメイト（split-pane の別プロセス）の Stop の扱いの統合テスト。
 //!
 //! claw-hooks の実バイナリを起動し、エージェントへ返す JSON と、フックが実際に動いた回数を
 //! 確かめる。回数は「検査の実行回数」「後続（副作用）の起動回数」を別々のマーカーファイルの
 //! 行数で数え、判定（Block の有無）・ユーザー向け通知（`systemMessage`）の有無とは分けて検証する。
+//!
+//! チームメイトの判定は祖先プロセスの argv を読むため、通常のテストは子プロセスに
+//! `CLAW_HOOKS_TEAMMATE_PROBE=off` を渡し、テストを動かしている環境（チームメイトの中かどうか）に
+//! 左右されないようにする。判定そのもののテストだけが、チームメイトの argv を持つ `/bin/sh` を
+//! 親にして `auto` で起動する。
 //!
 //! 再試行の予定はユーザーのキャッシュディレクトリ（`dirs::cache_dir()/claw-hooks`）に置かれる
 //! ため、子プロセスの `HOME` / `XDG_CACHE_HOME` を一時ディレクトリへ向けて隔離する。Windows は
@@ -96,6 +102,38 @@ impl Fixture {
         )
     }
 
+    /// メインセッション用（既定の `session_scope = "primary"`）と委譲セッション用
+    /// （`"delegated"`）の、どちらも待つ（report = true）フックの設定を書く。
+    /// どちらが動いたかは `primary_runs` / `delegated_runs` で数える。
+    fn scope_config(&self) -> PathBuf {
+        let primary = self.command(
+            "primary-hook",
+            &format!("echo run >> {}", self.path("primary.log").display()),
+        );
+        let delegated = self.command(
+            "delegated-hook",
+            &format!("echo run >> {}", self.path("delegated.log").display()),
+        );
+        self.write_config(
+            "scope.toml",
+            &format!(
+                "[[stop_hooks]]\ncommands = [{primary}]\nstage = 1\nreport = true\n\n\
+                 [[stop_hooks]]\ncommands = [{delegated}]\nstage = 1\nreport = true\n\
+                 session_scope = \"delegated\"\n"
+            ),
+        )
+    }
+
+    /// メインセッション用のフックの実行回数。
+    fn primary_runs(&self) -> usize {
+        count_lines(&self.path("primary.log"))
+    }
+
+    /// 委譲セッション用のフックの実行回数。
+    fn delegated_runs(&self) -> usize {
+        count_lines(&self.path("delegated.log"))
+    }
+
     /// 検査が通るようにする（エージェントが問題を直したことに相当）。
     fn fix(&self) {
         std::fs::write(self.path("ok"), "").expect("Failed to write ok marker");
@@ -180,19 +218,59 @@ impl Fixture {
         input: &str,
         envs: &[(&str, &str)],
     ) -> (String, String, i32) {
-        let home = self.path("home");
         let mut command = Command::new(env!("CARGO_BIN_EXE_claw-hooks"));
         command
             .arg("run")
             .arg("--format")
             .arg(format)
             .arg("--config")
+            .arg(config);
+        self.execute(command, input, envs)
+    }
+
+    /// `/bin/sh` を親にして claw-hooks を実行し、`(stdout, stderr, exit_code)` を返す。
+    ///
+    /// 親のシェルの argv の末尾に `parent_args` を並べる（チームメイトの claude の argv の
+    /// 代わり）。claw-hooks が実際に祖先プロセスの argv を読めることを確かめるためのもので、
+    /// シェルが claw-hooks を exec で置き換えて祖先から消えないよう、終了後に終了コードを
+    /// 返す文を続ける。
+    fn run_under_parent(
+        &self,
+        format: &str,
+        config: &Path,
+        input: &str,
+        parent_args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> (String, String, i32) {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(r#""$1" run --format "$2" --config "$3"; status=$?; exit "$status""#)
+            .arg("teammate-parent")
+            .arg(env!("CARGO_BIN_EXE_claw-hooks"))
+            .arg(format)
             .arg(config)
+            .args(parent_args);
+        self.execute(command, input, envs)
+    }
+
+    /// 作業場所に合わせた環境で `command` を実行し、stdin に `input` を渡す。
+    fn execute(
+        &self,
+        mut command: Command,
+        input: &str,
+        envs: &[(&str, &str)],
+    ) -> (String, String, i32) {
+        let home = self.path("home");
+        command
             .current_dir(self.dir.path())
             .env("HOME", &home)
             .env("XDG_CACHE_HOME", home.join("cache"))
             // テスト自体が claw-hooks の Stop フックの中で走っていても、判定を飛ばさない
             .env_remove("CLAW_HOOKS_STOP_ACTIVE")
+            // テストを Claude Code のチームメイトの中で回しても、祖先のチームメイトで
+            // Stop が委譲セッション扱いにならないようにする（検出のテストは `envs` で戻す）
+            .env("CLAW_HOOKS_TEAMMATE_PROBE", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -482,4 +560,118 @@ fn test_windsurf_gate_failure_does_not_start_later_stage() {
     assert_eq!(fx.checks(), 1);
     fx.assert_effects_settled(0);
     assert!(fx.retry_records().is_empty(), "再試行を予定しない");
+}
+
+// === Claude Code のチームメイト（split-pane の別プロセス）の Stop ===
+
+/// Claude Code が split-pane のチームメイトを起動するときの argv（値を別の引数で渡す形）。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const TEAMMATE_ARGS: &[&str] = &[
+    "--agent-id",
+    "docs@session-test",
+    "--agent-name",
+    "docs",
+    "--team-name",
+    "session-test",
+    "--agent-color",
+    "blue",
+];
+
+/// 値を `=` でつなぐ形と、別の引数で渡す形が混ざった argv。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const TEAMMATE_ARGS_INLINE: &[&str] = &[
+    "--agent-id=docs@session-test",
+    "--agent-name",
+    "docs",
+    "--team-name=session-test",
+];
+
+/// チームメイトの Stop の入力。`--agent-type` 付きで起動したチームメイトは `agent_type` だけを
+/// 持ち、`agent_id` は持たない（`--agent` で起動したメインセッションと同じ形）。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn claude_teammate_stop() -> String {
+    serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "teammate-session",
+        "stop_hook_active": false,
+        "agent_type": "general-purpose",
+        "last_assistant_message": "Done.",
+    })
+    .to_string()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn test_claude_stop_under_teammate_process_runs_only_delegated_hooks() {
+    // 祖先のプロセスの argv にチームメイトの識別子がそろっていれば、入力に agent_id が
+    // 無くても委譲セッションとして扱い、既定（primary）のフックを動かさない
+    let fx = Fixture::new();
+    let config = fx.scope_config();
+    for parent_args in [TEAMMATE_ARGS, TEAMMATE_ARGS_INLINE] {
+        let (stdout, stderr, code) = fx.run_under_parent(
+            "claude",
+            &config,
+            &claude_teammate_stop(),
+            parent_args,
+            &[("CLAW_HOOKS_TEAMMATE_PROBE", "auto")],
+        );
+        assert_eq!(
+            (code, stdout.trim()),
+            (0, "{}"),
+            "{parent_args:?}: {stderr}"
+        );
+    }
+    assert_eq!(fx.primary_runs(), 0, "primary のフックは動かない");
+    assert_eq!(fx.delegated_runs(), 2, "delegated のフックは毎回動く");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn test_teammate_probe_off_keeps_input_based_session_kind() {
+    // `CLAW_HOOKS_TEAMMATE_PROBE=off` は祖先の走査だけを止める。同じ親の下でも入力だけで
+    // 判定し、入力に agent_id と agent_type がそろえば従来どおり委譲セッションになる
+    let fx = Fixture::new();
+    let config = fx.scope_config();
+    let off = [("CLAW_HOOKS_TEAMMATE_PROBE", "off")];
+
+    let (stdout, stderr, code) = fx.run_under_parent(
+        "claude",
+        &config,
+        &claude_teammate_stop(),
+        TEAMMATE_ARGS,
+        &off,
+    );
+    assert_eq!((code, stdout.trim()), (0, "{}"), "{stderr}");
+    assert_eq!((fx.primary_runs(), fx.delegated_runs()), (1, 0));
+
+    let subagent_stop = serde_json::json!({
+        "hook_event_name": "Stop",
+        "session_id": "subagent-session",
+        "stop_hook_active": false,
+        "agent_id": "agent-1",
+        "agent_type": "Explore",
+    })
+    .to_string();
+    let (stdout, stderr, code) =
+        fx.run_under_parent("claude", &config, &subagent_stop, TEAMMATE_ARGS, &off);
+    assert_eq!((code, stdout.trim()), (0, "{}"), "{stderr}");
+    assert_eq!((fx.primary_runs(), fx.delegated_runs()), (1, 1));
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn test_teammate_probe_does_not_change_other_agents() {
+    // 祖先の走査は Claude Code の Stop だけに使う。Codex CLI の Stop は同じ親の下でも
+    // メインセッションとして扱う
+    let fx = Fixture::new();
+    let config = fx.scope_config();
+    let (stdout, stderr, code) = fx.run_under_parent(
+        "codex",
+        &config,
+        &codex_stop("codex-session", false),
+        TEAMMATE_ARGS,
+        &[("CLAW_HOOKS_TEAMMATE_PROBE", "auto")],
+    );
+    assert_eq!((code, stdout.trim()), (0, "{}"), "{stderr}");
+    assert_eq!((fx.primary_runs(), fx.delegated_runs()), (1, 0));
 }

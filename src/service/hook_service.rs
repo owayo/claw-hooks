@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::domain::{Decision, FilterChain, HookEvent, HookInput};
 use crate::service::adapter::FormatAdapter;
 use crate::service::log_sanitizer::{summarize_hook_input, summarize_parsed_hook_input};
+use crate::service::teammate_probe;
 
 /// stdin から受け取るフック入力の最大バイト数。
 ///
@@ -227,8 +228,13 @@ impl HookService {
     /// アダプターを先に作り、呼び出し元エージェントの性質（識別子と、実行前フックの
     /// 補足がエージェントへ届くか）をフィルターチェーンへ渡す。command hooks の判定器は
     /// これを入力として受け取り、補足を書くかどうかを決める。
+    ///
+    /// アダプターには Claude Code のチームメイトの判定器を渡す（環境変数
+    /// `CLAW_HOOKS_TEAMMATE_PROBE` が `off` なら渡さない）。使うのは Claude の Stop だけで、
+    /// 祖先プロセスを読むのも Stop の入力を読んだときに限る。
     pub fn new(config: Config, format: Format, trace: bool) -> Self {
-        let adapter = FormatAdapter::new(format, config.output_max_length);
+        let adapter = FormatAdapter::new(format, config.output_max_length)
+            .with_teammate_probe(teammate_probe::from_env());
         let filter_chain = FilterChain::with_agent(&config, adapter.agent_profile());
         Self {
             config,

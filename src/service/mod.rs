@@ -3,6 +3,7 @@
 mod adapter;
 mod hook_service;
 pub(crate) mod log_sanitizer;
+mod teammate_probe;
 
 // ライブラリAPIとしての利用に備え未使用を許容
 #[allow(unused)]

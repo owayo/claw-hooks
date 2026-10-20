@@ -17,6 +17,7 @@ use crate::domain::{
     AgentProfile, Decision, HookEvent, HookInput, normalize_lint_output, truncate_output,
 };
 use crate::service::log_sanitizer::summarize_hook_input;
+use crate::service::teammate_probe::{TeamEvidence, TeammateProbe};
 
 /// 壊れた JSON からイベント名を走査する際に読む先頭バイト数。
 ///
@@ -171,16 +172,31 @@ pub struct FormatAdapter {
     /// 一方 `hooks.json` はイベントごとに別エントリでコマンドを登録するため、
     /// 呼び出し側がどちらのイベントかを知っている。その情報を受け取るための項目。
     event_override: Option<String>,
+    /// Claude Code の Stop を出したセッションが、split-pane のチームメイト（別プロセスの
+    /// claude）かを調べる判定器。チームメイトの Stop の入力には `agent_id` が入らないため、
+    /// 入力だけでは見分けられない（`service::teammate_probe` 参照）。
+    /// `None` のときは祖先を調べず、入力だけで判定する。
+    teammate_probe: Option<Box<dyn TeammateProbe>>,
 }
 
 impl FormatAdapter {
     /// 指定されたフォーマット用の新しいアダプターを作成する。
+    ///
+    /// チームメイトの判定器は持たない（祖先プロセスを読まない）。フックを処理する経路では
+    /// `HookService::new` が `with_teammate_probe` で渡す。
     pub fn new(format: Format, output_max_length: usize) -> Self {
         Self {
             format,
             output_max_length,
             event_override: None,
+            teammate_probe: None,
         }
+    }
+
+    /// Claude Code のチームメイトの判定器を設定する（`None` なら入力だけで判定する）。
+    pub fn with_teammate_probe(mut self, probe: Option<Box<dyn TeammateProbe>>) -> Self {
+        self.teammate_probe = probe;
+        self
     }
 
     /// `--event` によるイベント名の明示指定を設定する。
@@ -823,8 +839,9 @@ impl FormatAdapter {
             .stop_hook_active
             .ok_or_else(|| anyhow!("Missing stop_hook_active field"))?;
         // `--agent` で起動したメインセッションにも agent_type は入るため、
-        // サブエージェント固有の agent_id と agent_type が両方ある場合だけ委譲扱いにする。
-        // 欠落・空・型不一致は最終 lint / コミットを落とさないよう Primary に倒す。
+        // サブエージェント固有の agent_id と agent_type が両方ある場合だけ入力から委譲扱いにする。
+        // それ以外は、split-pane のチームメイト（入力に agent_id が入らない）かを祖先プロセスで
+        // 調べる。見つからない・調べられないときは最終 lint / コミットを落とさないよう Primary。
         let has_agent_id = claude_input
             .agent_id
             .as_ref()
@@ -838,7 +855,7 @@ impl FormatAdapter {
         let session_kind = if has_agent_id && has_agent_type {
             crate::domain::StopSessionKind::Delegated
         } else {
-            crate::domain::StopSessionKind::Primary
+            self.claude_teammate_session_kind()
         };
         let tool_input = crate::domain::ToolInput::Stop(crate::domain::StopInput {
             status: None,
@@ -853,6 +870,7 @@ impl FormatAdapter {
             agent = self.format.label(),
             event = ?HookEvent::Stop,
             tool_name = %tool_name,
+            session_kind = ?session_kind,
             "{} parsed input", self.log_prefix()
         );
 
@@ -862,6 +880,19 @@ impl FormatAdapter {
             tool_input,
             session_id: claude_input.session_id,
         })
+    }
+
+    /// 入力に委譲の証拠が無い Claude の Stop について、チームメイトの判定器で種別を決める。
+    ///
+    /// 祖先にチームメイトの claude がいれば委譲セッション。見つからない・調べられない・
+    /// 判定器が無いときは Primary（入力だけで判定していた従来と同じ向き）。
+    fn claude_teammate_session_kind(&self) -> crate::domain::StopSessionKind {
+        match self.teammate_probe.as_deref().map(TeammateProbe::evidence) {
+            Some(TeamEvidence::Found) => crate::domain::StopSessionKind::Delegated,
+            Some(TeamEvidence::NotFound | TeamEvidence::Unavailable) | None => {
+                crate::domain::StopSessionKind::Primary
+            }
+        }
     }
 
     /// Claude の SubagentStart / SubagentStop を内部 HookInput に変換する。
@@ -3465,6 +3496,121 @@ mod tests {
         } else {
             panic!("Expected Stop tool input");
         }
+    }
+
+    // === チームメイトの判定器（祖先プロセス）による Stop の種別 ===
+
+    /// 固定の証拠を返し、呼ばれた回数を数える偽のチームメイト判定器。
+    struct FixedProbe {
+        evidence: TeamEvidence,
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    /// 判定器を持たせたアダプターと、判定器が呼ばれた回数を返す。
+    fn adapter_with_probe(
+        format: Format,
+        evidence: TeamEvidence,
+    ) -> (FormatAdapter, std::rc::Rc<std::cell::Cell<usize>>) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let probe = FixedProbe {
+            evidence,
+            calls: calls.clone(),
+        };
+        (
+            FormatAdapter::new(format, 0).with_teammate_probe(Some(Box::new(probe))),
+            calls,
+        )
+    }
+
+    impl TeammateProbe for FixedProbe {
+        fn evidence(&self) -> TeamEvidence {
+            self.calls.set(self.calls.get() + 1);
+            self.evidence
+        }
+    }
+
+    fn stop_session_kind(result: &HookInput) -> crate::domain::StopSessionKind {
+        match &result.tool_input {
+            crate::domain::ToolInput::Stop(stop) => stop.session_kind,
+            other => panic!("Expected Stop tool input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_claude_stop_from_teammate_process_is_delegated() {
+        // split-pane のチームメイトの Stop は、`--agent-type` 付きで起動されていれば
+        // agent_type だけを持ち、agent_id は持たない。入力だけでは `--agent` の
+        // メインセッションと同じ形なので、祖先の判定器で委譲と分かる。
+        let (adapter, calls) = adapter_with_probe(Format::Claude, TeamEvidence::Found);
+        for input in [
+            r#"{"session_id":"s","hook_event_name":"Stop","stop_hook_active":false,"agent_type":"general-purpose"}"#,
+            r#"{"session_id":"s","hook_event_name":"Stop","stop_hook_active":false}"#,
+            r#"{"session_id":"s","hook_event_name":"Stop","stop_hook_active":true}"#,
+        ] {
+            let result = adapter.parse_input(input).unwrap();
+            assert_eq!(
+                stop_session_kind(&result),
+                crate::domain::StopSessionKind::Delegated,
+                "{input}"
+            );
+        }
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn test_claude_stop_without_teammate_evidence_is_primary() {
+        // 見つからなかったときも、調べられなかったときも Primary（従来と同じ向き）
+        for evidence in [TeamEvidence::NotFound, TeamEvidence::Unavailable] {
+            let (adapter, calls) = adapter_with_probe(Format::Claude, evidence);
+            let input = r#"{"session_id":"s","hook_event_name":"Stop","stop_hook_active":false,"agent_type":"security-reviewer"}"#;
+            let result = adapter.parse_input(input).unwrap();
+            assert_eq!(
+                stop_session_kind(&result),
+                crate::domain::StopSessionKind::Primary,
+                "{evidence:?}"
+            );
+            assert_eq!(calls.get(), 1, "{evidence:?}");
+        }
+    }
+
+    #[test]
+    fn test_claude_stop_with_agent_id_and_type_does_not_probe() {
+        // 入力に委譲の証拠があれば、祖先プロセスは読まない
+        let (adapter, calls) = adapter_with_probe(Format::Claude, TeamEvidence::NotFound);
+        let input = r#"{"hook_event_name":"Stop","stop_hook_active":false,"agent_id":"agent-1","agent_type":"Explore"}"#;
+        let result = adapter.parse_input(input).unwrap();
+        assert_eq!(
+            stop_session_kind(&result),
+            crate::domain::StopSessionKind::Delegated
+        );
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn test_teammate_probe_is_used_only_for_claude_stop() {
+        // Claude のツールイベント・サブエージェントのイベントでは祖先を読まない
+        let (adapter, calls) = adapter_with_probe(Format::Claude, TeamEvidence::Found);
+        for input in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+            r#"{"hook_event_name":"SubagentStop","agent_id":"a","agent_type":"Explore","stop_hook_active":false}"#,
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+        ] {
+            adapter.parse_input(input).unwrap();
+        }
+        assert_eq!(calls.get(), 0);
+
+        // ほかのエージェントの Stop は判定器を使わず、従来どおり Primary
+        let (adapter, calls) = adapter_with_probe(Format::Codex, TeamEvidence::Found);
+        let result = adapter
+            .parse_input(&complete_codex_input(
+                r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            stop_session_kind(&result),
+            crate::domain::StopSessionKind::Primary
+        );
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]

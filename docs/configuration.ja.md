@@ -299,9 +299,18 @@ commands = ["git-sc --all --yes --quiet"]
 
 **レポート動作:** `report = true`（または`condition`によるデフォルト`true`）の場合、コマンド失敗はAIエージェントにブロック理由として返されます。ブロック理由の先頭には、失敗したステージと実行しなかったステージの要約が付きます。`report = false`（または`condition`なしによるデフォルト`false`）の場合、コマンドは fire-and-forget 方式で起動され、Hook応答をブロックしません。デタッチコマンドは stdin/stdout/stderr が null になるため、spawn 失敗はログに残りますが、コマンド出力と終了ステータスは収集されません。Windsurf と Grok CLI の Stop フックは常にベストエフォートです（Windsurf は基盤側が非同期、Grok は stdout が無視されるため）。
 
-**セッションスコープ（エージェントセッションの抑止）:** claw-hooks は委譲エージェントのセッションとメインセッションを自動で判別します: 委譲側の Stop ペイロードには空白でない `agent_id` と `agent_type` の両方が含まれます（公式仕様では `agent_id` は「サブエージェント呼び出しの内側で発火したときだけ入る」と定義されています）。`--agent` で起動したメインセッションにも `agent_type` は入り得ますが、サブエージェント固有の `agent_id` は無いためメイン扱いを維持します。デフォルト（`session_scope = "primary"`）では Stop フックは**メインセッションの停止時のみ**実行されるため、大量の teammate が通知スパム・重複 lint・並列 `git` 自動コミットのレースを引き起こすことはありません。常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。判別フィールドが欠落・空白・非文字列の場合と、セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity / Grok CLI）はメインセッションとして扱われます。
+**セッションスコープ（エージェントセッションの抑止）:** claw-hooks は委譲エージェントのセッションとメインセッションを自動で判別します。デフォルト（`session_scope = "primary"`）では、Stop フックは**メインセッションの停止時のみ**実行されます。claw-hooks が委譲セッションと判別した停止（後述）では、通知スパムや重複 lint は起きず、`git` の自動コミットがリーダーの作業途中の変更までコミットすることもありません。常に実行したいフックには `session_scope = "all"` を、エージェントセッション専用のフック（teammate ごとのクリーンアップ等）には `"delegated"` を指定します。
 
-> **agent team の teammate はスコープ外です。** teammate はインプロセスで動き、完了は Claude Code の別イベント `TeammateIdle` で通知されますが、claw-hooks はこれを意図的に扱いません。このイベントにはループカウンタ（`stop_hook_active` / `loop_count` に相当するもの）が無く、失敗を伝える唯一の手段が「teammate に作業を継続させる」ことなので、恒久的に失敗する lint があると無限ループになります。**したがって teammate の idle 時には停止時 lint も通知も実行されません。**
+Claude Code の Stop は、次のどちらかに当たれば委譲セッションとして扱います。
+
+- ペイロードに、空白でない `agent_id` と `agent_type` の両方がある（公式仕様では `agent_id` は「サブエージェント呼び出しの内側で発火したときだけ入る」と定義されています）。`--agent` で起動したメインセッションにも `agent_type` は入り得ますが、サブエージェント固有の `agent_id` は無いためメイン扱いを維持します。
+- フックの祖先に、split-pane モード（tmux または iTerm2）の teammate（agent team のメンバー）がいる。この teammate は別プロセスの `claude` で、ターンの終わりに `agent_id` の無い通常の `Stop` を出すため、ペイロードだけではメインセッションと見分けられません。そこで claw-hooks は祖先プロセスのコマンドライン（同じユーザーのプロセスを 32 個まで。macOS と Linux）を読み、Claude Code が teammate を起動するときに渡す `--agent-id`・`--agent-name`・`--team-name` の 3 つが 1 つのコマンドラインにそろっているかを調べます。teammate の中で起動したもの（入れ子の `claude -p` など）も委譲セッションになります。
+
+どちらにも当たらないときと、祖先プロセスを読めなかったときは、メインセッションとして扱います。セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity / Grok CLI）は常にメインセッションです。
+
+claw-hooks に祖先プロセスのコマンドラインを読ませたくない場合は、フックを動かす環境で `CLAW_HOOKS_TEAMMATE_PROBE=off` を設定します（ほかに受け付ける値はデフォルトの `auto` だけです）。止まるのは祖先の確認だけで、ペイロードによる判別は残ります。split-pane の teammate はメインセッション扱いに戻ります。
+
+> **in-process の teammate はスコープ外です。** in-process モードの teammate はリーダーのプロセスの中で動き、完了は Claude Code の別イベント `TeammateIdle` で通知されますが、claw-hooks はこれを意図的に扱いません。このイベントにはループカウンタ（`stop_hook_active` / `loop_count` に相当するもの）が無く、失敗を伝える唯一の手段が「teammate に作業を継続させる」ことなので、恒久的に失敗する lint があると無限ループになります。**したがって in-process の teammate の idle 時には停止時 lint も通知も実行されません。**
 
 ```toml
 # メインセッションの停止時のみ実行（デフォルト — フィールド指定不要）

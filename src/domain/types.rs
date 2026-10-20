@@ -215,16 +215,19 @@ pub struct SubagentInput {
 
 /// Stop イベントを発火したセッションの種別。
 ///
-/// Claude Code のチーム開発機能では teammate（別プロセスの claude インスタンス）が
-/// それぞれ自分の Stop フックを発火する。teammate の Stop ペイロードに含まれる
-/// `agent_id` と `agent_type` の組で判別する。`--agent` で起動したメインセッションも
-/// `agent_type` を持ち得るが、サブエージェント固有の `agent_id` は持たない。
+/// Claude Code では、次のどちらかに当たれば委譲セッションとする（判定はアダプター）。
+/// - Stop の入力に、空白でない `agent_id` と `agent_type` が両方ある。`--agent` で起動した
+///   メインセッションも `agent_type` を持ち得るが、サブエージェント固有の `agent_id` は持たない
+/// - フックの祖先プロセスに、split-pane（tmux / iTerm2）のチームメイト（`--agent-id` /
+///   `--agent-name` / `--team-name` 付きで起動された別プロセスの claude）がいる。チームメイトは
+///   自分のプロセスのメインスレッドとして Stop を出すため、入力に `agent_id` が入らない
+///   （`service::teammate_probe` 参照）
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StopSessionKind {
     /// ユーザーと対話しているメインセッション。
     #[default]
     Primary,
-    /// teammate 等、委譲された別プロセスのエージェントセッション。
+    /// サブエージェントや、チームメイト（とその配下）の委譲されたエージェントセッション。
     Delegated,
 }
 

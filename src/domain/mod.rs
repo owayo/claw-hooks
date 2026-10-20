@@ -6,6 +6,7 @@
 //! - シェルコマンドパーサー
 //! - ローテーション付きロガー
 //! - フック呼び出しをまたいで残す状態の置き場所
+//! - 祖先プロセスの情報（親の PID と argv）の読み取り
 
 pub mod command;
 pub mod filters;
@@ -13,6 +14,7 @@ pub mod invocation;
 pub mod logger;
 pub mod normalize;
 pub mod parser;
+pub mod process_tree;
 pub mod state_store;
 #[cfg(test)]
 pub mod test_helpers;

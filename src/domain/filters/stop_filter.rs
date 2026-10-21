@@ -33,6 +33,10 @@ use crate::domain::{AgentProfile, Decision, HookEvent, HookInput, StopSessionKin
 /// 子プロセス（例: git-sc が起動する別の AI エージェント CLI）が別の claw-hooks
 /// Stop イベントをトリガーした場合、この環境変数が継承され、Stop フックをスキップ
 /// してループを断ち切る。
+/// 外部の呼び出し側もこの変数を付ける。別のエージェントのセッションから AI CLI を
+/// 起動するとき、起動した CLI の Stop フックを止めるために使う。使い方は
+/// docs/configuration.md の「Stop Hook Environment Variables」にある。公開の仕組みなので、
+/// 名前と「設定されていれば値に関係なく Stop フックをすべて飛ばす」意味を変えない。
 const STOP_ACTIVE_ENV: &str = "CLAW_HOOKS_STOP_ACTIVE";
 
 /// 再試行の予定の記録を置く状態の種類（`StateStore` の `<kind>` ディレクトリ）。

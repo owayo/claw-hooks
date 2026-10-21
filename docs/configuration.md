@@ -308,6 +308,8 @@ A Claude Code Stop counts as delegated when either of these holds:
 
 When neither holds, or the ancestor processes cannot be read, the Stop is treated as the main session. Agents without a session-kind signal (Cursor, Windsurf, Codex CLI, Antigravity, Grok CLI) are always treated as the main session.
 
+An AI CLI started from inside the main session (such as `codex exec` or `claude -p`) is treated as the main session too: `claude -p` counts as delegated only when it is started inside a split-pane teammate. Every main-session stop hook therefore runs when the started CLI stops, and if it runs in the same working tree, an auto-commit hook also commits the starting session's unfinished edits. To prevent this, set `CLAW_HOOKS_STOP_ACTIVE=1` on the command that starts the CLI (see [Stop Hook Environment Variables](#stop-hook-environment-variables)).
+
 To keep claw-hooks from reading the command lines of its ancestor processes, set `CLAW_HOOKS_TEAMMATE_PROBE=off` in the environment the hook runs in (the only other accepted value is `auto`, the default). This turns off only the ancestor check: the payload check still applies, so split-pane teammates are treated as the main session again.
 
 > **In-process teammates are out of scope.** A teammate in in-process mode runs inside the lead's process and announces completion through Claude Code's separate `TeammateIdle` event, which claw-hooks deliberately does not handle: that event carries no loop counter (no `stop_hook_active`, no `loop_count`), and its only way to report a failure is "keep the teammate working", which a permanently failing lint would turn into an endless loop. **Stop-time lint and notifications therefore do not run when an in-process teammate goes idle.**
@@ -434,8 +436,18 @@ claw-hooks passes the following environment variables to stop hook child process
 
 | Variable | Description |
 |----------|-------------|
-| `CLAW_HOOKS_STOP_ACTIVE` | Always set to `1`. Prevents recursive stop hook execution when a child process triggers another claw-hooks stop event. |
+| `CLAW_HOOKS_STOP_ACTIVE` | Always set to `1`. Prevents recursive stop hook execution when a child process triggers another claw-hooks stop event. Whoever starts an AI CLI can also set it to keep that CLI's stop hooks from running (see below). |
 | `CLAW_HOOKS_AGENT_MESSAGE` | The AI agent's last message before stopping (if available). Contains what the agent was working on. |
+
+**Setting `CLAW_HOOKS_STOP_ACTIVE` when you start a CLI:** When you start an AI CLI from another agent's session (for example, to ask a different AI for a second opinion while you work), set this variable on the command, and claw-hooks runs no stop hooks at all in the started CLI. Auto-commit and lint hooks do not run either, so the starting session's unfinished edits are not committed, and lint results are not returned to the started CLI as a block reason. Hooks other than Stop, such as PreToolUse, still run.
+
+claw-hooks only checks whether the variable is set, not its value: `CLAW_HOOKS_STOP_ACTIVE=0` also stops the stop hooks, so write `CLAW_HOOKS_STOP_ACTIVE=1`. This relies on the started CLI passing its environment on to its hook processes (confirmed with Claude Code, Codex CLI, and Antigravity CLI).
+
+```sh
+# Ask another AI to review the diff, from inside a working session
+CLAW_HOOKS_STOP_ACTIVE=1 codex exec --sandbox read-only "Review this diff"
+CLAW_HOOKS_STOP_ACTIVE=1 claude -p "Review this diff"
+```
 
 **`CLAW_HOOKS_AGENT_MESSAGE`** is populated from:
 - **Claude Code**: `last_assistant_message` field in the Stop event

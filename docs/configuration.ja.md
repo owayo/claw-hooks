@@ -308,6 +308,8 @@ Claude Code の Stop は、次のどちらかに当たれば委譲セッショ�
 
 どちらにも当たらないときと、祖先プロセスを読めなかったときは、メインセッションとして扱います。セッション種別のシグナルを持たないエージェント（Cursor / Windsurf / Codex CLI / Antigravity / Grok CLI）は常にメインセッションです。
 
+メインセッションの中から別の AI CLI を起動したとき（`codex exec` や `claude -p` など）も、起動された CLI の停止はメインセッションとして扱います。`claude -p` が委譲セッションになるのは、split-pane の teammate の中で起動したときだけです。そのため、起動された CLI でもメインセッション向けの Stop フックがすべて動きます。同じ作業ツリーで起動していれば、自動コミットのフックは、起動した側の作業途中の変更までコミットします。これを止めるには、起動する側で `CLAW_HOOKS_STOP_ACTIVE=1` を付けます（[Stopフックの環境変数](#stopフックの環境変数) を参照）。
+
 claw-hooks に祖先プロセスのコマンドラインを読ませたくない場合は、フックを動かす環境で `CLAW_HOOKS_TEAMMATE_PROBE=off` を設定します（ほかに受け付ける値はデフォルトの `auto` だけです）。止まるのは祖先の確認だけで、ペイロードによる判別は残ります。split-pane の teammate はメインセッション扱いに戻ります。
 
 > **in-process の teammate はスコープ外です。** in-process モードの teammate はリーダーのプロセスの中で動き、完了は Claude Code の別イベント `TeammateIdle` で通知されますが、claw-hooks はこれを意図的に扱いません。このイベントにはループカウンタ（`stop_hook_active` / `loop_count` に相当するもの）が無く、失敗を伝える唯一の手段が「teammate に作業を継続させる」ことなので、恒久的に失敗する lint があると無限ループになります。**したがって in-process の teammate の idle 時には停止時 lint も通知も実行されません。**
@@ -434,8 +436,18 @@ claw-hooksはStopフックの子プロセスに以下の環境変数を渡しま
 
 | 変数名 | 説明 |
 |--------|------|
-| `CLAW_HOOKS_STOP_ACTIVE` | 常に `1` に設定。子プロセスが別のclaw-hooks Stopイベントをトリガーした際の再帰実行を防止します。 |
+| `CLAW_HOOKS_STOP_ACTIVE` | 常に `1` に設定。子プロセスが別のclaw-hooks Stopイベントをトリガーした際の再帰実行を防止します。AI CLI を起動する側が付けて、その CLI の Stop フックを止めることもできます（下記）。 |
 | `CLAW_HOOKS_AGENT_MESSAGE` | AIエージェントが停止前に残した最後のメッセージ（利用可能な場合）。エージェントが何を作業していたかの情報を含みます。 |
+
+**`CLAW_HOOKS_STOP_ACTIVE` を起動する側で付ける:** AI CLI を起動するコマンドにこの変数を付けると、起動された CLI では claw-hooks が Stop フックを 1 つも実行しません。別のエージェントのセッションから AI CLI を起動するとき（例: 作業中のセッションから、別の AI にセカンドオピニオンを求める）に使います。自動コミットや lint のフックも動かないので、起動した側の作業途中の変更はコミットされません。lint の結果がブロック理由として起動された CLI に返ることもありません。PreToolUse など Stop 以外のフックは、いつもどおり動きます。
+
+claw-hooks は、この変数が設定されているかだけを見て、値は見ません。`CLAW_HOOKS_STOP_ACTIVE=0` でも Stop フックは止まるので、付けるときは `CLAW_HOOKS_STOP_ACTIVE=1` と書いてください。起動された CLI が、自分の環境変数をフックのプロセスに引き継ぐことが前提です（Claude Code・Codex CLI・Antigravity CLI で確かめています）。
+
+```sh
+# 作業中のセッションから、別の AI に差分のレビューを頼む
+CLAW_HOOKS_STOP_ACTIVE=1 codex exec --sandbox read-only "この差分をレビューしてください"
+CLAW_HOOKS_STOP_ACTIVE=1 claude -p "この差分をレビューしてください"
+```
 
 **`CLAW_HOOKS_AGENT_MESSAGE`** の取得元:
 - **Claude Code**: Stopイベントの `last_assistant_message` フィールド

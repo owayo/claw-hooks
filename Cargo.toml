@@ -4,7 +4,7 @@ version = "26.10.101"
 edition = "2024"
 # mise.toml で固定した toolchain と同じ値にする (tests/toolchain_sync.rs で検証)。
 # CI はこの版だけでビルド・テストするので、それより古い版への対応は宣言しない。
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 authors = ["owayo"]
 description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI"
 license = "MIT"
@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "development-tools"]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-toml = "1.1.6"
+toml = "1.1.7"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 chrono = "0.4.45"
@@ -25,6 +25,7 @@ dirs = "7.0.0"
 regex = "1.13.1"
 thiserror = "2.0.21"
 anyhow = "1.0.104"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 
 [dependencies.tree-sitter]
 version = "0.27.0"
@@ -41,7 +42,7 @@ ast-parser = ["tree-sitter", "tree-sitter-bash"]
 # Unix では timeout 時にプロセスグループ全体を SIGKILL するため libc を使う。
 # Windows では同等の Job Object 実装は未対応のため、libc 依存は不要。
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.189"
+libc = "0.2.190"
 
 [dev-dependencies]
 tempfile = "3.27.0"

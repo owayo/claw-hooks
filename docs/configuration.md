@@ -171,6 +171,8 @@ Validate with `claw-hooks check` — it reports whether a project config was fou
 
 > **Custom filters normalize the command name** the same way the built-in `rm`/`kill`/`dd` filters do, so `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` all match a `command = "npm"` filter.
 
+PowerShell command strings use the same command checks: `powershell -Command "Remove-Item target"` / `pwsh -c "rm target"`, including case variations, abbreviated options, and wrappers. `-EncodedCommand` is decoded from Base64 / UTF-16LE; Windows PowerShell also supports its implicit `-Command`. `-CommandWithArgs` / `-cwa` checks only the script, keeping its additional arguments out of the code. Files referenced by `-File` and scripts read from standard input are outside this extraction scope.
+
 **2. `--config` — Full config replacement**
 
 Use `--config` to specify a complete configuration file, replacing the global config entirely:
@@ -443,7 +445,7 @@ claw-hooks passes the following environment variables to stop hook child process
 
 claw-hooks only checks whether the variable is set, not its value: `CLAW_HOOKS_STOP_ACTIVE=0` also stops the stop hooks, so write `CLAW_HOOKS_STOP_ACTIVE=1`. This relies on the started CLI passing its environment on to its hook processes (confirmed with Claude Code, Codex CLI, and Antigravity CLI).
 
-```sh
+```bash
 # Ask another AI to review the diff, from inside a working session
 CLAW_HOOKS_STOP_ACTIVE=1 codex exec --sandbox read-only "Review this diff"
 CLAW_HOOKS_STOP_ACTIVE=1 claude -p "Review this diff"

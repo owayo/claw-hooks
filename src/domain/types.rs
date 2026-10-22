@@ -517,14 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_event_clone() {
-        let event = HookEvent::AfterFileEdit;
-        // Clone トレイトを明示的にテスト（Copy だけでなく）
-        let cloned = Clone::clone(&event);
-        assert_eq!(event, cloned);
-    }
-
-    #[test]
     fn test_hook_event_debug() {
         assert_eq!(format!("{:?}", HookEvent::BeforeCommand), "BeforeCommand");
         assert_eq!(format!("{:?}", HookEvent::AfterFileEdit), "AfterFileEdit");

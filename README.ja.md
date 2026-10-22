@@ -40,7 +40,7 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **RMコマンドブロック**: `rm`, `rmdir`, `del`, `erase`, `rd`, PowerShell の `Remove-Item` をブロックし、[safe-rm](https://github.com/owayo/safe-rm)を提案
 - **PowerShell ツール対応**: Claude Code の `PowerShell` ツールにも同じフィルターを適用。Git Bash の無い Windows では PowerShell が唯一のシェルツールになる。matcher は `Bash|PowerShell` を指定すること
 - **DDコマンドブロック**: ディスク上書き事故を防ぐため、オプションで`dd`をブロック
-- **AST解析**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
+- **AST解析**: [tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) でラッパー（`sudo`、`timeout`、`command`、`exec`、`pkexec`、`gosu`、`su`、`arch`、`systemd-run`、`script`）、サブシェル、パイプ、`eval`、`find -exec`、`bash -c`/`-lc`、`powershell -Command`/`pwsh -c`、コマンド置換、ブレースグループ、制御構文（`if`/`for`/`while`/`case`）、basename/拡張子/大文字小文字の正規化、シェル quote removal 形式を扱う。文字列フォールバックパーサー（非 `ast-parser` ビルド）も同等のカバレッジを維持
 - **カスタムコマンドフィルター**: 正規表現サポート付きのカスタムフィルターを定義
 - **コマンドフック**: シェルコマンドの中にある特定のプログラムの呼び出し（たとえば `gws` の呼び出しすべて）を、実行前に外部の判定器へ渡す。呼び出しは危険コマンドの検出と同じパーサーで探すので、`sudo gws …` や `bash -c 'gws …'` の中の呼び出しも対象になる。判定器に渡すのはその呼び出しのクォート除去後の引数を収めた JSON で、コマンド全体は渡さない。判定器はコマンドを拒否する、エージェントへ補足を返す（Claude Code と Codex CLI）、何もしない、のいずれかを選べる
 - **拡張子フック**: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` のファイル保存・編集完了後にのみ外部ツール（フォーマッター、リンター）を実行。コマンドは拡張子（`".rs"`）ごとに書き、`"*"` のキーに書いたコマンドは、編集したすべてのファイルで拡張子のコマンドの後に実行する（拡張子のない `Makefile` やドットファイルの `.gitignore` も対象）。lint 出力は Claude Code / Codex CLI に `additionalContext`、Windsurf に exit 2 + stderr で送信。Antigravity CLI は `PostToolUse` エントリに `--event PostToolUse` を付けると `toolCall.args.TargetFile` を対象にツールが実行されるが、出力は `{}` 固定のためエージェントに伝わるのはファイル書き換えのみ。Grok CLI は編集ファイルパスが届くのでツール自体は通常どおり実行されるが、事後フックの stdout は無視されるため、エージェントに伝わるのはフォーマッターによるファイル書き換えのみ。エントリには Stop フックと同じ `condition` を付けられ、起動できないコマンドはプログラム名を付けて返す（見つからないプログラムはセッションにつき 1 回）
@@ -48,7 +48,7 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **Stop時プロジェクト全体Lint**: プロジェクト構成ファイル（`Cargo.toml`、`tsconfig.json` 等）を自動検出して lint/typecheck を実行。失敗はエージェントに返却（Windsurf と Grok CLI はベストエフォート）
 - **フックタイムアウト**: フックごとに設定可能（デフォルト 60 秒）。Unix ではプロセスグループ全体を SIGKILL するため、`sh -c '...'` 経由の孫プロセスも残らず停止
 - **出力長制限**: エージェントのコンテキスト溢れを防ぐマルチバイト安全な切り詰め（デフォルト 1000 文字）
-- **出力圧縮**: 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持。no-op 判定は**正規化後**の文字列で行うため、成功メッセージと毎回同じ設定警告を同時に出すツール（`ruff check --select D…` は毎回 stderr にルールセット非互換警告を出す）でも no-op と判定され、編集のたびに `All checks passed!` だけが返る事象を防ぐ。biome の `Checked N file(s) in <時間>. No fixes applied.` 集計行と、締めの `check ━` / `× Some errors were emitted while running checks.` は診断が併記されているときのみ除去し、出力全体がそれだけの場合は保持。ANSI 除去は `ESC` + 中間バイト形式（terminfo の `sgr0`、例: `\E(B\E[m`）と生の `SO`/`SI` にも対応（未対応だと色付き `cargo fmt --check` の差分行の先頭に文字が残り、上記の圧縮が一切効かなくなる）。ソース抜粋と unified diff では、フォーマッター名が付いた先頭行も含めてコードの空白・絶対パス・文字列内の記号列を保持し、Biome のインデント装飾は引き続き圧縮する。
+- **出力圧縮**: 装飾文字の連続（`.`、`=`、`-`、`─`、`━`、`^`、`·`、`→`、`_`）、`\r` で上書きされる進捗バー、cargo の繰り返し `Compiling`/`Blocking` ログ、共通絶対パスのプレフィックス、rustc/ruff/biome のマルチライン span 下線や枠線、Biome の空白可視化マーカーや重複行番号ペアを圧縮。成功時の `All checks passed!` や `1 file already formatted` など、何も変更していない formatter/linter の定型通知は省略し、ファイル変更・失敗の出力は保持。no-op 判定は**正規化後**の文字列で行うため、成功メッセージと毎回同じ設定警告を同時に出すツール（`ruff check --select D…` は毎回 stderr にルールセット非互換警告を出す）でも no-op と判定され、編集のたびに `All checks passed!` だけが返る事象を防ぐ。biome の `Checked N file(s) in <時間>. No fixes applied.` 集計行と、締めの `check ━` / `× Some errors were emitted while running checks.` は診断が併記されているときのみ除去し、出力全体がそれだけの場合は保持。ANSI 除去は `ESC` + 中間バイト形式（terminfo の `sgr0`、例: `\E(B\E[m`）と生の `SO`/`SI` にも対応（未対応だと色付き `cargo fmt --check` の差分行の先頭に文字が残り、上記の圧縮が一切効かなくなる）。ソース抜粋と unified diff では、フォーマッター名が付いた先頭行も含めてコードの空白・絶対パス・文字列内の記号列を保持し、空白だけの差分文脈行もマーカー・行数・空白を保ち、複数行文字列の内容を保持する。Biome のインデント装飾は引き続き圧縮する。
 - **ソース抜粋の再掲除去**: 同一診断の中で逐語一致するソース抜粋行（`3 │ code`、`> 3 │ code`、`12 | code`）は2回目以降を除去。biome は 1 件の診断をサブブロック（`!` メッセージ、`i` 補足、`i Safe fix:`）ごとに分けて同じ抜粋を再掲し、ruff も修正差分の中でコンテキストを再掲するが、これらの再掲には情報量が無い。差分行（`- old` / `+ new`）は修正内容そのものなので保持する。実出力での計測値: ruff −6%、biome −14%
 - **診断をまたぐ抜粋の再掲除去**: 同じ箇所を指す診断が連続すると、抜粋が**まるごと**毎回再掲される（1 つの関数定義に `ANN201` / `D103` / `ANN001` / `ANN001`、1 つの `let` に `useConst` / `noUnusedVariables` が付くケース）。直前の診断と逐語一致する抜粋はブロックごと除去する。各診断のヘッダは残るのでファイル・行・列は失われず、間に別の抜粋を挟む診断は自分の抜粋を保持する。実出力での計測値: さらに ruff −15%、biome −8%。既定の 1000 文字の上限が同じコードの再掲で埋まって後続の診断が切り捨てられていたため、これはトークン量だけでなく**エージェントに届く情報量**を増やす
 - **デバッグログ安全性**: 永続化するのはイベント/ツール/セッション、実行ファイルの basename、引数数、バイト数サマリーのみ。Stop/拡張子フックの引数と実行ファイルのディレクトリを除去し、生コマンド、ファイル本文、エージェントメッセージ、整形済み formatter/linter 出力はディスクに残さない（本文確認は `--trace` の stderr 経由のみ）
@@ -140,7 +140,7 @@ brew install owayo/claw-hooks/claw-hooks
 
 ### Cargo
 
-Rust 1.98.1 以上が必要です。
+Rust 1.99.0 以上が必要です。
 
 ```bash
 cargo install --git https://github.com/owayo/claw-hooks --locked

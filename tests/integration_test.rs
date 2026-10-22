@@ -206,6 +206,86 @@ fn test_shell_execution_delegation_bypasses_are_blocked() {
 }
 
 #[test]
+fn test_powershell_shell_string_is_blocked_for_every_agent() {
+    let command = "pwsh -NoProfile -Command 'Remove-Item target'";
+    for (format, input, expected_exit) in [
+        (
+            "claude",
+            serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}),
+            0,
+        ),
+        (
+            "codex",
+            serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}),
+            0,
+        ),
+        (
+            "cursor",
+            serde_json::json!({"hook_event_name": "beforeShellExecution", "command": command, "cwd": "/tmp"}),
+            0,
+        ),
+        (
+            "windsurf",
+            serde_json::json!({"agent_action_name": "pre_run_command", "tool_info": {"command_line": command}}),
+            2,
+        ),
+        (
+            "agy",
+            serde_json::json!({"toolCall": {"name": "run_command", "args": {"CommandLine": command}}}),
+            0,
+        ),
+        (
+            "grok",
+            serde_json::json!({"hookEventName": "PreToolUse", "toolName": "shell", "toolInput": {"command": command}}),
+            2,
+        ),
+    ] {
+        // 共通パーサーの検出が、各エージェントの拒否契約に沿って配送されることを確かめる。
+        let (stdout, stderr, exit_code) = run_hook_with_format(&input.to_string(), format);
+        assert_eq!(exit_code, expected_exit, "{format}: {stdout} {stderr}");
+        if format == "windsurf" {
+            assert!(stderr.contains("blocked"), "{format}: {stderr}");
+        } else {
+            assert!(stdout.contains("\"deny\""), "{format}: {stdout}");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_legacy_powershell_blank_argument_matches_native_execution() {
+    // pwsh と Windows PowerShell では空引数の扱いが異なり得るため、Windows の
+    // 実エンジンが後続のコードを実行する場合に限って、その経路の拒否を要求する。
+    for blank in ["", " "] {
+        let native = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                blank,
+                "-Command",
+                "Write-Output CLAW_PROBE",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("Windows PowerShell を起動できること");
+        if !String::from_utf8_lossy(&native.stdout).contains("CLAW_PROBE") {
+            continue;
+        }
+        let input = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "PowerShell",
+            "tool_input": {"command": format!("powershell.exe -NoProfile '{blank}' -Command 'Remove-Item target'")},
+        });
+        let (stdout, stderr, exit_code) = run_hook(&input.to_string());
+        assert_eq!(exit_code, 0, "{stdout} {stderr}");
+        assert!(
+            stdout.contains("\"deny\""),
+            "空引数 {blank:?} の後のコードも検査する: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn test_block_ansi_c_quoted_rm_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"$'r\\x6d' -rf /tmp/test"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);
@@ -326,6 +406,8 @@ fn test_powershell_tool_dangerous_command_blocked() {
         "Remove-Item -Recurse -Force C:/build",
         "Stop-Process -Id 123",
         "del C:/tmp/x",
+        "pwsh -c 'Remove-Item target'",
+        "powershell.exe -Command 'Stop-Process -Id 123'",
     ] {
         let input = format!(
             r#"{{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{{"command":"{}"}}}}"#,

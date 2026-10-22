@@ -225,6 +225,7 @@ graph LR
         CC2[Claude: PostToolUse + Write/Edit]
         CU2[Cursor: afterFileEdit]
         WS2[Windsurf: post_write_code]
+        AG2[Antigravity: PostToolUse + TargetFile]
         CX2[Codex: PostToolUse + apply_patch]
         GR2[Grok: PostToolUse + file path]
     end
@@ -232,6 +233,7 @@ graph LR
     CC2 --> CH2
     CU2 --> CH2
     WS2 --> CH2
+    AG2 --> CH2
     CX2 --> CH2
     GR2 --> CH2
 

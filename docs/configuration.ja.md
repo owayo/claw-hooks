@@ -171,6 +171,8 @@ message = "Use pnpm instead"
 
 > **カスタムフィルターはコマンド名を正規化します。** 組み込みの `rm`/`kill`/`dd` フィルターと同じ扱いで、`command = "npm"` のフィルターは `/usr/bin/npm` / `./npm` / `NPM` / `npm.cmd` にもマッチします。
 
+PowerShell の文字列実行も共通のコマンド検査へ渡します。`powershell -Command "Remove-Item target"` / `pwsh -c "rm target"` と、大文字小文字・短縮オプション・ラッパー経由の形式が対象です。`-EncodedCommand` は Base64 / UTF-16LE を復号し、Windows PowerShell では省略された `-Command` も補います。`-CommandWithArgs` / `-cwa` はコード本体だけを検査し、追加引数はコードに混ぜません。`-File` が参照するファイルや、標準入力から実行するスクリプトの読み込みは対象外です。
+
 **2. `--config` — 設定ファイルの完全置換**
 
 `--config` を使用して完全な設定ファイルを指定し、グローバル設定を完全に置き換えます:
@@ -443,7 +445,7 @@ claw-hooksはStopフックの子プロセスに以下の環境変数を渡しま
 
 claw-hooks は、この変数が設定されているかだけを見て、値は見ません。`CLAW_HOOKS_STOP_ACTIVE=0` でも Stop フックは止まるので、付けるときは `CLAW_HOOKS_STOP_ACTIVE=1` と書いてください。起動された CLI が、自分の環境変数をフックのプロセスに引き継ぐことが前提です（Claude Code・Codex CLI・Antigravity CLI で確かめています）。
 
-```sh
+```bash
 # 作業中のセッションから、別の AI に差分のレビューを頼む
 CLAW_HOOKS_STOP_ACTIVE=1 codex exec --sandbox read-only "この差分をレビューしてください"
 CLAW_HOOKS_STOP_ACTIVE=1 claude -p "この差分をレビューしてください"

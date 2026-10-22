@@ -171,7 +171,7 @@ message = "Use pnpm instead"
 
 > **カスタムフィルターはコマンド名を正規化します。** 組み込みの `rm`/`kill`/`dd` フィルターと同じ扱いで、`command = "npm"` のフィルターは `/usr/bin/npm` / `./npm` / `NPM` / `npm.cmd` にもマッチします。
 
-PowerShell の文字列実行も共通のコマンド検査へ渡します。`powershell -Command "Remove-Item target"` / `pwsh -c "rm target"` と、大文字小文字・短縮オプション・ラッパー経由の形式が対象です。`-EncodedCommand` は Base64 / UTF-16LE を復号し、Windows PowerShell では省略された `-Command` も補います。`-CommandWithArgs` / `-cwa` はコード本体だけを検査し、追加引数はコードに混ぜません。`-File` が参照するファイルや、標準入力から実行するスクリプトの読み込みは対象外です。
+PowerShell の文字列実行も共通のコマンド検査へ渡します。`powershell -Command "Remove-Item target"` / `pwsh -c "rm target"` と、大文字小文字・短縮オプション・ラッパー経由の形式が対象です。`-EncodedCommand` は Base64 / UTF-16LE を復号し、Windows PowerShell では省略された `-Command` も補い、5.1 の実エンジンに合わせて空引数を読み飛ばします。`-CommandWithArgs` / `-cwa` はコード本体だけを検査し、追加引数はコードに混ぜません。`-File` が参照するファイルや、標準入力から実行するスクリプトの読み込みは対象外です。
 
 **2. `--config` — 設定ファイルの完全置換**
 

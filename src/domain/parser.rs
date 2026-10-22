@@ -1546,6 +1546,11 @@ impl ShellParser {
         ];
         let mut index = 0;
         while let Some(arg) = args.get(index) {
+            // Windows PowerShell は空引数を読み飛ばす。pwsh は File のエラーになるため区別する。
+            if legacy && arg.trim().is_empty() {
+                index += 1;
+                continue;
+            }
             let Some(option) = Self::powershell_option(arg) else {
                 return legacy.then(|| args[index..].join(" "));
             };
@@ -4648,6 +4653,11 @@ mod tests {
         for (input, expected) in [
             ("powershell -Command 'Remove-Item target'", "remove-item"),
             ("powershell 'Remove-Item target'", "remove-item"),
+            (
+                "powershell '' -NoProfile -Command 'Remove-Item target'",
+                "remove-item",
+            ),
+            ("powershell -NoProfile ' ' -Command 'rm target'", "rm"),
             ("powershell -Version 3 -Command 'rm target'", "rm"),
             ("pwsh --COMMAND 'rm target'", "rm"),
             ("pwsh /c 'rm target'", "rm"),
@@ -4721,6 +4731,8 @@ mod tests {
             "pwsh -ExecutionPolicy Bypass -Command",
             "pwsh -Command -",
             "pwsh 'rm target'",
+            "pwsh '' -Command 'rm target'",
+            "pwsh ' ' -Command 'rm target'",
             "pwsh -Version 5 -Command 'rm target'",
         ] {
             let commands = parser.extract_commands(input);

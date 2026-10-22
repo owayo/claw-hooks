@@ -187,15 +187,10 @@ pub fn normalize_lint_output(output: &str) -> String {
         // rustfmt は `Diff in ...`、一般的な unified diff は `@@ ...` の後に
         // 先頭 1 文字をマーカーとする文脈行を出す。文脈行の空白もコードそのもの。
         if is_unified_diff_context_line(line, &mut in_unified_diff) {
-            if line.trim().is_empty() {
-                if !prev_blank && !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                prev_blank = true;
-            } else {
-                lines.push(line.to_string());
-                prev_blank = false;
-            }
+            // 空行のマーカー（` `）も残す。通常の空行へ変換すると、後段の空行圧縮で
+            // 連続する文脈行が消え、複数行文字列の値や差分の行数を書き換えてしまう。
+            lines.push(line.to_string());
+            prev_blank = false;
             continue;
         }
         let trimmed = line.trim();
@@ -1874,6 +1869,22 @@ mod tests {
         // rustfmt の文脈行は先頭 1 文字が差分マーカーで、残りは実際のコード。
         let input = "Diff in /tmp/a.rs:1:\n fn main() {\n     let label = \"a  b\";\n-    println!(\"{}\",label);\n+    println!(\"{}\", label);\n }";
         assert_eq!(normalize_lint_output(input), input);
+    }
+
+    #[test]
+    fn test_normalize_preserves_blank_diff_context_lines() {
+        // 空白だけの文脈行もコード。複数行文字列内では空行数と空白が値を決める。
+        for header in ["Diff in sample.rs:1:", "@@ -1,7 +1,7 @@"] {
+            for label in ["", "[formatter] "] {
+                let input = format!(
+                    "{label}{header}\n const TEXT: &str = \"alpha\n \n \n  \t \n omega\";\n-old();\n+new();\n "
+                );
+                assert_eq!(normalize_lint_output(&input), input);
+                // 拡張子フックはツール名を付けた後にもう一度正規化する。
+                assert_eq!(normalize_lint_output(&normalize_lint_output(&input)), input);
+                assert_eq!(normalize_lint_output(&input.replace('\n', "\r\n")), input);
+            }
+        }
     }
 
     #[test]

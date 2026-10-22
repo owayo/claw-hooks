@@ -40,6 +40,24 @@ exit 1
     );
 }
 
+#[test]
+fn test_labeled_formatter_diff_preserves_blank_context_lines() {
+    let sandbox = Sandbox::new();
+    let source = sandbox.write_source("sample.rs");
+    let config = sandbox.write_config("[extension_hooks]\n\".rs\" = [\"sh lint.sh {file}\"]\n");
+    let diff =
+        "Diff in sample.rs:1:\n const TEXT: &str = \"alpha\n \n \n omega\";\n-old();\n+new();\n ";
+    std::fs::write(
+        sandbox.path().join("lint.sh"),
+        format!("cat <<'EOF'\n{diff}\nEOF\nexit 1\n"),
+    )
+    .unwrap();
+
+    // 生出力、ツール名を付けた出力、アダプターの配送を通して空行数まで保持する。
+    let context = sandbox.edit(&config, &source, None).unwrap();
+    assert_eq!(context, format!("[sh] {diff}"));
+}
+
 /// PATH に無いプログラムの通知の文面（後ろの一文なし）。
 fn missing_tool_notice() -> String {
     format!("[{MISSING_TOOL}] not started: command not found in PATH")

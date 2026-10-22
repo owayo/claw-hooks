@@ -8,6 +8,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use std::cell::Cell;
 
+use base64::Engine;
+
 use crate::domain::invocation::{
     Analysis, Cardinality, CommandLineAnalysis, Invocation, ShellWord, StdinSource,
     runtime_arguments_word, shell_word,
@@ -1294,6 +1296,18 @@ impl ShellParser {
             }
         }
         match key.as_str() {
+            // PowerShell の -Command は残りの引数をコードとして実行する。
+            // Bash の -c クラスタ判定では -ConfigurationName 等まで誤認するため分ける。
+            "powershell" | "pwsh" => {
+                if let Some(text) =
+                    Self::extract_powershell_command_from_args(args, key == "powershell")
+                {
+                    inners.push(ReevaluatedInner {
+                        text,
+                        raw_is_command_string: false,
+                    });
+                }
+            }
             // env -S / --split-string（分割文字列をコマンドとして再評価）
             "env" => {
                 if let Some(env_cmd) = Self::extract_env_split_string_from_args(args) {
@@ -1452,6 +1466,128 @@ impl ShellParser {
         }
 
         args
+    }
+
+    /// PowerShell のオプション名を、上流と同じ区切り・大文字小文字の規則で読む。
+    fn powershell_option(arg: &str) -> Option<String> {
+        let arg = arg.trim();
+        let first = arg.chars().next()?;
+        if !matches!(first, '-' | '/' | '\u{2013}' | '\u{2014}' | '\u{2015}') {
+            return None;
+        }
+        let rest = &arg[first.len_utf8()..];
+        let rest = if first == '/' {
+            rest
+        } else {
+            rest.strip_prefix(first).unwrap_or(rest)
+        };
+        Some(rest.to_ascii_lowercase())
+    }
+
+    /// 上流の最短の非曖昧名以上の接頭辞か。短縮形でも次の値を正しく消費する。
+    fn powershell_switch_matches(option: &str, name: &str, minimum: &str) -> bool {
+        option.len() >= minimum.len() && name.starts_with(option)
+    }
+
+    /// `-EncodedCommand` の Base64 / UTF-16LE を、PowerShell と同じ置換文字の規則で戻す。
+    fn decode_powershell_command(encoded: &str) -> Option<String> {
+        let encoded: String = encoded
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '\t' | '\r' | '\n'))
+            .collect();
+        let engine = base64::engine::general_purpose::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::general_purpose::GeneralPurposeConfig::new()
+                .with_decode_allow_trailing_bits(true),
+        );
+        let bytes = engine.decode(encoded).ok()?;
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        let words: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let mut text = String::from_utf16_lossy(&words);
+        // .NET の Unicode decoder は、奇数バイトや不正サロゲートを U+FFFD へ置換する。
+        if !remainder.is_empty() {
+            text.push('\u{fffd}');
+        }
+        Some(text)
+    }
+
+    /// 実行される文字列を取り出す。Windows PowerShell の既定は Command、pwsh は File。
+    /// 明示的な `-File` 以降と `-cwa` の追加引数は、コードとして再評価しない。
+    fn extract_powershell_command_from_args(args: &[String], legacy: bool) -> Option<String> {
+        const VALUE_FLAGS: &[(&str, &str)] = &[
+            ("configurationname", "config"),
+            ("configurationfile", "configurationfile"),
+            ("custompipename", "cus"),
+            ("encodedarguments", "encodeda"),
+            ("ea", "ea"),
+            ("executionpolicy", "ex"),
+            ("ep", "ep"),
+            ("inputformat", "inp"),
+            ("if", "if"),
+            ("outputformat", "o"),
+            ("of", "of"),
+            ("psconsolefile", "psconsolefile"),
+            ("settingsfile", "settings"),
+            ("windowstyle", "w"),
+            ("workingdirectory", "wo"),
+            ("wd", "wd"),
+        ];
+        const SWITCH_FLAGS: &[(&str, &str)] = &[
+            ("noprofile", "nop"),
+            ("noprofileloadtime", "noprofileloadtime"),
+            ("nologo", "nol"),
+            ("noexit", "noe"),
+            ("noninteractive", "noni"),
+            ("interactive", "i"),
+            ("login", "l"),
+            ("mta", "mta"),
+            ("sta", "sta"),
+            ("sshservermode", "sshs"),
+        ];
+        let mut index = 0;
+        while let Some(arg) = args.get(index) {
+            // Windows PowerShell は空引数を読み飛ばす。pwsh は File のエラーになるため区別する。
+            if legacy && arg.trim().is_empty() {
+                index += 1;
+                continue;
+            }
+            let Some(option) = Self::powershell_option(arg) else {
+                return legacy.then(|| args[index..].join(" "));
+            };
+            let matches = |name, minimum| Self::powershell_switch_matches(&option, name, minimum);
+            if matches("command", "c") {
+                let script = args.get(index + 1)?;
+                return (script != "-").then(|| args[index + 1..].join(" "));
+            }
+            if matches("commandwithargs", "commandwithargs") || matches("cwa", "cwa") {
+                return args.get(index + 1).cloned();
+            }
+            if matches("encodedcommand", "e") || matches("ec", "e") {
+                return Self::decode_powershell_command(args.get(index + 1)?);
+            }
+            if matches("file", "f") || matches("help", "h") || option == "?" {
+                return None;
+            }
+            if matches("version", "v") {
+                if !legacy {
+                    return None;
+                }
+                index += 2;
+            } else if VALUE_FLAGS
+                .iter()
+                .any(|(name, minimum)| matches(name, minimum))
+            {
+                index += 2;
+            } else if SWITCH_FLAGS
+                .iter()
+                .any(|(name, minimum)| matches(name, minimum))
+            {
+                index += 1;
+            } else {
+                return legacy.then(|| args[index..].join(" "));
+            }
+        }
+        None
     }
 
     /// shell -c 形式の引数から実行文字列を取り出す。
@@ -4509,6 +4645,181 @@ mod tests {
         let commands = parser.extract_commands("cmd /c del C:\\tmp\\file.txt");
         assert!(commands.contains(&"cmd".to_string()));
         assert!(commands.contains(&"del".to_string()));
+    }
+
+    #[test]
+    fn test_powershell_command_reaches_all_parser_consumers() {
+        let mut parser = ShellParser::new();
+        for (input, expected) in [
+            ("powershell -Command 'Remove-Item target'", "remove-item"),
+            ("powershell 'Remove-Item target'", "remove-item"),
+            (
+                "powershell '' -NoProfile -Command 'Remove-Item target'",
+                "remove-item",
+            ),
+            ("powershell -NoProfile ' ' -Command 'rm target'", "rm"),
+            ("powershell -Version 3 -Command 'rm target'", "rm"),
+            ("pwsh --COMMAND 'rm target'", "rm"),
+            ("pwsh /c 'rm target'", "rm"),
+            ("pwsh \u{2013}c 'rm target'", "rm"),
+            ("pwsh -NonInter -NoProf -Wo /tmp -Com 'rm target'", "rm"),
+            (
+                "PowerShell.EXE -NoProfile -Co Stop-Process -Id 123",
+                "stop-process",
+            ),
+            (
+                "/usr/bin/pwsh -NoLogo -ExecutionPolicy Bypass -c 'rm target'",
+                "rm",
+            ),
+            ("sudo pwsh -Command 'dd if=a of=b'", "dd"),
+            (
+                "pwsh -Command 'Write-Output ok;' 'Remove-Item target'",
+                "remove-item",
+            ),
+            (
+                "pwsh -CommandWithArgs 'Remove-Item target' argument",
+                "remove-item",
+            ),
+            (
+                "pwsh -ConfigurationName endpoint -Command 'rm target'",
+                "rm",
+            ),
+        ] {
+            // 名前抽出、カスタムフィルター用文字列、判定器用 IR が同じ再評価を使う。
+            let commands = parser.extract_commands(input);
+            assert!(
+                commands.iter().any(|name| command_key(name) == expected),
+                "{input}: {commands:?}"
+            );
+            let fallback = parser.extract_commands_from_segment_fallback(input);
+            assert!(
+                fallback.iter().any(|name| command_key(name) == expected),
+                "{input}: {fallback:?}"
+            );
+            let strings = parser.extract_command_strings(input);
+            assert!(
+                strings.iter().any(|text| {
+                    parse_shell_tokens(text)
+                        .first()
+                        .is_some_and(|name| command_key(name) == expected)
+                }),
+                "{input}: {strings:?}"
+            );
+            let analysis = parser.extract_invocations(input);
+            assert!(
+                analysis
+                    .invocations
+                    .iter()
+                    .any(|call| call.command_key().as_deref() == Some(expected)),
+                "{input}: {analysis:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_powershell_arguments_are_not_reparsed_as_commands() {
+        let mut parser = ShellParser::new();
+        for input in [
+            "pwsh -File safe.ps1 -Command 'rm target'",
+            "powershell safe.ps1 -Command 'rm target'",
+            "pwsh -ConfigurationName -Command 'rm target'",
+            "pwsh -CustomPipeName -Command -NoProfile",
+            "pwsh -EncodedCommand 'rm target'",
+            "pwsh -Command 'Write-Output rm'",
+            "pwsh -cwa 'Write-Output $args' 'rm target'",
+            "echo pwsh -Command 'rm target'",
+            "pwsh -ExecutionPolicy Bypass -Command",
+            "pwsh -Command -",
+            "pwsh 'rm target'",
+            "pwsh '' -Command 'rm target'",
+            "pwsh ' ' -Command 'rm target'",
+            "pwsh -Version 5 -Command 'rm target'",
+        ] {
+            let commands = parser.extract_commands(input);
+            assert!(
+                !commands.iter().any(|name| command_key(name) == "rm"),
+                "{input}: {commands:?}"
+            );
+            let fallback = parser.extract_commands_from_segment_fallback(input);
+            assert!(
+                !fallback.iter().any(|name| command_key(name) == "rm"),
+                "{input}: {fallback:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_powershell_encoded_command_reaches_all_parser_consumers() {
+        let mut parser = ShellParser::new();
+        let bytes: Vec<u8> = "Remove-Item target"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        for shell in ["powershell.exe", "pwsh"] {
+            for flag in ["-EncodedCommand", "-enc", "-EC"] {
+                let input = format!("{shell} -NoProfile {flag} {encoded}");
+                let commands = parser.extract_commands(&input);
+                assert!(
+                    commands
+                        .iter()
+                        .any(|name| command_key(name) == "remove-item"),
+                    "{input}: {commands:?}"
+                );
+                let fallback = parser.extract_commands_from_segment_fallback(&input);
+                assert!(
+                    fallback
+                        .iter()
+                        .any(|name| command_key(name) == "remove-item"),
+                    "{input}: {fallback:?}"
+                );
+                let strings = parser.extract_command_strings(&input);
+                assert!(
+                    strings.iter().any(|text| text.starts_with("Remove-Item ")),
+                    "{input}: {strings:?}"
+                );
+                let analysis = parser.extract_invocations(&input);
+                assert!(
+                    analysis
+                        .invocations
+                        .iter()
+                        .any(|call| call.command_key().as_deref() == Some("remove-item")),
+                    "{input}: {analysis:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_powershell_decoder_matches_utf16_and_base64_boundaries() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let bytes: Vec<u8> = "Write-Output 日本語"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let encoded = encode(&bytes);
+        assert_eq!(
+            ShellParser::decode_powershell_command(&format!(" \t{encoded}\r\n")).as_deref(),
+            Some("Write-Output 日本語")
+        );
+        assert_eq!(
+            ShellParser::decode_powershell_command(&encode(&[0x00, 0xd8])).as_deref(),
+            Some("\u{fffd}")
+        );
+        assert_eq!(
+            ShellParser::decode_powershell_command(&encode(&[b'r', 0, b'm'])).as_deref(),
+            Some("r\u{fffd}")
+        );
+        assert_eq!(
+            ShellParser::decode_powershell_command(""),
+            Some(String::new())
+        );
+        assert_eq!(ShellParser::decode_powershell_command("!"), None);
+        assert_eq!(ShellParser::decode_powershell_command("A"), None);
+        assert_eq!(
+            ShellParser::decode_powershell_command("cgB=").as_deref(),
+            Some("r")
+        );
     }
 
     #[test]

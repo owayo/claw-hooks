@@ -4,4 +4,4 @@
 [tools]
 # profile と components を明示する。未指定だと rustup の既定の profile 次第で入るものが変わり、
 # GitHub Actions のランナー (minimal) では cargo fmt / clippy が無いと言われて落ちる
-rust = { version = "1.98.1", profile = "minimal", components = ["rustfmt", "clippy"] }
+rust = { version = "1.99.0", profile = "minimal", components = ["rustfmt", "clippy"] }

@@ -2253,7 +2253,8 @@ impl ShellParser {
     }
 
     /// シェル形式の環境変数代入（例: KEY=value）かを判定する。
-    fn is_env_assignment_token(token: &str) -> bool {
+    /// クォート除去前の語なら、引用・エスケープされた名前や `=` を代入と誤認しない。
+    pub(crate) fn is_env_assignment_token(token: &str) -> bool {
         let Some((name, _value)) = token.split_once('=') else {
             return false;
         };

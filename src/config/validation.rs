@@ -19,6 +19,10 @@ pub(crate) const MAX_HOOK_TIMEOUT_SECS: u64 = 86_400;
 /// （PATH を絞った GUI アプリの環境など）とは違い得る。
 const PROGRAM_CHECK_NOTE: &str = "(checked in this shell; the agent's hook environment may differ)";
 
+/// 代入値にはパスや秘密が入り得るため、設定値を一切含めず書き方だけを案内する。
+const INLINE_ASSIGNMENT_WARNING: &str = "inline environment assignments are not supported; \
+    use an explicit shell (for example, sh -c 'NAME=value program')";
+
 /// `claw-hooks check` 用の検証エントリポイント。
 ///
 /// 値の検証に加えて、読み込み時に記録された警告（無視したプロジェクト設定・未知キー）と、
@@ -278,6 +282,7 @@ pub(crate) fn stop_hook_warnings(hooks: &[StopHook]) -> Vec<String> {
 /// `parse_shell_tokens` の先頭語で、有無は条件の `command_exists` と同じ
 /// `HookCondition::command_in_path` で確かめる（明示的なパスはそのファイルを確かめる）。
 /// `sh -c '...'` や `env` の先で動くプログラムは推測しない。プログラムは実行しない。
+/// 先頭がシェルの代入語なら、存在しないパスではなく明示的なシェルが必要な旨を知らせる。
 ///
 /// 見つからなくても、条件によって今は実行されないエントリ（`command_exists` が指す
 /// コマンドが無い・`command_not_exists` が指すコマンドが有る）は知らせない。任意のツールを
@@ -320,6 +325,20 @@ fn missing_program(command: &str, condition: Option<&HookCondition>) -> Option<S
     let program = tokens.first().filter(|program| !program.is_empty())?;
     if HookCondition::command_in_path(program) || condition.is_some_and(skipped_by_path_condition) {
         return None;
+    }
+    // quote removal 後では `'NAME=value'` というプログラム名まで代入と誤認する。
+    if crate::domain::parser::split_shell_words_raw(command)
+        .first()
+        .is_some_and(|word| {
+            let Some((name, _)) = word.split_once('=') else {
+                return false;
+            };
+            // Bash/Zsh の追記代入も案内する。env/sudo の引数判定には広げない。
+            let name = name.strip_suffix('+').unwrap_or(name);
+            crate::domain::parser::ShellParser::is_env_assignment_token(&format!("{name}="))
+        })
+    {
+        return Some(INLINE_ASSIGNMENT_WARNING.to_string());
     }
     // 明示的なパスは PATH を検索しないので、「PATH に無い」と書くと探す場所を誤らせる
     let location = if HookCondition::is_explicit_path(program) {
@@ -1583,6 +1602,75 @@ mod tests {
             None,
         )];
         assert_eq!(missing_program_warnings(&config), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_missing_program_warnings_explains_inline_assignments_for_every_hook_kind() {
+        let mut config = default_config();
+        config.extension_hooks =
+            extension_hooks(&[("*", &["PATH=./node_modules/.bin:$PATH lint {file}"])]);
+        config.stop_hooks = vec![stop_hook_running(
+            &["PATH=./node_modules/.bin:$PATH biome check --write ."],
+            None,
+        )];
+        config.command_hooks = vec![command_hook("gws", "TOKEN=private-value checker", None)];
+
+        let warnings = missing_program_warnings(&config);
+        let advice = "inline environment assignments are not supported; use an explicit shell (for example, sh -c 'NAME=value program')";
+        assert_eq!(
+            warnings,
+            vec![
+                format!("extension_hooks[\"*\"] command[0]: {advice}"),
+                format!("stop_hooks[0] commands[0]: {advice}"),
+                format!("command_hooks[0].run: {advice}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_missing_program_inline_assignment_does_not_expand_values() {
+        for command in [
+            "NAME='private value' missing-tool",
+            "NAME= OTHER=value missing-tool",
+            "NAME=$(echo private-value) missing-tool",
+            "NAME=",
+            "PATH+=:./node_modules/.bin missing-tool",
+        ] {
+            let warning = missing_program(command, None).expect(command);
+            assert!(
+                warning.starts_with("inline environment assignments"),
+                "{warning}"
+            );
+            assert!(!warning.contains("private"), "{warning}");
+        }
+    }
+
+    #[test]
+    fn test_missing_program_inline_assignment_respects_skipped_condition() {
+        let condition = command_exists("claw-hooks-test-missing-lint");
+        assert_eq!(missing_program("NAME=value tool", Some(&condition)), None);
+    }
+
+    #[test]
+    fn test_missing_program_does_not_treat_literal_equals_as_assignment() {
+        for command in [
+            "'NAME=value' --flag",
+            "\"NAME=value\" --flag",
+            r"NAME\=value --flag",
+            "1NAME=value --flag",
+            "NAME-WITH-DASH=value --flag",
+            "./NAME=value --flag",
+            r"NAME\+=value --flag",
+            "+=value --flag",
+            "NA\"ME\"=value --flag",
+        ] {
+            let warning = missing_program(command, None).expect(command);
+            assert!(warning.contains("was not found"), "{command}: {warning}");
+        }
+        assert_eq!(
+            missing_program("sh -c 'NAME=value missing-tool'", None),
+            None
+        );
     }
 
     #[test]

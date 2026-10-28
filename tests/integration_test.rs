@@ -2642,6 +2642,51 @@ fn test_catch_all_extension_hook_runs_on_every_file_after_extension_commands() {
 }
 
 #[test]
+fn test_check_explains_inline_assignment_without_executing_or_showing_its_value() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = write_temp_config(
+        &dir,
+        r#"
+[[stop_hooks]]
+commands = ["PATH=./node_modules/.bin:$PATH biome check --write .", "TOKEN=$(echo private-value > check-must-not-run) checker"]
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_claw-hooks"))
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .current_dir(dir.path())
+        .output()
+        .expect("Failed to run claw-hooks check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stderr={stderr}");
+    assert!(output.stdout.is_empty());
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.len(), 3, "{stderr}");
+    assert_eq!(lines[2], "Configuration is valid.");
+    for (index, line) in lines[..2].iter().enumerate() {
+        assert!(
+            line.starts_with(&format!(
+                "warning: stop_hooks[0] commands[{index}]: inline environment assignments"
+            )),
+            "{stderr}"
+        );
+        assert!(line.contains("sh -c"), "{stderr}");
+    }
+    for value in [
+        "node_modules",
+        "$PATH",
+        "TOKEN",
+        "private-value",
+        "was not found",
+    ] {
+        assert!(!stderr.contains(value), "{stderr}");
+    }
+    assert!(!dir.path().join("check-must-not-run").exists());
+}
+
+#[test]
 fn test_check_warns_on_command_shared_with_catch_all() {
     // 拡張子のキーと "*" に同じコマンドがあっても設定エラーにはせず、check が警告する
     let dir = tempfile::TempDir::new().unwrap();

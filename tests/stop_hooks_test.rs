@@ -562,6 +562,57 @@ fn test_windsurf_gate_failure_does_not_start_later_stage() {
     assert!(fx.retry_records().is_empty(), "再試行を予定しない");
 }
 
+#[test]
+fn test_condition_on_marker_under_worktree_git_file_holds_as_absent() {
+    // git worktree の中では `.git` が `gitdir: …` の 1 行のファイルになる。`.git/` の下の印を
+    // 条件に書いたゲートのフックが、条件を評価できないとして失敗せず、印が無いものとして動く
+    let fx = Fixture::new();
+    std::fs::write(fx.path(".git"), "gitdir: /repo/.git/worktrees/wt\n").unwrap();
+    let unless_marked = fx.command(
+        "unless-marked",
+        &format!("echo run >> {}", fx.path("unless-marked.log").display()),
+    );
+    let when_marked = fx.command(
+        "when-marked",
+        &format!("echo run >> {}", fx.path("when-marked.log").display()),
+    );
+    let later = fx.command(
+        "later-stage",
+        &format!("echo run >> {}", fx.path("later-stage.log").display()),
+    );
+    // condition を付けたフックは既定で report = true（ゲートのフック）になる。stage 1 が
+    // 失敗すれば、stage 5 の待つフックは動かない
+    let config = fx.write_config(
+        "worktree.toml",
+        &format!(
+            "[[stop_hooks]]\ncommands = [{unless_marked}]\nstage = 1\n\
+             condition = {{ file_not_exists = \".git/skip-format\" }}\n\n\
+             [[stop_hooks]]\ncommands = [{when_marked}]\nstage = 1\n\
+             condition = {{ file_exists = \".git/skip-format\" }}\n\n\
+             [[stop_hooks]]\ncommands = [{later}]\nstage = 5\nreport = true\n"
+        ),
+    );
+
+    let (stdout, stderr, code) = fx.run("claude", &config, &claude_stop("session-wt", false), &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(parse(&stdout), serde_json::json!({}), "{stdout}");
+    assert_eq!(
+        count_lines(&fx.path("unless-marked.log")),
+        1,
+        "印が無いので動く"
+    );
+    assert_eq!(
+        count_lines(&fx.path("when-marked.log")),
+        0,
+        "印が無いので動かない"
+    );
+    assert_eq!(
+        count_lines(&fx.path("later-stage.log")),
+        1,
+        "stage 1 を失敗にしないので、後続の stage も動く"
+    );
+}
+
 // === Claude Code のチームメイト（split-pane の別プロセス）の Stop ===
 
 /// Claude Code が split-pane のチームメイトを起動するときの argv（値を別の引数で渡す形）。

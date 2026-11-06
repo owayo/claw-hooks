@@ -3063,13 +3063,18 @@ mod tests {
         );
     }
 
-    /// 評価すると `NotADirectory` になる条件（通常ファイルの下のパスを指す）。
+    /// 評価できない条件。自分自身を指すシンボリックリンクを指し、辿ると循環する（ELOOP）。
+    ///
+    /// 通常ファイルの下のパスは「無い」と答えるので使えない。権限を外したディレクトリは、
+    /// root だと辿れてしまう。
     #[cfg(unix)]
     fn unevaluable_condition(fx: &GateFixture) -> crate::config::HookCondition {
-        let file = fx.path("regular-file");
-        std::fs::write(&file, "").unwrap();
+        let link = fx.path("self-loop");
+        if std::fs::symlink_metadata(&link).is_err() {
+            std::os::unix::fs::symlink("self-loop", &link).unwrap();
+        }
         crate::config::HookCondition {
-            file_exists: Some(file.join("child").to_string_lossy().into_owned()),
+            file_exists: Some(link.to_string_lossy().into_owned()),
             ..Default::default()
         }
     }
@@ -3082,14 +3087,18 @@ mod tests {
         fx.fix();
         let mut check = fx.check_hook();
         check.condition = Some(unevaluable_condition(&fx));
+        // ELOOP の種類（FilesystemLoop）は unstable で名前を書けないので、実際の値で組み立てる
+        let kind = std::fs::metadata(fx.path("self-loop")).unwrap_err().kind();
         let filter = StopHookFilter::new(vec![check, fx.effect_hook()], false, 10);
         let message = expect_block(filter.execute(&make_stop_input()));
         assert_eq!(
             message,
-            "Stop hooks failed: stage 1 [sh].\n\
-             Not run because a stage 1 hook failed: stage 5 [sh].\n\
-             \n\
-             Stop hook failed: sh\ncould not evaluate condition.file_exists (not a directory)"
+            format!(
+                "Stop hooks failed: stage 1 [sh].\n\
+                 Not run because a stage 1 hook failed: stage 5 [sh].\n\
+                 \n\
+                 Stop hook failed: sh\ncould not evaluate condition.file_exists ({kind})"
+            )
         );
         assert_eq!(fx.checks(), 0, "条件を評価できないフックは実行しない");
         fx.assert_effects_settled(0);

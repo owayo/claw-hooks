@@ -180,6 +180,20 @@ fn write_file_via_child(path: &Path, contents: &str, mode: &str) {
     assert!(status.success(), "テスト用のファイルを書けなかった");
 }
 
+/// 有無を確かめられないパスとして、自分自身を指すシンボリックリンク `dir/name` を作る。
+///
+/// 辿ると循環する（ELOOP）ので、条件の評価エラーになる。通常のファイルの下のパスは「無い」と
+/// 答えるので使えない。権限を外したディレクトリは、root だと辿れてしまう。
+fn unverifiable_path(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::os::unix::fs::symlink(name, &path).unwrap();
+    assert!(
+        path.try_exists().is_err(),
+        "有無を確かめられないパスになっていること"
+    );
+    path
+}
+
 #[test]
 fn test_missing_command_is_named_and_reported_once_per_session() {
     // 依頼の再現: formatter は動き、linter だけが PATH に無い
@@ -340,10 +354,7 @@ fn test_start_failures_name_the_command_and_the_cause() {
 fn test_conditional_entries_run_only_when_their_condition_holds() {
     let sandbox = Sandbox::new();
     let source = sandbox.write_source("main.zzz");
-    // 通常のファイルの下のパスは有無を確かめられない（ENOTDIR）ので、条件の評価エラーになる
-    let plain_file = sandbox.path().join("plain-file");
-    std::fs::write(&plain_file, "").unwrap();
-    let unknowable = plain_file.join("child");
+    let unknowable = unverifiable_path(sandbox.path(), "self-loop");
     let config = sandbox.write_config(&format!(
         r#"[extension_hooks]
 ".zzz" = [
@@ -372,8 +383,7 @@ fn test_logs_and_agent_context_do_not_contain_paths() {
     let sandbox = Sandbox::new();
     let source = sandbox.write_source("private-src-dir/private-file-name.zzz");
     let missing_at_path = sandbox.path().join("private-bin-dir").join("formatter");
-    let plain_file = sandbox.path().join("private-condition-file");
-    std::fs::write(&plain_file, "").unwrap();
+    let unknowable = unverifiable_path(sandbox.path(), "private-condition-file");
     let log_dir = sandbox.path().join("logs");
     let config = sandbox.write_config(&format!(
         r#"debug = true
@@ -389,7 +399,7 @@ log_path = '{}'
 "#,
         log_dir.display(),
         missing_at_path.display(),
-        plain_file.join("child").display(),
+        unknowable.display(),
     ));
 
     let context = sandbox

@@ -452,11 +452,22 @@ impl HookCondition {
     }
 
     /// `cwd` 基準のファイルの有無を返す。確かめられなければ `Err`。
+    ///
+    /// 途中の要素がディレクトリでないパスは、無いと答える。git worktree では `.git` が
+    /// `gitdir: …` の 1 行のファイルなので、`.git/` の下に置く印がこの形になる
+    /// （`.git` ファイルの参照先は辿らない）。`try_exists` が `Ok(false)` にするのは
+    /// `NotFound` だけで、Unix の ENOTDIR は `Err(NotADirectory)` になるため、ここで
+    /// 不在にそろえる。権限不足やシンボリックリンクの循環（ELOOP。段数の上限を超えただけで、
+    /// 本来は辿れる場合もある）など、有無を言い切れないエラーは `Err` のまま返す。
     fn file_present(cwd: &Path, file: &str, field: &'static str) -> Result<bool, ConditionError> {
-        cwd.join(file).try_exists().map_err(|e| ConditionError {
-            field,
-            kind: e.kind(),
-        })
+        match cwd.join(file).try_exists() {
+            Ok(present) => Ok(present),
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Ok(false),
+            Err(e) => Err(ConditionError {
+                field,
+                kind: e.kind(),
+            }),
+        }
     }
 
     /// コマンドが PATH に存在するか確認する。
@@ -2430,9 +2441,21 @@ mod tests {
             ..Default::default()
         };
         let result = condition.evaluate(dir.path());
+        let negated = HookCondition {
+            file_not_exists: Some("locked/Cargo.toml".to_string()),
+            ..Default::default()
+        };
+        let negated_result = negated.evaluate(dir.path());
         // TempDir が消せるよう権限を戻してから確かめる
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        assert_eq!(
+            negated_result,
+            Err(ConditionError {
+                field: "file_not_exists",
+                kind: std::io::ErrorKind::PermissionDenied,
+            })
+        );
         let error = result.expect_err("確かめられない条件は Err にする");
         assert_eq!(
             error,
@@ -2446,6 +2469,63 @@ mod tests {
             error.to_string(),
             "could not evaluate condition.file_exists (permission denied)"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_hook_condition_evaluate_reports_symlink_loop_as_error() {
+        // 循環するシンボリックリンクの ELOOP は、段数の上限を超えただけで本来は辿れる場合と
+        // 区別できない。途中の要素がファイルのパスと違って有無を言い切れないので、Err にする
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("self-loop");
+        std::os::unix::fs::symlink("self-loop", &link).unwrap();
+        // ELOOP の種類（FilesystemLoop）は unstable で名前を書けないので、実際の値と比べる
+        let kind = std::fs::metadata(&link).unwrap_err().kind();
+        let exists = HookCondition {
+            file_exists: Some("self-loop".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            exists.evaluate(dir.path()),
+            Err(ConditionError {
+                field: "file_exists",
+                kind,
+            })
+        );
+        let not_exists = HookCondition {
+            file_not_exists: Some("self-loop".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            not_exists.evaluate(dir.path()),
+            Err(ConditionError {
+                field: "file_not_exists",
+                kind,
+            })
+        );
+    }
+
+    #[test]
+    fn test_hook_condition_treats_path_under_regular_file_as_absent() {
+        // 途中の要素が通常のファイルのパスは、そのファイルがある限り辿れない（Unix の stat は
+        // ENOTDIR を返す）。git worktree では `.git` が `gitdir: …` の 1 行のファイルなので、
+        // `.git/` の下に置く印がこの形になる。「確かめられなかった」にすると、印を条件に持つ
+        // フックが失敗する
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "gitdir: /repo/.git/worktrees/wt\n").unwrap();
+        std::fs::write(dir.path().join("Package.swift"), "").unwrap();
+
+        let format_unless_marked = HookCondition {
+            file_exists: Some("Package.swift".to_string()),
+            file_not_exists: Some(".git/skip-format".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(format_unless_marked.evaluate(dir.path()), Ok(true));
+        let only_when_marked = HookCondition {
+            file_exists: Some(".git/skip-format".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(only_when_marked.evaluate(dir.path()), Ok(false));
     }
 
     #[test]

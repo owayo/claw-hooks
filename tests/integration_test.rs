@@ -1171,7 +1171,9 @@ fn run_hook_with_config_format_and_event(
         .arg("--format")
         .arg(format)
         .arg("--config")
-        .arg(config_path);
+        .arg(config_path)
+        // テストを起動したエージェントの Stop 抑止設定から、フックの動作検証を隔離する。
+        .env_remove("CLAW_HOOKS_STOP_ACTIVE");
     isolate_state_dir(&mut command, state_home.path());
     disable_teammate_probe(&mut command);
     if let Some(event) = event {

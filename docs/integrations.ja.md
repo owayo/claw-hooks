@@ -35,6 +35,8 @@
 
 保存後のフォーマッターは `PostToolUse` に登録します。Claude Code のファイル監視イベント `FileChanged` は claw-hooks ではパススルーします。フォーマッターの書き換えでも再発火し、設定したコマンドが毎回ファイルを書き直す場合はループになるため、拡張子フックの登録先には使いません。
 
+`Bash|PowerShell` は Claude Code v2.1.314 以降の Monitor のシェル実行にも一致します。`.*` や `Monitor` を含む広い matcher で Monitor 自身の入力が届いた場合も、`command` を同じフィルターで検査します。WebSocket 専用の `ws` 監視はパススルーします。[Monitor の matcher 仕様](https://code.claude.com/docs/en/hooks#match-monitor-commands)を参照してください。
+
 ## Cursor
 
 `<project>/.cursor/hooks.json`（プロジェクト）または `~/.cursor/hooks.json`（ユーザー）に追加:
@@ -182,6 +184,24 @@
 ```
 
 Codex hooks はデフォルトで有効です。明示的に機能フラグを設定する場合は、現行の `[features] hooks` キーを使用してください。旧 `codex_hooks` エイリアスは非推奨です。
+
+## Devin CLI / Devin Local
+
+従来の Windsurf Cascade とは別に `--format devin` を使います。次のオブジェクトを `.devin/hooks.v1.json` に保存します。`~/.config/devin/config.json` では `"hooks"` の下に入れてください。
+
+```json
+{
+  "PreToolUse": [{"matcher": "^exec$", "hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}],
+  "PostToolUse": [{"matcher": "^(write|edit|notebook_edit|apply_patch)$", "hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}],
+  "Stop": [{"hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}]
+}
+```
+
+`PermissionRequest` にも `^exec$` の設定を使えます。拒否しない場合は `{}`、コマンドの拒否と報告対象の Stop フックの失敗は `decision: "block"` と `reason` を返します。保存後の診断は `hookSpecificOutput.additionalContext` で返します。継続中の停止（`stop_hook_active: true`）ではフックをスキップし、自動再試行は予定しません。
+
+編集パスは `file_path` / `path` / `notebook_path`、patch 本文は `patch` / `command` を受け付けます。公式資料はツール名を列挙していますが、引数の完全なスキーマは示していません。この形は自動テストで検証しており、CLI / Local の実機接続は未検証です。`write_to_process` の入力転送は検査対象外なので、対話シェル経由を完全に防ぐ境界としては扱わないでください。
+
+出典: [Hooks](https://docs.devin.ai/cli/extensibility/hooks/overview)、[Lifecycle Hooks](https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks)。
 
 ## Grok CLI
 

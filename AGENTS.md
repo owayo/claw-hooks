@@ -6,10 +6,10 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, Grok, G
 
 **claw-hooks** - Hooks CLI for AI coding agents with TOML-based configuration.
 
-- **Language**: Rust 1.99.0 (toolchain pinned in `mise.toml`; `rust-version` is kept identical — see Toolchain)
-- **Version**: 26.10.101
+- **Language**: Rust 1.99.1 (toolchain pinned in `mise.toml`; `rust-version` is kept identical — see Toolchain)
+- **Version**: 26.10.103
 - **Purpose**: Block dangerous commands, run formatters/linters only after file save/edit completes, send notifications on agent stop/subagent events
-- **Supported Agents**: Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI
+- **Supported Agents**: Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI, Devin CLI / Devin Local
 
 ## Key Features
 
@@ -27,6 +27,8 @@ Instructions for AI coding agents (Claude Code, Cursor, Windsurf, Codex, Grok, G
    PowerShell の `powershell` / `pwsh` による `-Command`（`-c` と短縮形を含む）は、残りの引数をコードとして再解析する。`-CommandWithArgs` / `-cwa` は次の 1 引数だけを解析する。`-EncodedCommand` は Base64 / UTF-16LE を復号して解析する。Windows PowerShell の既定の位置引数は Command、pwsh は File として扱う。Bash の `-c` クラスタ判定とは分離し、値を取るオプション・`-File`・pwsh の暗黙のファイル指定の引数を誤ってコードにしない。再評価の共有ディスパッチを通すことで、危険コマンド検出・カスタムフィルター・IR の判定器が同じ抽出結果を使う。
 
 3. **Custom Filters**: Regex-based and argument-based command filtering. The command name is normalized through the same `command_key` helper the built-in filters use (basename, executable extension, case), so a `command = "npm"` filter also catches `/usr/bin/npm`, `./npm`, `NPM` and `npm.cmd` — previously only the built-in `rm`/`kill`/`dd` filters normalized, and a custom filter could be evaded by spelling the path out. Both the raw and the normalized form are tested, so a path-qualified pattern (`command = "/usr/bin/npm"`) keeps matching. Matching also runs against the **quote-removed** form of the command, i.e. the argv the shell actually builds. `strip_quoted_content` — which exists to stop `echo "yarn"` from counting as a `yarn` invocation — drops the *contents* of quotes along with the delimiters, so `npm "install" lodash`, `npm 'install' lodash` and `npm in\stall lodash` all collapsed to `npm  lodash` and slipped past an `args = ["install", …]` filter, even though every one of them runs `npm install lodash`. (The built-in `rm`/`kill`/`dd` filters only ever look at the command name, so they were never affected; a `sudo`-prefixed call happened to be caught because the wrapper-expansion path re-parses quote-removed arguments, which is what made the asymmetry visible.) Both forms are now tested, which closes the evasion while keeping the false-positive guard: patterns are anchored to the start of the command string, so a word that merely moves into argument position still does not match. That anchoring itself is applied as `^(?:…)` rather than `^…`, because alternation binds more loosely than the anchor — `command = "npm install|yarn add"` compiled to `(^npm install)|(yarn add)`, leaving the right-hand branch unanchored so that `git commit -m "fix yarn add"` was blocked. `with_args` wraps its `^…$` the same way.
+
+   `command = "pip install"` は `uv pip install` のサブコマンド位置には一致しない。複合コマンドでも同じで、`command = "uv pip install"` を明示するとその設定どおり拒否する（Issue #12 の設定切り分けを回帰テストで固定）。
 
    `args` の複数語の項目はコマンド直後の引数列に前方一致で照合する（`"system prune"` は `docker system prune -af` に一致）。明示的な `^` を持つパターンも含め、すべての正規表現の選択肢を同じアンカーで囲む。
 
@@ -185,6 +187,7 @@ make run ARGS="version"  # Show version
 ## Agent-Specific Notes
 
 ### Claude Code
+- `Monitor` 自身の入力が届く広い matcher でも、シェル用の `command` は Bash に写して同じフィルターへ渡す。`ws` のみの WebSocket 監視と実行後イベントは管轄外として素通しする。`command` と `ws` が両方ある入力は command を検査し、command が空・型違いならフェイルクローズド。
 - Primary development agent
 - Uses CLAUDE.md (symlink to AGENTS.md) for instructions
 - Format: `--format claude` (default)
@@ -258,7 +261,7 @@ make run ARGS="version"  # Show version
 - Official docs: https://antigravity.google/docs/customizations/hooks
 
 ### Codex CLI
-- Supports these hook events: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Stop`, `Interrupt`
+- Supports these hook events: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `PreModelRequest`, `PostModelRequest`, `SubagentStart`, `SubagentStop`, `Stop`, `Interrupt`
 - Use `--format codex` when testing
 - Allow output: `{}` (empty JSON, exit 0)
 - PreToolUse Block output: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`（公式ドキュメントの主形式。legacy の `{"decision":"block"}` も受理されるが使用しない）
@@ -279,6 +282,15 @@ make run ARGS="version"  # Show version
 - Codex `SubagentStart` / `SubagentStop` は内部通知イベントとして扱う。NanoBuddy 用に `ToolInput::Subagent` へマップするが、README.md / README.ja.md には記載しない
 - **既知の制約 — `write_stdin` は PreToolUse を再発火しない**。公式仕様は「`write_stdin` は既存の unified-exec セッションへの転送であり、すでに `PreToolUse` を通過したコマンドへ入力を送る/ポーリングする際に `PreToolUse` を再実行しない」「一部の特殊なツール経路は既定のフック経路をオプトアウトできる。ツールフックは有用なガードレールであって完全な強制境界ではないものとして扱うこと」と明記している。したがって `exec_command` で対話シェルを起動 → `write_stdin` でコマンドを流す経路は claw-hooks では塞げない（上流の設計上の制約）
 - Official docs: https://learn.chatgpt.com/docs/hooks
+
+### Devin CLI / Devin Local
+- Use `--format devin`. This is separate from legacy Windsurf Cascade (`--format windsurf`); the current Windsurf documentation points to Devin Local.
+- 公式の `PreToolUse` / `PermissionRequest` の `exec` をシェル判定へ渡し、`PostToolUse` の `write` / `edit` / `notebook_edit` と `apply_patch` を保存後フックへ渡す。前者のパスは `file_path` / `path` / `notebook_path`、patch 本文は `patch` / `command` を受け付ける。ツール引数の厳密なスキーマは公式に列挙されていないため、実機で異なるキーが届く場合は追加検証が必要。
+- 許可は `{}`、拒否はトップレベルの `decision: "block"` / `reason` + exit 0。`approve` は返さない。保存後の診断は `hookSpecificOutput.additionalContext` で返す。
+- Stop は `stop_hook_active` を必須とし、継続中なら既存の Stop フィルターでスキップする。通知だけをユーザーへ表示する出力が未確認のため `stop_retry = false` とし、未実行ステージの自動再試行は予定しない。
+- 実行前ゲートの解析失敗は block JSON + exit 2、それ以外の解析失敗と管轄外イベントは `{}` + exit 0。Claude 用の祖先プロセス検査は使わない。
+- `write_to_process` の入力転送は、引数の公式スキーマを確認できていないため検査対象外。対話シェル経由を完全に防ぐ境界とは扱わない。CLI / Local の実機での接続確認は別途必要。
+- Official docs: https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks
 
 ### Grok CLI
 - Use `--format grok` when testing。設定は JSON で個人が `~/.grok/hooks/*.json`、プロジェクトが `<project>/.grok/hooks/*.json`。Grok は Claude Code (`.claude/settings.json`) と Cursor (`.cursor/hooks.json`) のフック設定も読み込む。プロジェクトフックは `/hooks-trust` または `--trust` による信頼付与が必要

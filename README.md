@@ -5,7 +5,7 @@
 <h1 align="center">claw-hooks</h1>
 
 <p align="center">
-  Simple TOML hooks for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI - Command blocking, auto-formatting, stop-time automation
+  Simple TOML hooks for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI, Devin - Command blocking, auto-formatting, stop-time automation
 </p>
 
 <!-- standard:badges:start -->
@@ -31,7 +31,7 @@
 
 ---
 
-claw-hooks is a single binary that plugs into the hook systems of Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI. One TOML file decides which shell commands the agent may not run, which formatters and linters run after a file edit, and what runs when the agent stops.
+claw-hooks is a single binary that plugs into the hook systems of Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI, and Devin. One TOML file decides which shell commands the agent may not run, which formatters and linters run after a file edit, and what runs when the agent stops.
 
 ## Features
 
@@ -56,7 +56,7 @@ claw-hooks is a single binary that plugs into the hook systems of Claude Code, C
 - **Bounded I/O**: stdin is capped at 4 MiB and oversized or invalid-UTF-8 payloads fail closed instead of OOM-killing the process. Hook subprocess stdout/stderr is also drained without deadlock while retaining at most 4 MiB per stream, so a noisy formatter/linter cannot exhaust memory before agent-facing truncation
 - **Fail-Closed Gates**: Command blocking denies on parse errors, unreadable input, or a broken config. A typo in `config.toml` does not switch protection off: a config error returns the agent's own deny response (diagnostic on stderr, plus a `claw-hooks check` hint) rather than exiting `1` with empty stdout, which several agents read as "hook failed, ignore its decision". Only the pre-execution gates fail closed, though: on a stop event a "block" means "keep going", and on the events claw-hooks never inspects a deny would erase a user prompt or replace real tool output while buying no safety, so all of those allow instead. A payload too damaged to identify still blocks
 - **Project Config Merge**: Place `.claw-hooks.toml` in your project root to extend global settings per project. Project configs are treated as untrusted input (a repository your agent cloned can contain one), so they may only *strengthen* protection: enabling a guard and adding filters are honored, while disabling a guard, replacing global filters, and declaring stop/extension/command hooks are ignored with a warning
-- **Multi-Agent Support**: Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI
+- **Multi-Agent Support**: Works with Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI, and Devin
 
 ## Why claw-hooks?
 
@@ -89,7 +89,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 }
 ```
 
-A naive `grep -E '^rm '` filter misses `sudo rm`, `cd /tmp && rm`, `bash -lc 'rm …'`, pipes, `xargs`, brace groups, process substitution, privilege wrappers (`pkexec` / `gosu` / `su <user> cmd`), and shell quote-removal forms (`r\m`, `$'r\x6d'`). claw-hooks resolves every one of those through tree-sitter-bash (with a string fallback parser of the same coverage) — one binary, no Python/jq dependency, identical behavior across Claude Code / Cursor / Windsurf / Antigravity / Codex / Grok. This also covers command-name line continuations (`r\` followed by a newline and `m`), `builtin command` / `builtin eval`, and `find -ok` / `-okdir`.
+A naive `grep -E '^rm '` filter misses `sudo rm`, `cd /tmp && rm`, `bash -lc 'rm …'`, pipes, `xargs`, brace groups, process substitution, privilege wrappers (`pkexec` / `gosu` / `su <user> cmd`), and shell quote-removal forms (`r\m`, `$'r\x6d'`). claw-hooks resolves every one of those through tree-sitter-bash (with a string fallback parser of the same coverage) — one binary, no Python/jq dependency, identical behavior across Claude Code / Cursor / Windsurf / Antigravity / Codex / Grok / Devin. This also covers command-name line continuations (`r\` followed by a newline and `m`), `builtin command` / `builtin eval`, and `find -ok` / `-okdir`.
 
 <details>
 <summary>What the equivalent native Python hook looks like</summary>
@@ -140,7 +140,7 @@ brew install owayo/claw-hooks/claw-hooks
 
 ### Cargo
 
-Requires Rust 1.99.0 or later.
+Requires Rust 1.99.1 or later.
 
 ```bash
 cargo install --git https://github.com/owayo/claw-hooks --locked
@@ -224,8 +224,11 @@ Register `claw-hooks hook` in each agent's hooks file. Agents other than Claude 
 | Antigravity CLI | `~/.gemini/config/hooks.json` / `<project>/.agents/hooks.json` | `claw-hooks hook --format agy --event <event>` |
 | Codex CLI | `~/.codex/hooks.json` | `claw-hooks hook --format codex` |
 | Grok CLI | `~/.grok/hooks/` / `<project>/.grok/hooks/` | `claw-hooks hook --format grok` |
+| Devin CLI / Devin Local | `~/.config/devin/config.json` / `.devin/hooks.v1.json` | `claw-hooks hook --format devin` |
 
 The hooks JSON for each agent, the events and matchers to register, and what each agent can receive back (for example, whether lint output reaches the agent): [docs/integrations.md](docs/integrations.md)
+
+Devin CLI / Devin Local uses `--format devin`; the legacy Windsurf Cascade integration keeps `--format windsurf`. See [integration details and payload limits](docs/integrations.md#devin-cli--devin-local).
 
 ## Configuration
 

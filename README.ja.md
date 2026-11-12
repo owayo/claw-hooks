@@ -56,7 +56,7 @@ claw-hooks は、Claude Code・Cursor・Windsurf・Antigravity CLI・Codex CLI�
 - **入出力サイズ上限**: stdin は 4 MiB 上限で、巨大ペイロードや不正 UTF-8 は OOM kill ではなくフェイルクローズドで停止。フック子プロセスの stdout/stderr もデッドロックを避けて最後まで排出しつつ各 4 MiB までしか保持しないため、大量出力する formatter/linter がエージェント向け切り詰め前にメモリを使い切ることを防止
 - **フェイルクローズドのゲート**: コマンドブロックはパースエラー、読み取り不能な入力、設定の破損時に拒否を返す。`config.toml` のタイポ 1 つで保護が無効になることは無い。設定エラーでは exit `1` + stdout 空で終了せず、エージェント固有の拒否応答を返し、診断は stderr へ、あわせて `claw-hooks check` を案内する（exit 1 + stdout 空は一部のエージェントで「フック失敗＝判定を無視」と解釈されるため）。ただしフェイルクローズドにするのは実行前ゲートだけ。Stop 系での「ブロック」は「停止せず継続」を意味し、claw-hooks が中身を検査しないイベントでの拒否はユーザーのプロンプトを消去したり実際のツール出力を置き換えたりするだけで安全性を上げないため、いずれも許可に倒す。イベントを特定できないほど壊れたペイロードはブロックする
 - **プロジェクト設定マージ**: プロジェクトルートに `.claw-hooks.toml` を配置してグローバル設定をプロジェクトごとに拡張。プロジェクト設定は未信頼の入力として扱われ（エージェントが clone したリポジトリにも置かれ得るため）、防御を**強める**方向のみ反映されます。ガードの有効化とフィルターの追加は反映され、ガードの無効化・グローバルフィルターの置換・stop/extension/command フックの宣言は警告付きで無視されます
-- **マルチエージェント対応**: Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLI、Grok CLIに対応
+- **マルチエージェント対応**: Claude Code、Cursor、Windsurf、Antigravity CLI、Codex CLI、Grok CLI、Devinに対応
 
 ## なぜ claw-hooks？
 
@@ -89,7 +89,7 @@ rm_block_message = "🚫 Use safe-rm instead"
 }
 ```
 
-素朴な `grep -E '^rm '` では `sudo rm`、`cd /tmp && rm`、`bash -lc 'rm …'`、パイプ、`xargs`、ブレースグループ、プロセス置換、特権昇格ラッパー（`pkexec` / `gosu` / `su <user> cmd`）、シェル quote-removal 形式（`r\m`、`$'r\x6d'`）を取りこぼします。claw-hooks は tree-sitter-bash（同等カバレッジの文字列フォールバックパーサーつき）でこれらすべてに対処します。単一バイナリ、Python/jq 依存なし、Claude Code / Cursor / Windsurf / Antigravity / Codex / Grok で同じ挙動になります。 コマンド名の行継続（`r\` の後に改行して `m` を続ける形式）、`builtin command` / `builtin eval`、`find -ok` / `-okdir` 経由の実行も検出します。
+素朴な `grep -E '^rm '` では `sudo rm`、`cd /tmp && rm`、`bash -lc 'rm …'`、パイプ、`xargs`、ブレースグループ、プロセス置換、特権昇格ラッパー（`pkexec` / `gosu` / `su <user> cmd`）、シェル quote-removal 形式（`r\m`、`$'r\x6d'`）を取りこぼします。claw-hooks は tree-sitter-bash（同等カバレッジの文字列フォールバックパーサーつき）でこれらすべてに対処します。単一バイナリ、Python/jq 依存なし、Claude Code / Cursor / Windsurf / Antigravity / Codex / Grok / Devin で同じ挙動になります。 コマンド名の行継続（`r\` の後に改行して `m` を続ける形式）、`builtin command` / `builtin eval`、`find -ok` / `-okdir` 経由の実行も検出します。
 
 <details>
 <summary>同等のネイティブ Python フックの例</summary>
@@ -140,7 +140,7 @@ brew install owayo/claw-hooks/claw-hooks
 
 ### Cargo
 
-Rust 1.99.0 以上が必要です。
+Rust 1.99.1 以上が必要です。
 
 ```bash
 cargo install --git https://github.com/owayo/claw-hooks --locked
@@ -200,7 +200,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 # Claude Codeフックを処理（デフォルト）
 claw-hooks hook
 
-# 他のエージェントは --format を指定（cursor、windsurf、agy、codex、grok）
+# 他のエージェントは --format を指定（cursor、windsurf、agy、codex、grok、devin）
 claw-hooks hook --format cursor
 
 # Antigravity CLI のペイロードにはイベント名が無いため --event も指定する
@@ -224,8 +224,11 @@ claw-hooks hook --config /path/to/config.toml
 | Antigravity CLI | `~/.gemini/config/hooks.json` / `<project>/.agents/hooks.json` | `claw-hooks hook --format agy --event <event>` |
 | Codex CLI | `~/.codex/hooks.json` | `claw-hooks hook --format codex` |
 | Grok CLI | `~/.grok/hooks/` / `<project>/.grok/hooks/` | `claw-hooks hook --format grok` |
+| Devin CLI / Devin Local | `~/.config/devin/config.json` / `.devin/hooks.v1.json` | `claw-hooks hook --format devin` |
 
 エージェントごとのフック設定の JSON、登録するイベントと matcher、エージェントへ返せるもの（lint の出力がエージェントに届くかなど）: [docs/integrations.ja.md](docs/integrations.ja.md)
+
+Devin CLI / Devin Local は `--format devin`、従来の Windsurf Cascade は `--format windsurf` を使います。[登録方法と入力形式の制約](docs/integrations.ja.md#devin-cli--devin-local)を参照してください。
 
 ## 設定
 

@@ -283,6 +283,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_pip_policy_keeps_uv_subcommand_allowed() {
+        let filters = [
+            CustomCommandFilter::new("pip install", "use uv".into()).unwrap(),
+            CustomCommandFilter::with_args("pip", vec!["install".into()], "use uv".into()).unwrap(),
+        ];
+        for filter in filters {
+            for command in [
+                "uv pip install pyyaml",
+                "uv venv --python 3.12 /tmp/tool-check-venv; uv pip install --python /tmp/tool-check-venv/bin/python ansible-core pyyaml",
+                "uv venv /tmp/test-venv && uv pip install pyyaml",
+                "echo 'pip install pyyaml'",
+            ] {
+                assert!(!filter.matches(command), "{command}");
+            }
+            for command in [
+                "pip install pyyaml",
+                "uv venv /tmp/test-venv; pip install pyyaml",
+            ] {
+                assert!(filter.matches(command), "{command}");
+            }
+        }
+
+        // 明示的な uv 用の拒否設定は、そのまま尊重する。
+        let explicit = CustomCommandFilter::new("uv pip install", "blocked".into()).unwrap();
+        assert!(explicit.matches("uv pip install pyyaml"));
+    }
+
+    #[test]
     fn test_maintenance_regex_explicit_anchor_alternation() {
         let filter = CustomCommandFilter::new("^npm install|yarn add", "blocked".into()).unwrap();
         assert!(filter.matches("yarn add package"));

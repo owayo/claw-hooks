@@ -102,6 +102,136 @@ fn test_allow_safe_command() {
 }
 
 #[test]
+fn test_devin_command_decisions() {
+    for event in ["PreToolUse", "PermissionRequest"] {
+        for (command, blocked) in [("rm -rf /tmp/demo", true), ("git status", false)] {
+            let input = serde_json::json!({"hook_event_name":event, "tool_name":"exec",
+                "tool_input":{"command":command}});
+            let (stdout, stderr, code) = run_hook_with_format(&input.to_string(), "devin");
+            assert_eq!(code, 0, "{stderr}");
+            let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            if blocked {
+                assert_eq!(output["decision"], "block");
+                assert!(output["reason"].as_str().is_some_and(|s| !s.is_empty()));
+            } else {
+                assert_eq!(output, serde_json::json!({}));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_claude_monitor_shell_command_cannot_bypass_filters() {
+    for (command, blocked) in [
+        ("rm -rf /tmp/demo", true),
+        ("kill -9 1234", true),
+        ("git status", false),
+    ] {
+        let input = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"Monitor",
+            "tool_input":{"command":command,"timeout_ms":300000}});
+        let (stdout, stderr, code) = run_hook(&input.to_string());
+        assert_eq!(code, 0, "{stderr}");
+        let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecision"] == "deny",
+            blocked,
+            "{stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_claude_monitor_websocket_and_post_use_pass_through() {
+    for input in [
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Monitor","tool_input":{"ws":{"url":"wss://example.com/events"}}}"#,
+        r#"{"hook_event_name":"PostToolUse","tool_name":"Monitor"}"#,
+    ] {
+        let (stdout, stderr, code) = run_hook(input);
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stdout.trim(), "{}");
+    }
+    let (stdout, stderr, code) =
+        run_hook(r#"{"hook_event_name":"PreToolUse","tool_name":"Monitor","tool_input":{}}"#);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(stderr.contains("command"));
+}
+
+#[test]
+fn test_devin_reported_stop_and_continuation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    // 起動失敗も報告対象にする。OS 固有のシェルや実行時間に依存しない。
+    std::fs::write(
+        &config,
+        "[[stop_hooks]]\ncommands = ['claw-hooks-test-missing-command']\nreport = true\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run_hook_with_config_and_format(
+        r#"{"hook_event_name":"Stop","stop_hook_active":false}"#,
+        "devin",
+        &config,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(output["decision"], "block");
+    let (stdout, stderr, code) = run_hook_with_config_and_format(
+        r#"{"hook_event_name":"Stop","stop_hook_active":true}"#,
+        "devin",
+        &config,
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "{}");
+}
+
+#[test]
+fn test_devin_errors_only_block_execution_gates() {
+    for event in [
+        "PreToolUse",
+        "PermissionRequest",
+        "Stop",
+        "SessionStart",
+        "PostToolUse",
+    ] {
+        let input = format!("{{\"hook_event_name\":\"{event}\",\"truncated");
+        let (stdout, _, code) = run_hook_with_format(&input, "devin");
+        if matches!(event, "PreToolUse" | "PermissionRequest") {
+            assert_eq!(code, 2);
+            assert!(stdout.contains("\"decision\":\"block\""));
+        } else {
+            assert_eq!(code, 0);
+            assert_eq!(stdout.trim(), "{}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_devin_post_edit_returns_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    let file = dir.path().join("demo.txt");
+    std::fs::write(&file, "demo").unwrap();
+    std::fs::write(
+        &config,
+        "[extension_hooks]\n'.txt' = ['printf formatted {file}']\n",
+    )
+    .unwrap();
+    let input = serde_json::json!({"hook_event_name":"PostToolUse", "tool_name":"edit",
+        "tool_input":{"path":file}});
+    let (stdout, stderr, code) =
+        run_hook_with_config_and_format(&input.to_string(), "devin", &config);
+    assert_eq!(code, 0, "{stderr}");
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("formatted")
+    );
+}
+
+#[test]
 fn test_block_kill_command() {
     let input = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"kill -9 1234"}}"#;
     let (stdout, _stderr, exit_code) = run_hook(input);

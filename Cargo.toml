@@ -4,9 +4,9 @@ version = "26.10.103"
 edition = "2024"
 # mise.toml で固定した toolchain と同じ値にする (tests/toolchain_sync.rs で検証)。
 # CI はこの版だけでビルド・テストするので、それより古い版への対応は宣言しない。
-rust-version = "1.99.0"
+rust-version = "1.99.1"
 authors = ["owayo"]
-description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, and Grok CLI"
+description = "AI coding agent hook system for Claude Code, Cursor, Windsurf, Antigravity CLI, Codex CLI, Grok CLI, and Devin"
 license = "MIT"
 repository = "https://github.com/owayo/claw-hooks"
 keywords = ["cli", "hooks", "ai", "claude-code", "cursor"]
@@ -15,8 +15,8 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-toml = "1.1.7"
+serde_json = "1.0.154"
+toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 chrono = "0.4.45"
@@ -28,7 +28,7 @@ anyhow = "1.0.104"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 
 [dependencies.tree-sitter]
-version = "0.27.0"
+version = "0.27.1"
 optional = true
 
 [dependencies.tree-sitter-bash]
@@ -42,7 +42,7 @@ ast-parser = ["tree-sitter", "tree-sitter-bash"]
 # Unix では timeout 時にプロセスグループ全体を SIGKILL するため libc を使う。
 # Windows では同等の Job Object 実装は未対応のため、libc 依存は不要。
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.190"
+libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = "3.27.0"

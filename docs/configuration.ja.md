@@ -434,6 +434,8 @@ macOS で `nano_buddy = true` にしている場合は、NanoBuddy も結果を�
 - **Windsurf と Grok CLI** は Stop フックを事後フックとして実行するため、失敗はエージェントに返りません。実行しなかったステージは、検査が通る次の停止で動きます。それまでのあいだ、どのステージを実行しなかったかはデバッグログに残ります。
 - **Antigravity CLI** は失敗を `"decision":"continue"` で返し、その次の停止は新しい初回の停止として届くので、全ステージをもう一度実行します。Antigravity ではループと新しい停止を claw-hooks が見分けられないため、`report = true` のフックには自前の終了条件を持たせてください（[エージェント統合](integrations.ja.md#antigravity-cli) を参照）。
 
+Devin では `stop_hook_active` が true の停止をスキップします。通知だけを返す Stop 出力が未確認のため再試行は予定せず、未実行のステージは次の通常の停止まで待ちます。
+
 ## Stopフックの環境変数
 
 claw-hooksはStopフックの子プロセスに以下の環境変数を渡します:
@@ -507,7 +509,9 @@ echo "not yarn install"; pnpm install
 # → {}
 ```
 
-クォート内のコマンドは無視されます（引数であり、コマンドではないため）。
+単独の pip を拒否し、`uv pip install` を許可するには、上の `pip3?` の args モードを使います。`uv venv /tmp/demo; uv pip install pyyaml` も許可されます。別途 `command = "uv pip install"` を指定すると uv 自身を拒否するため、uv を代替手段にする場合はそのルールを外してください。フィルター同士で許可の例外を上書きする仕組みはありません。`python -m pip` も拒否する場合は上の Python 用ルールを追加します。`uv run` を先頭に付けた呼び出しも拒否する方針なら、それに一致するパターンを明示してください。
+
+通常のコマンドへ渡す引用内の文字列（`echo "pip install"`）は引数として扱います。`bash -c` など再評価するコマンドへ渡すスクリプトは検査します。
 
 ## コマンドフック
 

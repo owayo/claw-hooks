@@ -35,6 +35,8 @@ Add to `~/.claude/settings.json` (user) or `.claude/settings.json` (project):
 
 Use `PostToolUse` for post-edit formatters. Claude Code also offers the filesystem-watcher event `FileChanged`, which claw-hooks passes through: a formatter rewrite can trigger that event again, and a generic formatter need not be idempotent. Do not register extension hooks under `FileChanged`.
 
+The `Bash|PowerShell` matcher also covers Monitor shell commands on Claude Code v2.1.314+. With a broad matcher such as `.*` or one naming `Monitor`, claw-hooks reads Monitor’s `command` through the same filters; WebSocket-only `ws` watches pass through. See [Monitor matching](https://code.claude.com/docs/en/hooks#match-monitor-commands).
+
 ## Cursor
 
 Add to `<project>/.cursor/hooks.json` (project) or `~/.cursor/hooks.json` (user):
@@ -182,6 +184,24 @@ Add to `~/.codex/hooks.json` (user):
 ```
 
 Codex hooks are enabled by default. If you explicitly configure feature flags, use the current `[features] hooks` key; the older `codex_hooks` alias is deprecated.
+
+## Devin CLI / Devin Local
+
+Use `--format devin`, separate from legacy Windsurf Cascade. Put this object in `.devin/hooks.v1.json`; in `~/.config/devin/config.json`, nest it under `"hooks"`:
+
+```json
+{
+  "PreToolUse": [{"matcher": "^exec$", "hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}],
+  "PostToolUse": [{"matcher": "^(write|edit|notebook_edit|apply_patch)$", "hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}],
+  "Stop": [{"hooks": [{"type": "command", "command": "claw-hooks hook --format devin"}]}]
+}
+```
+
+`PermissionRequest` can also use the `^exec$` entry. Non-blocking calls return `{}`; rejected calls and failed reported Stop hooks return `decision: "block"` with `reason`. Post-edit output uses `hookSpecificOutput.additionalContext`. Continuing stops (`stop_hook_active: true`) skip hooks, with no automatic retry.
+
+File edits accept `file_path`, `path`, or `notebook_path`; patches accept `patch` or `command`. The official reference names the tools without a complete argument schema: these shapes have automated coverage, but live CLI/Local integration is unverified. `write_to_process` input forwarding is outside this adapter's coverage; interactive shell sessions are not a complete enforcement boundary.
+
+Sources: [Hooks](https://docs.devin.ai/cli/extensibility/hooks/overview), [Lifecycle Hooks](https://docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks).
 
 ## Grok CLI
 

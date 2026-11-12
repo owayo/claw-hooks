@@ -15,7 +15,7 @@ claw-hooks reads one hook event from stdin and answers in the calling agent's na
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI) |
+| `--format` | `-f` | Input format: `claude` (default), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI), `devin` (Devin CLI / Devin Local) |
 | `--event` | `-e` | Hook event name (e.g. `PostToolUse`). For Antigravity CLI, whose payloads carry no event-name field and whose `PreToolUse` / `PostToolUse` are shape-identical. Omit for other agents |
 | `--config` | `-c` | Path to configuration file |
 | `--trace` | `-t` | Trace mode: write the raw input, parsed input, and output to stderr (not persisted to disk) |
@@ -201,6 +201,10 @@ claw-hooks dispatches on the **shape of `toolInput`, not on `toolName`**. Grok s
 
 Grok's contract is fail-open: exit `0` allows, exit `2` denies, and every other outcome — timeout, crash, malformed stdout — records a failure but lets the tool call proceed. claw-hooks therefore blocks with the deny JSON **and** exit code `2` so the decision holds under either interpretation, and never exits `1` on a fail-closed path. Allowed commands return `{}` rather than an `allow` decision, since `deny` is the only documented `decision` value.
 
+### Devin (`--format devin`)
+
+Reads `hook_event_name`. `PreToolUse` / `PermissionRequest` inspect `exec`'s `tool_input.command`; `PostToolUse` reads edited-file paths or patch text; `Stop` requires boolean `stop_hook_active`. Unrelated events and tools pass through. Only execution-gate parse failures return block JSON + exit 2; Stop/post-edit errors return `{}` + exit 0. Normal decisions use exit 0, `{}` for allow, and top-level `decision: "block"` / `reason` for rejection. See [integration and argument coverage](integrations.md#devin-cli--devin-local).
+
 ### Event Mapping Summary
 
 ```mermaid
@@ -212,6 +216,7 @@ graph LR
         AG1[Antigravity: PreToolUse + run_command]
         CX1[Codex: PreToolUse + Bash]
         GR1[Grok: PreToolUse + command]
+        DV1[Devin: PreToolUse + exec]
     end
     CH1[🛡️ Validate & suggest alternatives]
     CC1 --> CH1
@@ -220,6 +225,7 @@ graph LR
     AG1 --> CH1
     CX1 --> CH1
     GR1 --> CH1
+    DV1 --> CH1
 
     subgraph After File Save
         CC2[Claude: PostToolUse + Write/Edit]
@@ -228,6 +234,7 @@ graph LR
         AG2[Antigravity: PostToolUse + TargetFile]
         CX2[Codex: PostToolUse + apply_patch]
         GR2[Grok: PostToolUse + file path]
+        DV2[Devin: PostToolUse + edit / write / apply_patch]
     end
     CH2["🔧 Run commands by extension<br>then the * key (all files)"]
     CC2 --> CH2
@@ -236,6 +243,7 @@ graph LR
     AG2 --> CH2
     CX2 --> CH2
     GR2 --> CH2
+    DV2 --> CH2
 
     subgraph Agent Stop
         CC3[Claude: Stop]
@@ -244,6 +252,7 @@ graph LR
         AG3[Antigravity: Stop]
         CX3[Codex: Stop]
         GR3[Grok: Stop]
+        DV3[Devin: Stop]
     end
     CH3[⏹️ Lint / notifications / cleanup]
     CC3 --> CH3
@@ -252,6 +261,7 @@ graph LR
     AG3 --> CH3
     CX3 --> CH3
     GR3 --> CH3
+    DV3 --> CH3
 ```
 
 Codex `PostToolUse` with `Bash` is omitted from the "After File Save" flow because it is command-output feedback. Only `apply_patch` payloads are treated as file-write events. Antigravity CLI joins the "After File Save" flow only when its hook entry passes `--event PostToolUse`; claw-hooks recovers the edited path from `toolCall.args.TargetFile`. Its output remains fixed at `{}`, so use Stop hooks when the lint text itself must reach the agent. Grok CLI appears in all three groups, but only its `PreToolUse` can block; the other two are post-hooks whose output Grok ignores, so their work is real but their feedback is not.
@@ -276,6 +286,8 @@ Stdin: the agent's native hook JSON (see [Format Detection Logic](#format-detect
 | Codex CLI | any | `{}` or `…additionalContext:"…"`; on Stop, `{"systemMessage":"…"}` as on Claude Code | PreToolUse: `…permissionDecision:"deny",…`. PermissionRequest: `…decision:{behavior:"deny",message:"…"}`. PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **and** exit 2 |
 | Grok CLI | PostToolUse / Stop / other events | `{}` | `{}` (post-hook stdout is ignored; cannot block) |
+| Devin | PreToolUse / PermissionRequest / Stop | `{}` | `{"decision":"block","reason":"…"}` |
+| Devin | PostToolUse | `{}` or `…additionalContext:"…"` | `{"decision":"block","reason":"…"}` |
 
 `additionalContext` carries lint feedback to Claude `PostToolUse` and Codex `PostToolUse`, and command hook context to Claude `PreToolUse` and Codex `PreToolUse`. Windsurf has no such field, so `post_write_code` findings go out as exit 2 + stderr. Antigravity has no `additionalContext` channel — emit lint feedback via Stop `"decision":"continue"` instead. Grok CLI has no channel at all for post-hooks: the tools run, but their output stays out of the transcript.
 
@@ -295,6 +307,7 @@ A *continuing* stop is one that follows a Stop hook's block: the agent was kept 
 | Windsurf | Not signalled | No | — |
 | Antigravity CLI | Not signalled | No | — |
 | Grok CLI | Not signalled | No | — |
+| Devin | `stop_hook_active: true` | No | — |
 
 A retry is scheduled only for the main session. Before any of this, the environment variable `CLAW_HOOKS_STOP_ACTIVE`, which claw-hooks sets for its own stop hook processes, still makes every stop hook skip, so a stop hook that drives an agent cannot start another round of stop hooks, retry or not.
 
@@ -308,6 +321,7 @@ A retry is scheduled only for the main session. Before any of this, the environm
 | Antigravity CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny JSON |
 | Codex CLI | `0` (decision in stdout JSON) | `0` (decision in stdout JSON) | `0` + event-specific deny/block JSON (non-zero is treated as hook infra failure and discarded) |
 | Grok CLI | `0` | `2` + deny JSON in stdout (PreToolUse only; other events return `0`) | `2` (never `1` — Grok treats anything other than `2` as fail-open) |
+| Devin | `0` | `0` (block JSON) | `2` + block JSON |
 
 The "fail-closed parse error" column applies to the pre-execution gates only. Every other event — stop events, post-edit hooks, and the lifecycle events claw-hooks passes through — returns a neutral `{}` + exit `0` instead of the deny shown above. See below.
 

@@ -434,6 +434,8 @@ The gate works the same way on every agent: a failing gating hook keeps the late
 - **Windsurf and Grok CLI** run stop hooks as post-hooks, so the failure is not returned to the agent. The stages that were not run start at the next stop where the checks pass; until then, the debug log records which stages were skipped.
 - **Antigravity CLI** returns the failure with `"decision":"continue"`, and the following stop arrives as a new first stop, which runs every stage again. Give reported hooks an exit condition of their own there: claw-hooks cannot tell a loop from a new stop on Antigravity (see [Agent Integration](integrations.md#antigravity-cli)).
 
+Devin uses `stop_hook_active` to skip a continuing stop, but does not schedule a retry: a notice-only Stop output is not verified. Later stages therefore wait for the next normal stop.
+
 ## Stop Hook Environment Variables
 
 claw-hooks passes the following environment variables to stop hook child processes:
@@ -507,7 +509,9 @@ echo "not yarn install"; pnpm install
 # → {}
 ```
 
-Commands inside quotes are ignored (they're arguments, not commands).
+To reject standalone pip while allowing `uv pip install`, use the `pip3?` args-mode rule above. It also allows `uv venv /tmp/demo; uv pip install pyyaml`. A separate `command = "uv pip install"` rule explicitly rejects uv, so remove that rule if uv is the intended alternative. Filters do not override one another to grant exceptions. To reject `python -m pip`, add the Python rule above; commands prefixed by `uv run` need their own explicit pattern if that is your policy.
+
+Quoted text passed to ordinary commands (`echo "pip install"`) stays an argument. Scripts passed to re-evaluating commands such as `bash -c` are inspected.
 
 ## Command Hooks
 

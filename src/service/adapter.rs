@@ -19,6 +19,9 @@ use crate::domain::{
 use crate::service::log_sanitizer::summarize_hook_input;
 use crate::service::teammate_probe::{TeamEvidence, TeammateProbe};
 
+#[path = "devin.rs"]
+mod devin;
+
 /// 壊れた JSON からイベント名を走査する際に読む先頭バイト数。
 ///
 /// 各エージェントはイベント名を識別子としてペイロード先頭付近に置くため、
@@ -233,6 +236,8 @@ impl FormatAdapter {
             Format::Windsurf => ("windsurf", false, false),
             Format::Agy => ("antigravity", false, false),
             Format::Grok => ("grok", false, false),
+            // 実行前の判定なしコンテキストと Stop の通知専用出力は仕様未確認。
+            Format::Devin => ("devin", false, false),
         };
         AgentProfile {
             id,
@@ -255,6 +260,7 @@ impl FormatAdapter {
             Format::Agy => self.parse_agy_input(input),
             Format::Codex => self.parse_codex_input(input),
             Format::Grok => self.parse_grok_input(input),
+            Format::Devin => self.parse_devin_input(input),
         }
     }
 
@@ -268,6 +274,7 @@ impl FormatAdapter {
             Format::Agy => self.format_agy_output(decision, event),
             Format::Codex => self.format_codex_output(decision, event),
             Format::Grok => self.format_grok_output(decision, event),
+            Format::Devin => self.format_devin_output(decision, event),
         }
     }
 
@@ -281,7 +288,7 @@ impl FormatAdapter {
     /// - Grok CLI: 0 = 許可, 2 = 拒否（PreToolUse のみ。それ以外の終了コードはフェイルオープン）
     pub fn exit_code(&self, decision: &Decision, event: HookEvent) -> i32 {
         match self.format {
-            Format::Claude => {
+            Format::Claude | Format::Devin => {
                 // Claude Code: 通常の判定は stdout の JSON + exit 0 で返す。
                 // 公式仕様上、Claude はすべての終了コードで有効な stdout JSON を読むが、
                 // exit 2 のブロックだけは JSON で上書きできない。判定を JSON で表す
@@ -413,8 +420,8 @@ impl FormatAdapter {
                 })
                 .to_string()
             }
-            Format::Codex => {
-                // Codex CLI は "reason" フィールドでブロック理由を受け取る
+            Format::Codex | Format::Devin => {
+                // Codex / Devin の汎用拒否はトップレベルの block / reason。
                 serde_json::json!({
                     "decision": "block",
                     "reason": error_message
@@ -469,6 +476,10 @@ impl FormatAdapter {
     /// 切り詰めや過大入力で名前が読めない PreToolUse は、従来どおりブロックされる。
     fn blocks_would_loop_or_be_ignored(&self, input: &str) -> bool {
         match self.format {
+            Format::Devin => match Self::raw_hook_event_name(input).as_deref() {
+                Some("PreToolUse" | "PermissionRequest") | None => false,
+                Some(_) => true,
+            },
             Format::Claude => match Self::raw_hook_event_name(input).as_deref() {
                 // 実行前ゲートは PreToolUse だけ。
                 Some("PreToolUse") => false,
@@ -825,7 +836,33 @@ impl FormatAdapter {
         if event == HookEvent::SubagentStart || event == HookEvent::SubagentStop {
             return Ok(self.parse_claude_subagent(&raw, event, claude_input));
         }
+        if claude_input.tool_name.as_deref() == Some("Monitor") {
+            return self.parse_claude_monitor(event, claude_input);
+        }
         self.parse_claude_tool(event, claude_input)
+    }
+
+    /// Monitor のシェル実行だけを Bash と同じ判定へ渡す。
+    ///
+    /// 広い matcher では Bash の互換入力ではなく Monitor 自身の入力が届く。
+    /// WebSocket 監視（command の代わりに ws を持つ）はシェル実行ではない。
+    fn parse_claude_monitor(&self, event: HookEvent, mut input: ClaudeInput) -> Result<HookInput> {
+        let args = input.tool_input.as_ref();
+        let websocket_only =
+            args.is_some_and(|args| args.get("command").is_none() && args.get("ws").is_some());
+        if event != HookEvent::BeforeCommand || websocket_only {
+            return Ok(HookInput {
+                event,
+                tool_name: "Monitor".into(),
+                tool_input: crate::domain::ToolInput::Other(
+                    input.tool_input.unwrap_or(serde_json::Value::Null),
+                ),
+                session_id: input.session_id,
+            });
+        }
+        // command の欠落・空文字・型違いも Bash と同じくフェイルクローズドにする。
+        input.tool_name = Some("Bash".into());
+        self.parse_claude_tool(event, input)
     }
 
     /// Claude の Stop イベントを内部 Stop HookInput に変換する（tool_name/tool_input は持たない）。
@@ -7298,13 +7335,14 @@ mod tests {
 
     // === command hooks: エージェントの性質・実行前フックの補足・作業ディレクトリ ===
 
-    const ALL_FORMATS: [Format; 6] = [
+    const ALL_FORMATS: [Format; 7] = [
         Format::Claude,
         Format::Codex,
         Format::Cursor,
         Format::Windsurf,
         Format::Agy,
         Format::Grok,
+        Format::Devin,
     ];
 
     #[test]
@@ -7316,6 +7354,7 @@ mod tests {
             (Format::Windsurf, "windsurf", false, false),
             (Format::Agy, "antigravity", false, false),
             (Format::Grok, "grok", false, false),
+            (Format::Devin, "devin", false, false),
         ];
         for (format, id, pre_command_context, stop_retry) in cases {
             assert_eq!(

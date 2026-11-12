@@ -15,7 +15,7 @@ claw-hooks は stdin からフックイベントを 1 件読み、呼び出し�
 
 | オプション | 短縮形 | 説明 |
 |-----------|--------|------|
-| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI) |
+| `--format` | `-f` | 入力形式: `claude` (デフォルト), `cursor`, `windsurf`, `agy` (Antigravity CLI), `codex`, `grok` (Grok CLI), `devin` (Devin CLI / Devin Local) |
 | `--event` | `-e` | フックイベント名（例: `PostToolUse`）。ペイロードにイベント名フィールドが無く `PreToolUse` / `PostToolUse` の形状が同一な Antigravity CLI 用。他エージェントでは不要 |
 | `--config` | `-c` | 設定ファイルのパス |
 | `--trace` | `-t` | トレースモード: 生の入力・パース結果・出力を stderr に出力（ディスクには保存しない） |
@@ -201,6 +201,10 @@ claw-hooks は **`toolName` ではなく `toolInput` の形**で処理を振り�
 
 Grok の契約はフェイルオープンです: exit `0` は許可、exit `2` は拒否、それ以外の結末（タイムアウト・クラッシュ・不正な stdout）は失敗として記録されるだけでツール呼び出しは続行されます。そのため claw-hooks はブロック時に deny JSON **と** exit code `2` の両方を返してどちらの解釈でも判定が成立するようにし、フェイルクローズド経路でも exit `1` は使いません。許可時は `allow` 判定ではなく `{}` を返します（公式に文書化された `decision` の値は `deny` のみのため）。
 
+### Devin (`--format devin`)
+
+`hook_event_name` でイベントを識別します。`PreToolUse` / `PermissionRequest` では `exec` の `tool_input.command` を検査し、`PostToolUse` では編集パスまたは patch 本文を読みます。`Stop` は真偽値の `stop_hook_active` が必須です。管轄外のイベントとツールはパススルーします。実行前ゲートの解析失敗は block JSON + exit 2、Stop と保存後フックの解析失敗は `{}` + exit 0 です。通常の判定は exit 0 で、許可は `{}`、拒否はトップレベルの `decision: "block"` / `reason` を返します。[登録方法と引数の対応範囲](integrations.ja.md#devin-cli--devin-local)も参照してください。
+
 ### イベントマッピング
 
 ```mermaid
@@ -212,6 +216,7 @@ graph LR
         AG1[Antigravity: PreToolUse + run_command]
         CX1[Codex: PreToolUse + Bash]
         GR1[Grok: PreToolUse + command]
+        DV1[Devin: PreToolUse + exec]
     end
     CH1[🛡️ 検証・代替ツール提案]
     CC1 --> CH1
@@ -220,6 +225,7 @@ graph LR
     AG1 --> CH1
     CX1 --> CH1
     GR1 --> CH1
+    DV1 --> CH1
 
     subgraph ファイル保存後
         CC2[Claude: PostToolUse + Write/Edit]
@@ -228,6 +234,7 @@ graph LR
         AG2[Antigravity: PostToolUse + TargetFile]
         CX2[Codex: PostToolUse + apply_patch]
         GR2[Grok: PostToolUse + file path]
+        DV2[Devin: PostToolUse + edit / write / apply_patch]
     end
     CH2["🔧 拡張子ごとのコマンド実行<br>その後に * のコマンド（全ファイル）"]
     CC2 --> CH2
@@ -236,6 +243,7 @@ graph LR
     AG2 --> CH2
     CX2 --> CH2
     GR2 --> CH2
+    DV2 --> CH2
 
     subgraph エージェント終了
         CC3[Claude: Stop]
@@ -244,6 +252,7 @@ graph LR
         AG3[Antigravity: Stop]
         CX3[Codex: Stop]
         GR3[Grok: Stop]
+        DV3[Devin: Stop]
     end
     CH3[⏹️ Lint / 通知 / クリーンアップ]
     CC3 --> CH3
@@ -252,6 +261,7 @@ graph LR
     AG3 --> CH3
     CX3 --> CH3
     GR3 --> CH3
+    DV3 --> CH3
 ```
 
 Codex の `PostToolUse` + `Bash` はコマンド出力フィードバックのため、「ファイル保存後」フローには含めません。ファイル書き込みイベントとして扱うのは `apply_patch` のみです。Antigravity CLI は `--event PostToolUse` を指定した hook エントリでのみ「ファイル保存後」グループに入ります（`toolCall.args.TargetFile` から編集対象を復元）。ただし出力は `{}` 固定で診断を返せないため、lint の本文が必要な場合は Stop hooks でプロジェクト全体の lint/typecheck を回してください。Grok CLI は 3 つのグループすべてに登場しますが、ブロックできるのは `PreToolUse` だけです。残り 2 つは Grok が出力を無視する事後フックのため、処理自体は実行されてもフィードバックは返りません。
@@ -276,6 +286,8 @@ Stdin はエージェント固有のフック JSON（イベント別のペイロ
 | Codex CLI | 任意 | `{}` または `…additionalContext:"…"`。Stop では Claude Code と同じく `{"systemMessage":"…"}` もある | PreToolUse: `…permissionDecision:"deny",…`。PermissionRequest: `…decision:{behavior:"deny",message:"…"}`。PostToolUse / Stop: `{"decision":"block","reason":"…"}` |
 | Grok CLI | PreToolUse | `{}` | `{"decision":"deny","reason":"…"}` **と** exit 2 |
 | Grok CLI | PostToolUse / Stop / その他のイベント | `{}` | `{}`（事後フックの stdout は無視されるためブロック不可） |
+| Devin | PreToolUse / PermissionRequest / Stop | `{}` | `{"decision":"block","reason":"…"}` |
+| Devin | PostToolUse | `{}` または `…additionalContext:"…"` | `{"decision":"block","reason":"…"}` |
 
 `additionalContext` は、Claude と Codex の `PostToolUse` には lint フィードバックを、Claude と Codex の `PreToolUse` にはコマンドフックの補足を送るチャネルです。Antigravity には `additionalContext` チャネルが無いため、Stop の `"decision":"continue"` で lint フィードバックを送ります。Grok CLI の事後フックには送る手段自体が無く、ツールは実行されても出力はトランスクリプトに残りません。
 
@@ -295,6 +307,7 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 | Windsurf | 知らせてこない | しない | — |
 | Antigravity CLI | 知らせてこない | しない | — |
 | Grok CLI | 知らせてこない | しない | — |
+| Devin | `stop_hook_active: true` | しない | — |
 
 再試行を予定するのはメインセッションだけです。また、これらより先に、claw-hooks が自分の Stop フックのプロセスに設定する環境変数 `CLAW_HOOKS_STOP_ACTIVE` を見て、設定されていれば Stop フックをすべてスキップします。エージェントを動かす Stop フックがあっても、再試行かどうかにかかわらず、Stop フックがもう一巡することはありません。
 
@@ -308,6 +321,7 @@ claw-hooks は Claude Code / Cursor / Grok CLI に対して `allow` 判定を返
 | Antigravity CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有の deny JSON |
 | Codex CLI | `0`（stdout JSON で判定） | `0`（stdout JSON で判定） | `0` + イベント固有の deny/block JSON（非ゼロはフックインフラ失敗扱いで判定が無視される） |
 | Grok CLI | `0` | `2` + stdout の deny JSON（PreToolUse のみ。他のイベントは `0`） | `2`（`1` は使わない — Grok は `2` 以外をすべてフェイルオープン扱いにするため） |
+| Devin | `0` | `0` (block JSON) | `2` + block JSON |
 
 「フェイルクローズドのパースエラー」列が当てはまるのは実行前ゲートだけです。それ以外のイベント（Stop 系、保存後フック、claw-hooks がパススルーするライフサイクル系）は、上記の拒否ではなく中立の `{}` + exit `0` を返します（次節を参照）。
 
